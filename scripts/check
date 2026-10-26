@@ -1,0 +1,121 @@
+#!/bin/sh
+# Unit 1 check: lint, tests, public hygiene, ignore coverage, hook identity.
+# Exits non-zero on any failure. Never installs or edits anything.
+set -u
+top=$(git rev-parse --show-toplevel) || exit 1
+cd "$top" || exit 1
+fail=0
+say() { printf '%s\n' "$*"; }
+bad() { say "CHECK FAIL: $*"; fail=1; }
+
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
+
+# 1. Lint and tests (key unset, no network).
+if [ ! -x .venv/bin/python ]; then
+  bad "project venv missing (.venv/bin/python)"
+else
+  .venv/bin/ruff check listing_partner tests || bad "ruff check failed"
+  .venv/bin/ruff format --check listing_partner tests > /dev/null 2>&1 || bad "ruff format check failed"
+  env -u META_API_KEY .venv/bin/python -m pytest tests -q || bad "pytest failed"
+fi
+
+# 2. Hygiene scan of every tracked file and file name.
+tracked=$(git ls-files)
+if [ -z "$tracked" ]; then
+  bad "no tracked files"
+else
+  echo "$tracked" | grep -E '(^|/)\.env($|/)|\.pem$|\.key$' && bad ".env/key files tracked"
+  # Key/token/email/phone patterns in tracked text files.
+  if grep -rInE -i '(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|LLM_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{16}|xox[bap]-)' \
+      --include='*' $tracked 2>/dev/null | grep -v '^Binary' ; then
+    bad "possible secret pattern in tracked files"
+  fi
+  if grep -rInE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+      --include='*.py' --include='*.sh' --include='*.md' --include='*.toml' --include='*.html' \
+      $tracked 2>/dev/null | grep -viE 'users\.noreply\.github\.com|example\.com|@media|@2x|@3x' ; then
+    bad "possible email address in tracked files"
+  fi
+  if grep -rInE '(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}' \
+      --include='*.py' --include='*.sh' --include='*.md' --include='*.toml' \
+      $tracked 2>/dev/null ; then
+    bad "possible phone number in tracked files"
+  fi
+  # Banned strings (street address and friends): fail if the list is missing.
+  if [ ! -s local/banned-strings.txt ]; then
+    bad "local/banned-strings.txt is missing or empty"
+  else
+    banned_hit=0
+    while IFS= read -r pat; do
+      case "$pat" in ''|\#*) continue ;; esac
+      if printf '%s\n' "$tracked" | grep -i -F -q -- "$pat"; then
+        say "banned string in tracked file name: [$pat]"; banned_hit=1
+      fi
+      if grep -rIl -F -i -- "$pat" $tracked 2>/dev/null | grep -q .; then
+        say "banned string in tracked file text: [$pat]"; banned_hit=1
+      fi
+    done < local/banned-strings.txt
+    [ "$banned_hit" = 1 ] && bad "banned strings found"
+  fi
+  # Tracked image files must carry no GPS and no camera serial.
+  if [ -x .venv/bin/python ]; then
+    # shellcheck disable=SC2086
+    if ! env -u META_API_KEY .venv/bin/python - $tracked <<'PYEOF'
+import sys
+from pathlib import Path
+from PIL import Image, ExifTags
+bad = []
+for name in sys.argv[1:]:
+    p = Path(name)
+    if not p.is_file() or p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".tiff", ".dng"):
+        continue
+    try:
+        exif = Image.open(p).getexif()
+    except Exception:
+        continue
+    names = {ExifTags.TAGS.get(k, k) for k in exif}
+    if "GPSInfo" in names or 34853 in exif:
+        bad.append(f"{name}: GPS block")
+    for serial in ("BodySerialNumber", "CameraSerialNumber", "SerialNumber"):
+        if serial in names:
+            bad.append(f"{name}: {serial}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PYEOF
+    then
+      bad "tracked images carry GPS or serial metadata"
+    fi
+  fi
+  # No tracked file may sit under a gitignored path.
+  ignored_tracked=""
+  for f in $tracked; do
+    if git check-ignore -q "$f" 2>/dev/null; then
+      say "tracked but gitignored: $f"; ignored_tracked=1
+    fi
+  done
+  [ -n "$ignored_tracked" ] && bad "tracked files under gitignored paths"
+fi
+
+# 3. .gitignore must still cover the local-only paths.
+for d in inputs output outputs .spend .navigator local .muse facts; do
+  if ! git check-ignore -q "$d/keep" 2>/dev/null; then
+    bad ".gitignore no longer covers $d/"
+  fi
+done
+
+# 4. Every hook in scripts/git-hooks/ must be installed and identical.
+for hook in scripts/git-hooks/*; do
+  base=$(basename "$hook")
+  if [ ! -f ".git/hooks/$base" ]; then
+    bad "hook not installed: $base"
+  elif ! cmp -s "$hook" ".git/hooks/$base"; then
+    bad "hook differs from source: $base"
+  fi
+done
+
+if [ "$fail" = 0 ]; then
+  say "CHECK OK"
+else
+  say "CHECK FAILED"
+fi
+exit "$fail"
