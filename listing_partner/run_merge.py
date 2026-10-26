@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 from listing_partner import hdr
-from listing_partner.meta_client import SPEND_CAP_USD, read_spend_total
+from listing_partner.meta_client import SPEND_CAP_USD, MetaRefused, read_spend_total
 
 
 def dhash(gray: np.ndarray) -> int:
@@ -41,14 +41,23 @@ def gray_thumb(path: Path, size: int = 256) -> np.ndarray:
 
 
 def render_lightroom(dng: Path, out: Path) -> str:
-    """Render a Lightroom DNG in full; embedded preview fallback. Returns label."""
+    """Render a Lightroom DNG in full, else its largest embedded preview.
+
+    Returns "full render", "preview only", or "preview unavailable". Never
+    raises: the review page must survive one bad DNG.
+    """
     try:
         hdr.save_clean_jpeg(hdr.render_linear_dng(dng), out)
         return "full render"
     except Exception:
-        preview = np.asarray(Image.open(dng).convert("RGB"))
-        hdr.save_clean_jpeg(preview, out)
+        pass
+    try:
+        hdr.save_clean_jpeg(hdr.extract_preview(dng), out)
         return "preview only"
+    except Exception:
+        placeholder = np.zeros((256, 256, 3), dtype=np.uint8) + 114
+        hdr.save_clean_jpeg(placeholder, out)
+        return "preview unavailable"
 
 
 def match_mls(sets: list[list[Path]], mls_dir: Path, merged_dir: Path) -> dict:
@@ -80,9 +89,11 @@ def match_mls(sets: list[list[Path]], mls_dir: Path, merged_dir: Path) -> dict:
             taken.add(hits[0])
         else:
             pending.append(photo)
-    # Visual matching for the rest (usually just the timeless photo).
+    # Visual matching for the rest (usually just the timeless photo). Keyed
+    # by set number from the file name, so a failed set (no merged file)
+    # cannot shift later sets' numbers.
     merged = sorted(merged_dir.glob("*.jpg"))
-    hashes = {i: dhash(gray_thumb(m)) for i, m in enumerate(merged)}
+    hashes = {int(m.stem) - 1: dhash(gray_thumb(m)) for m in merged}
     for photo in pending:
         target = dhash(gray_thumb(photo))
         ranked = sorted(hashes.items(), key=lambda kv: hamming(target, kv[1]))
@@ -101,7 +112,7 @@ def build_review(
     manifest: dict,
     mls_matches: dict,
     lightroom_labels: dict,
-    spend_total: float,
+    spend_total: float | None,
 ) -> Path:
     rows = []
     for entry in manifest["sets"]:
@@ -109,9 +120,9 @@ def build_review(
         name = f"{idx:03d}"
         mls_here = [(photo, info) for photo, info in mls_matches.items() if info["set"] == idx - 1]
         if mls_here:
-            photo, info = mls_here[0]
-            mls_cell = (
+            mls_cell = "".join(
                 f'<img src="review/mls_{photo}" loading="lazy"><p>{photo} ({info["how"]})</p>'
+                for photo, info in mls_here
             )
         else:
             mls_cell = "<p>not published</p>"
@@ -129,6 +140,10 @@ def build_review(
             f"<div>{mls_cell}</div></div></section>"
         )
     top = manifest["summary"]
+    if spend_total is None:
+        spend_line = "Meta spend unknown, ledger unreadable"
+    else:
+        spend_line = f"Meta spend to date: ${spend_total:.4f} of ${SPEND_CAP_USD:.2f} cap."
     html = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Unit review: {top["frames_found"]} frames, {top["sets_found"]} sets</title>
@@ -140,7 +155,7 @@ img{{width:100%;height:auto}}.row p{{font-size:12px}}</style></head><body>
 {top["sets_failed"]} failed, {top["sets_flagged"]} flagged, \
 merge run time {top["merge_run_seconds"]:.1f} s (copy from Drive not counted).</p>
 {"".join(rows)}
-<footer><p>Meta spend to date: ${spend_total:.4f} of ${SPEND_CAP_USD:.2f} cap.</p></footer>
+<footer><p>{spend_line}</p></footer>
 </body></html>"""
     page = output_dir / "review.html"
     page.write_text(html)
@@ -148,10 +163,17 @@ merge run time {top["merge_run_seconds"]:.1f} s (copy from Drive not counted).</
 
 
 def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Path) -> dict:
-    nefs = sorted(raw_dir.glob("*.NEF")) + sorted(raw_dir.glob("*.nef"))
-    if not nefs:
-        raise ValueError(f"no NEF frames in {raw_dir}")
-    sets = hdr.group_frames(nefs)
+    frames = (
+        sorted(raw_dir.glob("*.NEF"))
+        + sorted(raw_dir.glob("*.nef"))
+        + sorted(raw_dir.glob("*.jpg"))
+        + sorted(raw_dir.glob("*.JPG"))
+        + sorted(raw_dir.glob("*.jpeg"))
+        + sorted(raw_dir.glob("*.JPEG"))
+    )
+    if not frames:
+        raise ValueError(f"no bracket frames (NEF or JPEG) in {raw_dir}")
+    sets = hdr.group_frames(frames)
     common = hdr.most_common_size(sets)
     merged_dir = output_dir / "merged"
     review_dir = output_dir / "review"
@@ -185,7 +207,7 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
             entry["error"] = str(exc)
             failed_count += 1
         for label, frame in (("dark", dark), ("bright", bright)):
-            thumb = hdr.decode_raw(frame, half_size=True)
+            thumb = hdr.decode_frame(frame, half_size=True)
             small = np.asarray(Image.fromarray(thumb).resize((640, 427), Image.BILINEAR))
             hdr.save_clean_jpeg(small, review_dir / f"frame_{name}_{label}.jpg", quality=80)
         entries.append(entry)
@@ -212,7 +234,7 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
 
     manifest = {
         "summary": {
-            "frames_found": len(nefs),
+            "frames_found": len(frames),
             "sets_found": len(sets),
             "sets_merged": merged_count,
             "sets_failed": failed_count,
@@ -224,9 +246,9 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     try:
-        spend_total = read_spend_total()
-    except Exception:
-        spend_total = 0.0
+        spend_total: float | None = read_spend_total()
+    except MetaRefused:
+        spend_total = None
     build_review(output_dir, manifest, mls_matches, lightroom_labels, spend_total)
     return manifest
 

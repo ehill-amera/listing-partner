@@ -87,6 +87,25 @@ def most_common_size(sets: list[list[Path]]) -> int:
     return max(sorted(sizes), key=lambda n: (sizes[n], -n))
 
 
+JPEG_SUFFIXES = (".jpg", ".jpeg")
+
+
+def decode_frame(path: Path, half_size: bool = False) -> np.ndarray:
+    """Decode one bracket frame to an sRGB uint8 RGB array.
+
+    JPEG for units shot that way (PIL), raw decode otherwise. This is the
+    only decode path merge code may use.
+    """
+    if path.suffix.lower() in JPEG_SUFFIXES:
+        with Image.open(path) as img:
+            frame = np.asarray(img.convert("RGB"))
+        if half_size:
+            half = Image.fromarray(frame)
+            frame = np.asarray(half.resize((half.width // 2, half.height // 2), Image.BILINEAR))
+        return frame
+    return decode_raw(path, half_size=half_size)
+
+
 def decode_raw(path: Path, half_size: bool = False) -> np.ndarray:
     """Decode a NEF/DNG to an sRGB uint8 RGB array."""
     with rawpy.imread(str(path)) as raw:
@@ -166,8 +185,11 @@ def align_to_first(images: list[np.ndarray]) -> list[np.ndarray]:
             aligned.append(img)  # alignment failed: keep the frame as shot
             continue
         h, w = img.shape[:2]
+        # findTransformECC returns the template-into-input map, but
+        # warpAffine takes the source-into-destination map, so the
+        # translation is negated (then scaled back up: ECC ran small).
         shift = warp.copy()
-        shift[:, 2] /= ECC_SCALE  # ECC ran at reduced resolution
+        shift[:, 2] = -warp[:, 2] / ECC_SCALE
         aligned.append(cv2.warpAffine(img, shift, (w, h), flags=cv2.INTER_LINEAR))
     return aligned
 
@@ -198,9 +220,9 @@ def merge_set(frame_paths: list[Path]) -> np.ndarray:
     if not frame_paths:
         raise ValueError("empty set")
     try:
-        decoded = [decode_raw(p) for p in frame_paths]
+        decoded = [decode_frame(p) for p in frame_paths]
     except Exception as exc:
-        raise ValueError(f"could not decode raw frames: {exc}") from exc
+        raise ValueError(f"could not decode frames: {exc}") from exc
     try:
         return fuse_exposures(align_to_first(decoded))
     except Exception as exc:

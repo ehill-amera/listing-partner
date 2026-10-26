@@ -99,6 +99,46 @@ def test_darkest_brightest_orders_by_exposure(tmp_path, monkeypatch):
     assert dark.name == "a.nef" and bright.name == "c.nef"
 
 
+def _smooth_scene(height: int = 120, width: int = 160) -> np.ndarray:
+    """Smooth gradient-plus-blobs scene ECC converges on (deterministic)."""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    scene = 0.4 * xx / width + 0.3 * yy / height
+    for cx, cy, s, a in [(40, 40, 25, 0.5), (120, 80, 30, 0.4), (80, 30, 15, 0.35)]:
+        scene += a * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * s * s))
+    gray = (np.clip(scene, 0, 1) * 255).astype(np.uint8)
+    return np.stack([gray] * 3, axis=-1)
+
+
+def test_align_to_first_undoes_known_shift():
+    # Two crops of one larger scene, offset by a known (dx, dy): the honest
+    # model of tripod shift, with content in every pixel (no zero borders).
+    scene = _smooth_scene(144, 184)
+    base = scene[12:132, 12:172].copy()
+    dx, dy = 7, -5
+    shifted = scene[12 + dy : 132 + dy, 12 + dx : 172 + dx].copy()
+    assert np.abs(shifted.astype(int) - base.astype(int)).mean() > 2.0, "shift must be visible"
+    aligned = hdr.align_to_first([base, shifted])
+    assert aligned[0] is base, "the reference frame is untouched"
+    # Compare the interior only: realigning shifts content, so a border of
+    # unwritten pixels is expected at the edges.
+    margin = 12
+    residual = np.abs(
+        aligned[1][margin:-margin, margin:-margin].astype(int)
+        - base[margin:-margin, margin:-margin].astype(int)
+    ).mean()
+    assert residual < 2.0, f"alignment must bring the frame back, residual {residual:.2f}"
+
+
+def test_merge_set_accepts_jpeg_brackets(tmp_path):
+    paths = []
+    for i, shade in enumerate((60, 120, 200)):
+        p = tmp_path / f"frame_{i}.jpg"
+        Image.new("RGB", (64, 48), (shade, shade, shade)).save(p, format="JPEG")
+        paths.append(p)
+    out = hdr.merge_set(paths)
+    assert out.shape == (48, 64, 3) and out.dtype == np.uint8
+
+
 def test_no_meta_imports_in_hdr():
     import inspect
 

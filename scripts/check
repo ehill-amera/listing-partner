@@ -25,19 +25,17 @@ if [ -z "$tracked" ]; then
   bad "no tracked files"
 else
   echo "$tracked" | grep -E '(^|/)\.env($|/)|\.pem$|\.key$' && bad ".env/key files tracked"
-  # Key/token/email/phone patterns in tracked text files.
-  if grep -rInE -i '(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|LLM_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{16}|xox[bap]-)' \
-      --include='*' $tracked 2>/dev/null | grep -v '^Binary' ; then
+  # Key/token/email/phone patterns in every tracked file (binaries skipped).
+  if grep -rInEI -i '(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|LLM_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{16}|xox[bap]-)' \
+      -- $tracked 2>/dev/null | grep -v '^Binary' ; then
     bad "possible secret pattern in tracked files"
   fi
-  if grep -rInE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
-      --include='*.py' --include='*.sh' --include='*.md' --include='*.toml' --include='*.html' \
-      $tracked 2>/dev/null | grep -viE 'users\.noreply\.github\.com|example\.com|@media|@2x|@3x' ; then
+  if grep -rInEI '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+      -- $tracked 2>/dev/null | grep -viE 'users\.noreply\.github\.com|example\.com|@media|@2x|@3x' ; then
     bad "possible email address in tracked files"
   fi
-  if grep -rInE '(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}' \
-      --include='*.py' --include='*.sh' --include='*.md' --include='*.toml' \
-      $tracked 2>/dev/null ; then
+  if grep -rInEI '(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}' \
+      -- $tracked 2>/dev/null ; then
     bad "possible phone number in tracked files"
   fi
   # Banned strings (street address and friends): fail if the list is missing.
@@ -56,34 +54,12 @@ else
     done < local/banned-strings.txt
     [ "$banned_hit" = 1 ] && bad "banned strings found"
   fi
-  # Tracked image files must carry no GPS and no camera serial.
+  # Every tracked file is attempted as an image: no GPS and no camera
+  # serial anywhere, and an image that cannot be read fails loudly.
   if [ -x .venv/bin/python ]; then
     # shellcheck disable=SC2086
-    if ! env -u META_API_KEY .venv/bin/python - $tracked <<'PYEOF'
-import sys
-from pathlib import Path
-from PIL import Image, ExifTags
-bad = []
-for name in sys.argv[1:]:
-    p = Path(name)
-    if not p.is_file() or p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".tiff", ".dng"):
-        continue
-    try:
-        exif = Image.open(p).getexif()
-    except Exception:
-        continue
-    names = {ExifTags.TAGS.get(k, k) for k in exif}
-    if "GPSInfo" in names or 34853 in exif:
-        bad.append(f"{name}: GPS block")
-    for serial in ("BodySerialNumber", "CameraSerialNumber", "SerialNumber"):
-        if serial in names:
-            bad.append(f"{name}: {serial}")
-if bad:
-    print("\n".join(bad))
-    sys.exit(1)
-PYEOF
-    then
-      bad "tracked images carry GPS or serial metadata"
+    if ! env -u META_API_KEY .venv/bin/python scripts/hygiene_images.py $tracked; then
+      bad "tracked images carry GPS/serial metadata, or an image cannot be read"
     fi
   fi
   # No tracked file may sit under a gitignored path.
