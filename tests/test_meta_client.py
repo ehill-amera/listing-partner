@@ -384,14 +384,23 @@ def test_crash_during_settle_cannot_lower_total(ledger, key, monkeypatch):
     meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
     before = meta_client.read_spend_total(ledger)
 
-    def _crash(handle, call_id, actual, request_id):
+    # Same signature as the real _settle: a wrong-shaped stub would raise
+    # TypeError and pass for the wrong reason, so the names are pinned here.
+    def _crash(handle, call_id, model, estimated, actual, request_id):
         raise RuntimeError("died while settling")
 
     monkeypatch.setattr(meta_client, "_settle", _crash)
-    with pytest.raises(MetaRefused):
+    with pytest.raises(MetaRefused, match="settlement failed"):
         meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 3, "the crashed call leaves its reservation, nothing else"
+    crashed = lines[2]
+    assert crashed["status"] == "reserved" and crashed["actual_usd"] is None
+    assert crashed["model"] == MODEL
     after = meta_client.read_spend_total(ledger)
-    assert after >= before, "a crash at settle time keeps the reservation counted"
+    assert after == pytest.approx(before + crashed["estimated_usd"]), (
+        "a crash at settle time keeps the reservation counted"
+    )
 
 
 def test_transport_failure_is_its_own_refusal(ledger, key):
