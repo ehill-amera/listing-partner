@@ -24,6 +24,10 @@ Erik's goal: a photographer drops raw files in a folder and gets listing photos 
 - Vertical and perspective correction: walls and door frames that should be vertical come out vertical, the most visible fix in real estate photography. Crop only as much as the correction needs.
 - Ghosting check: measure ghosting from movement between brackets (ceiling fans, trees, shadows). Deghost in the merge only if unit-a shows it. Report the measurement either way.
 
+### A1. Grouping for longer brackets
+
+Unit 1 starts a new set after a gap of more than 8 seconds between capture times. With longer brackets (7 to 9 frames, the brightest at several seconds of exposure), the gap between one frame's start and the next can pass 8 seconds inside a single set. Measure the gap from the end of each exposure (capture time plus exposure time) instead, and add a test with a synthetic 9-frame set whose brightest frames run 2, 4 and 8 seconds. Re-run unit-a and confirm it still groups into the same 17 sets.
+
 ### A. Find the windows
 
 - SAM 3.1 segments every window in each merged photo through the capped client, using a text prompt for windows (and glass doors with an outdoor view). Masks are saved as PNGs in `output/unit-a/windows/masks/`.

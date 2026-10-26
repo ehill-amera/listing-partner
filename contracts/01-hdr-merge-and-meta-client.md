@@ -2,7 +2,7 @@
 
 Branch: `unit-01-hdr-merge`
 Target: Tue Oct 27, 2026
-Meta budget for this unit: **$0.50**, one live smoke call only.
+Meta budget for this unit: **$0.50**. Live smoke calls only: the first on Oct 26, plus one more on the final code before review (amended Oct 26 after the third review).
 
 Read PRODUCT.md and AGENTS.md first.
 
@@ -68,7 +68,7 @@ Live smoke call: one minimal Muse Spark text call through the client. Confirm a 
 `output/unit-a/review.html`, a single page that opens in a browser with no server:
 - Top line: frames found, sets found, sets merged, sets failed, sets flagged, merge run time. All measured from this run.
 - One row per set, side by side: the darkest frame, the brightest frame, **our merge**, **Lightroom's merge** of the same set, and **Erik's MLS photo** of the same shot.
-- Lightroom match: by the set's first frame name. Render the DNG in full. If it cannot be decoded, show its largest embedded preview and label it "preview only".
+- Lightroom match: by the set's first frame name. Show the largest preview Lightroom embedded in the DNG, labeled "Lightroom's own preview". That is what Lightroom itself shows, so the comparison is fair. Do not render the DNG with our own color processing (amended Oct 26: our rendering came out about 27% darker and yellow-skied, which tilted the comparison in our favor). If a DNG has no embedded preview, say so in that cell.
 - MLS match: by capture time falling inside the set's capture window. For an MLS photo with no capture time, match by visual similarity (the MLS photos are cropped and edited, so allow for that) and label the match "matched by look". A set with no MLS photo shows "not published". Every MLS photo appears exactly once.
 - Footer: Meta spend to date and the $100 cap, read from the ledger.
 
@@ -76,7 +76,7 @@ Live smoke call: one minimal Muse Spark text call through the client. Confirm a 
 
 1. `./scripts/check` passes on the final commit.
 2. Every refusal case in B has a passing test, and the cap cannot be raised without editing the constant.
-3. The live smoke call appears in the ledger with a real cost, and total spend for this unit is under $0.50.
+3. A live smoke call made with the final code appears in the ledger with a real cost, and total spend for this unit is under $0.50.
 4. All 86 NEFs are accounted for on the review page, each in exactly one set. The grouping finds the same 17 sets Lightroom merged.
 5. Sets merged plus sets failed equals sets found. Failures are listed with a plain-words reason.
 6. Every one of the 16 MLS photos and 17 Lightroom merges appears on the page, matched to a set.
