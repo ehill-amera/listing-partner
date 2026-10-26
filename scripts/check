@@ -38,6 +38,14 @@ else
       -- $tracked 2>/dev/null ; then
     bad "possible phone number in tracked files"
   fi
+  # File names leak the same way contents do: scan the tracked names too.
+  if printf '%s\n' "$tracked" | grep -iE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+      | grep -viE 'users\.noreply\.github\.com|example\.com|@media|@2x|@3x' ; then
+    bad "possible email address in tracked file names"
+  fi
+  if printf '%s\n' "$tracked" | grep -E '(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}' ; then
+    bad "possible phone number in tracked file names"
+  fi
   # Banned strings (street address and friends): fail if the list is missing.
   if [ ! -s local/banned-strings.txt ]; then
     bad "local/banned-strings.txt is missing or empty"

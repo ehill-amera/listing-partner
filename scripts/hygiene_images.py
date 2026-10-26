@@ -49,9 +49,11 @@ IMAGE_SUFFIXES = frozenset(
 SERIAL_TAGS = ("BodySerialNumber", "CameraSerialNumber", "SerialNumber")
 
 
-# Suffixes whose containers can hold EXIF directories (TIFF family,
-# including raw). Other files cannot carry a deep serial or GPS block, so
-# the deep parse skips them; Pillow above still attempts every file.
+# Suffixes whose containers can hold a deep metadata block. TIFF-family
+# files (including raw) carry EXIF directories; PNG, WebP, GIF and BMP can
+# carry an EXIF block of their own, which Pillow surfaces but exifread may
+# not parse. The deep parse is attempted on every one of these; anything
+# else cannot carry a deep serial or GPS block, so it is skipped.
 EXIF_SUFFIXES = frozenset(
     {
         ".jpg",
@@ -66,6 +68,13 @@ EXIF_SUFFIXES = frozenset(
         ".orf",
         ".rw2",
         ".raf",
+        ".png",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".heic",
+        ".heif",
+        ".avif",
     }
 )
 
@@ -106,6 +115,19 @@ def scan(paths: list[str]) -> list[str]:
             for serial in SERIAL_TAGS:
                 if serial in names:
                     bad.append(f"{name}: {serial}")
+            # Sub-IFDs (Exif, GPS, interoperability) on every image Pillow
+            # can open: a serial or GPS block hiding below the top level
+            # must not pass just because the container is not TIFF.
+            for ifd_id in (0x8769, 0x8825, 0xA005):
+                try:
+                    sub = exif.get_ifd(ifd_id)
+                except Exception:
+                    continue
+                if ifd_id == 0x8825 and len(sub):
+                    bad.append(f"{name}: GPS block")
+                for key in sorted({ExifTags.TAGS.get(k, k) for k in sub}, key=str):
+                    if isinstance(key, str) and "serial" in key.lower():
+                        bad.append(f"{name}: {key}")
         # The deep parse runs when Pillow saw image structure (covers
         # extensionless images too) or the suffix promises an EXIF
         # container; anything else cannot carry a deep serial or GPS block.

@@ -39,6 +39,20 @@ def test_check_scans_tracked_files_without_the_index(tmp_path):
     )
 
 
+def test_check_scans_file_names_for_emails():
+    text = CHECK.read_text()
+    assert "possible email address in tracked file names" in text, (
+        "the check must grep tracked file names for emails, not just file contents"
+    )
+
+
+def test_check_scans_file_names_for_phones():
+    text = CHECK.read_text()
+    assert "possible phone number in tracked file names" in text, (
+        "the check must grep tracked file names for phones, not just file contents"
+    )
+
+
 def test_force_added_file_under_inputs_is_caught(tmp_path):
     root = _scaffold_repo(tmp_path / "repo")
     # The check's algorithm with the flag: every tracked file, patterns only.
