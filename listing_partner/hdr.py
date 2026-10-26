@@ -134,12 +134,66 @@ def extract_preview(path: Path) -> np.ndarray:
     return np.asarray(Image.fromarray(data).convert("RGB"))
 
 
+# XYZ (D65) to linear sRGB, exact sRGB specification values.
+_XYZ_TO_LINEAR_SRGB = np.array(
+    [
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ],
+    dtype=np.float64,
+)
+
+# Bradford chromatic adaptation, DNG profile connection space (D50) to D65.
+_D50_TO_D65 = np.array(
+    [
+        [1.0478112, 0.0228866, -0.0501270],
+        [0.0295424, 0.9904844, -0.0170491],
+        [-0.0092345, 0.0150436, 0.7521316],
+    ],
+    dtype=np.float64,
+)
+
+
+def _dng_floats(value, count: int) -> list[float] | None:
+    """Parse DNG RATIONAL/SRATIONAL tag values to floats.
+
+    tifffile hands these back either as (numerator, denominator) pairs or
+    as one flat [num, den, ...] run; both shapes occur in the wild.
+    """
+    try:
+        flat = list(np.asarray(value, dtype=object).ravel())
+    except Exception:
+        return None
+    pairs: list[tuple[float, float]]
+    if flat and isinstance(flat[0], (tuple, list)):
+        pairs = [(float(n), float(d)) for n, d in flat]
+    else:
+        nums = [float(x) for x in flat]
+        pairs = list(zip(nums[0::2], nums[1::2]))
+    if len(pairs) < count:
+        return None
+    return [n / d if d else 0.0 for n, d in pairs[:count]]
+
+
+def _srgb_eotf(linear: np.ndarray) -> np.ndarray:
+    """The sRGB tone curve: piecewise transfer function to display light."""
+    low = 12.92 * linear
+    high = 1.055 * np.power(np.clip(linear, 0.0, None), 1.0 / 2.4) - 0.055
+    return np.where(linear <= 0.0031308, low, high)
+
+
 def render_linear_dng(path: Path) -> np.ndarray:
     """Render a linear-DNG (e.g. Lightroom HDR merge) to display sRGB.
 
-    Reads the largest floating-point series, normalizes scene-linear light
-    by a highlight percentile, and applies a 2.2 gamma. This is a plain
-    viewer render of Lightroom's merge, not a re-edit of it.
+    The DNG color chain, per the DNG specification: white balance from
+    AsShotNeutral, camera-native linear light to XYZ via the daylight
+    (D65) ForwardMatrix when present else the D65 ColorMatrix, Bradford
+    adaptation to D65, the sRGB matrix, then the sRGB tone curve. Display
+    exposure is set from a highlight percentile afterwards: the merge
+    files store unnormalized scene-linear values, so this normalization
+    stands in for the output-referred exposure every viewer must pick. It
+    is a plain viewer render of Lightroom's merge, not a re-edit of it.
     """
     import tifffile
 
@@ -148,21 +202,46 @@ def render_linear_dng(path: Path) -> np.ndarray:
         if not candidates:
             raise ValueError("no linear image series in DNG")
         series = max(candidates, key=lambda s: s.shape[0] * s.shape[1])
-        linear = np.asarray(series.asarray(), dtype=np.float32)
-        neutral = None
+        linear = np.asarray(series.asarray(), dtype=np.float64)
+        tags: dict = {}
         for page in tif.pages:
-            if "AsShotNeutral" in page.tags:
-                neutral = [float(v) for v in page.tags["AsShotNeutral"].value[:3]]
-                break
+            for name in (
+                "AsShotNeutral",
+                "ForwardMatrix2",
+                "ForwardMatrix1",
+                "ColorMatrix2",
+                "ColorMatrix1",
+                "BlackLevel",
+                "WhiteLevel",
+            ):
+                if name in page.tags and name not in tags:
+                    tags[name] = page.tags[name].value
     if linear.shape[2] == 4:
         linear = linear[:, :, :3]
+    black = _dng_floats(tags["BlackLevel"], 3) if "BlackLevel" in tags else None
+    if black:
+        linear = linear - np.array(black[:3], dtype=np.float64).reshape(1, 1, 3)
+    white = _dng_floats(tags["WhiteLevel"], 1) if "WhiteLevel" in tags else None
+    if white and white[0] > 0:
+        linear = linear / white[0]
+    neutral = _dng_floats(tags["AsShotNeutral"], 3) if "AsShotNeutral" in tags else None
     if neutral and all(v > 0 for v in neutral):
-        linear = linear / np.array(neutral[:3], dtype=np.float32).reshape(1, 1, 3)
-    peak = float(np.percentile(linear, 99.5))
-    if peak <= 0:
+        linear = linear / np.array(neutral[:3], dtype=np.float64).reshape(1, 1, 3)
+    profile = None
+    for name in ("ForwardMatrix2", "ForwardMatrix1", "ColorMatrix2", "ColorMatrix1"):
+        if name in tags:
+            profile = _dng_floats(tags[name], 9)
+            if profile:
+                break
+    if profile is None:
+        raise ValueError("no color matrix (Forward/ColorMatrix) in DNG")
+    camera_to_srgb = _XYZ_TO_LINEAR_SRGB @ _D50_TO_D65 @ np.array(profile).reshape(3, 3)
+    rgb = linear @ camera_to_srgb.T
+    peak = float(np.percentile(rgb, 99.5))
+    if not np.isfinite(peak) or peak <= 0:
         raise ValueError("DNG linear data is black")
-    display = np.clip(linear / peak, 0.0, 1.0) ** (1.0 / 2.2)
-    return (display * 255.0 + 0.5).astype(np.uint8)
+    display = _srgb_eotf(np.clip(rgb / peak, 0.0, None))
+    return (np.clip(display, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
 ECC_SCALE = 0.25

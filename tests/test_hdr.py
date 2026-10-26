@@ -194,6 +194,51 @@ def test_fusion_sees_true_exposures_window_keeps_detail(tmp_path, monkeypatch):
     )
 
 
+def test_linear_dng_render_applies_color_matrix(tmp_path):
+    """A known camera-red patch must render blue, not red.
+
+    The synthetic DNG's color matrix maps camera red to sRGB blue (the way
+    a real Nikon matrix remaps its native primaries). Rendering the raw
+    channel values as sRGB — the old code — shows red; the matrix path
+    shows blue.
+    """
+    import tifffile
+
+    srgb_to_xyz = np.array(
+        [
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ]
+    )
+    swap_rb = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+    matrix = (srgb_to_xyz @ swap_rb).ravel()
+
+    def _rat(value):
+        from fractions import Fraction
+
+        frac = Fraction(value).limit_denominator(1000000)
+        return (frac.numerator, frac.denominator)
+
+    img = np.zeros((16, 16, 3), dtype=np.float16)
+    img[:, :] = (1.0, 0.0, 0.0)
+    dng = tmp_path / "patch.dng"
+    tifffile.imwrite(
+        dng,
+        img,
+        photometric="rgb",
+        extratags=[
+            (50728, 5, 3, tuple(_rat(1.0) for _ in range(3))),  # AsShotNeutral
+            (50722, 10, 9, tuple(_rat(float(v)) for v in matrix)),  # ColorMatrix2
+            (50779, 3, 1, (21,)),  # CalibrationIlluminant2 is D65
+        ],
+    )
+    out = hdr.render_linear_dng(dng)
+    mean = out.reshape(-1, 3).astype(float).mean(axis=0)
+    assert mean[2] > 170.0, f"blue channel must dominate, got {mean}"
+    assert mean[0] < 80.0 and mean[1] < 80.0, f"red/green must stay low, got {mean}"
+
+
 def test_no_meta_imports_in_hdr():
     import inspect
 
