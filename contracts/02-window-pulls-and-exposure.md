@@ -18,6 +18,14 @@ Erik's goal: a photographer drops raw files in a folder and gets listing photos 
 
 ## Build
 
+### First commit: lower the spend cap to $40
+
+Erik decided on Oct 26 to lower the product's hard spend cap from $100 to $40, because Muse Code's building draws on the same $150 of free credits. Change the constant to $40.00, keep the $1 headroom (calls refused once the worst case would pass $39.00), update every test and the review page footer to match, and update AGENTS.md's spend-cap section to say $40. Nothing (environment, flag, config) can raise it. This is the first commit of the unit, and the check must pass on it before any other work.
+
+### Second commit: read Muse Spark's real reply
+
+Unit 1's second live call settled correctly in the ledger, but the client could not read the reply text: Meta's response had no "output" or "text" keys where the parser looked. Before any Muse Spark call in this unit, read Meta's response reference (dev.meta.ai/docs/api-reference) for the real reply shape, teach the parser that shape, and add a test built from a saved real response with any ids and request details stripped. If the shape still cannot be confirmed from the docs, make one minimal live call (16 output tokens), save its response shape with ids removed, and build the parser from that. The ledger must stay correct whether or not the reply text can be read.
+
 ### A0. Lens and geometry, first
 
 - Lens profile correction: distortion, vignetting and chromatic aberration, from open lens profile data for the camera and lens in each file's metadata (the D5500 and its lens for unit-a). If no profile matches, skip the step for that photo and say so on the review page.
@@ -60,7 +68,7 @@ The automatic version of Erik's linear, radial and luminance masks:
 - Finished photos in `output/unit-a/finished/` (`001.jpg` and so on, full resolution, sRGB, no GPS or camera serial).
 - `output/unit-a/review-finish.html`, one row per shot: our merge from unit 1, our finished photo, the window mask over the merge, and Erik's MLS photo of the same shot.
 - Top line: photos processed, median shadow-noise before and after denoise, windows found, windows confirmed, candidates rejected, photos with at least one window, clipped highlights inside confirmed windows before and after (as a percentage of window pixels), run time, and Meta spend. All measured from this run.
-- Footer: Meta spend to date and the $100 cap, read from the ledger (or "unknown" if the ledger cannot be read).
+- Footer: Meta spend to date and the $40 cap, read from the ledger (or "unknown" if the ledger cannot be read).
 
 ## Acceptance criteria
 

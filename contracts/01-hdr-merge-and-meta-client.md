@@ -22,7 +22,7 @@ The sources sit on Google Drive for Desktop, so files may download as they are r
 Measured by the navigator on Oct 26 (re-measure, do not trust):
 - Brackets step the shutter speed. Exposure bias reads 0 on every frame checked, so grouping cannot use exposure bias.
 - Splitting the 86 NEFs wherever capture times are more than 8 seconds apart gives 17 sets: 16 sets of 5 frames and one set of 6 (`_DSC0056` to `_DSC0061`). Each set's first frame matches the name of one Lightroom merge (`_DSC0001-HDR.dng`, `_DSC0006-HDR.dng`, and so on).
-- 15 of the 16 MLS JPEGs carry a capture time that equals one NEF frame's capture time. One (`007.jpg`) carries none. The MLS photos are 2096 by 1397, cropped and edited by hand.
+- All 16 MLS JPEGs carry a capture time. For 15 it sits in the standard Exif block. For `007.jpg` it sits only in the XMP block, which the navigator's first measurement missed (corrected Oct 26 after the fourth review). Read capture times from every metadata block, Exif and XMP. The MLS photos are 2096 by 1397, cropped and edited by hand.
 - The NEFs carry a GPS block with no coordinates.
 
 ## Build
@@ -68,7 +68,7 @@ Live smoke call: one minimal Muse Spark text call through the client. Confirm a 
 `output/unit-a/review.html`, a single page that opens in a browser with no server:
 - Top line: frames found, sets found, sets merged, sets failed, sets flagged, merge run time. All measured from this run.
 - One row per set, side by side: the darkest frame, the brightest frame, **our merge**, **Lightroom's merge** of the same set, and **Erik's MLS photo** of the same shot.
-- Lightroom match: by the set's first frame name. Show the largest preview Lightroom embedded in the DNG, labeled "Lightroom's own preview". That is what Lightroom itself shows, so the comparison is fair. Do not render the DNG with our own color processing (amended Oct 26: our rendering came out about 27% darker and yellow-skied, which tilted the comparison in our favor). If a DNG has no embedded preview, say so in that cell.
+- Lightroom match: by the set's first frame name. Show the largest preview Lightroom embedded in the DNG (1024 pixels wide in unit-a's files, not the 256-pixel thumbnail), labeled "Lightroom's own preview". That is what Lightroom itself shows, so the comparison is fair. Do not render the DNG with our own color processing (amended Oct 26: our rendering came out about 27% darker and yellow-skied, which tilted the comparison in our favor). If a DNG has no embedded preview, say so in that cell.
 - MLS match: by capture time falling inside the set's capture window. For an MLS photo with no capture time, match by visual similarity (the MLS photos are cropped and edited, so allow for that) and label the match "matched by look". A set with no MLS photo shows "not published". Every MLS photo appears exactly once.
 - Footer: Meta spend to date and the $100 cap, read from the ledger.
 
@@ -76,7 +76,7 @@ Live smoke call: one minimal Muse Spark text call through the client. Confirm a 
 
 1. `./scripts/check` passes on the final commit.
 2. Every refusal case in B has a passing test, and the cap cannot be raised without editing the constant.
-3. A live smoke call made with the final code appears in the ledger with a real cost, and total spend for this unit is under $0.50.
+3. A live smoke call made with the final client code appears in the ledger with a real cost, and total spend for this unit is under $0.50. Reading the reply text moves to unit 2 (amended Oct 26 after the fourth review). Until then, a billed call whose reply cannot be read must say so plainly and must never be reported as refused.
 4. All 86 NEFs are accounted for on the review page, each in exactly one set. The grouping finds the same 17 sets Lightroom merged.
 5. Sets merged plus sets failed equals sets found. Failures are listed with a plain-words reason.
 6. Every one of the 16 MLS photos and 17 Lightroom merges appears on the page, matched to a set.
