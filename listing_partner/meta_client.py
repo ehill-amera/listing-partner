@@ -103,8 +103,16 @@ class CapReached(MetaRefused):
     """The ledger total has already reached the $100 cap."""
 
 
+# The reservation ceiling sits $1 below the lifetime cap. A settled bill
+# can come in above its reservation (the API reports the real cost), so
+# refusing once total + worst case would pass $99 keeps the settled total
+# from ever passing $100. Like the lifetime figure, this headroom is a
+# plain constant: nothing outside this file may change it.
+RESERVATION_HEADROOM_USD = 1.0
+
+
 class WouldCrossCap(MetaRefused):
-    """This call's worst-case cost would push the total past $100."""
+    """This call's worst-case cost would push the total past the $99 ceiling."""
 
 
 class TransportFailed(MetaRefused):
@@ -250,9 +258,11 @@ def call_meta_text(
         estimated = reserve_text_usd(model, prompt, max_output_tokens)
         if not math.isfinite(estimated) or estimated < 0:
             raise LedgerError(f"refusing to reserve invalid cost: {estimated!r}")
-        if total + estimated > SPEND_CAP_USD:
+        ceiling = SPEND_CAP_USD - RESERVATION_HEADROOM_USD
+        if total + estimated > ceiling:
             raise WouldCrossCap(
-                f"call would cross the cap: ${total:.4f} + ${estimated:.4f} > ${SPEND_CAP_USD:.2f}"
+                f"call would cross the reservation ceiling: "
+                f"${total:.4f} + ${estimated:.4f} > ${ceiling:.2f}"
             )
         reservation = {
             "ts": datetime.now(timezone.utc).isoformat(),

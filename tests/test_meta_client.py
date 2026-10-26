@@ -240,16 +240,71 @@ def test_actual_above_estimate_never_crosses_cap(ledger, key):
     assert meta_client.read_spend_total(ledger) == pytest.approx(99.996)
 
 
-def test_heavy_but_fitting_call_settles_under_cap(ledger, key):
-    # Same 4x-actual usage, but the worst case still fits: the call goes
-    # through and the settled total stays under $100.
+def test_headroom_refuses_when_actual_would_break_cap(ledger, key):
+    # Worst-case reservation fits under $100 but not under the $99
+    # headroom. The transport then bills $0.60, far above the $0.0011
+    # reservation. Old code lets it through and settles past $100; the
+    # headroom must refuse instead, so the total never passes $100.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 99.99,
-                "actual_usd": 99.99,
+                "estimated_usd": 99.50,
+                "actual_usd": 99.50,
+                "request_id": "r",
+                "call_id": "c",
+                "status": "complete",
+            }
+        )
+        + "\n"
+    )
+
+    def _overbilled(url, headers, body):
+        return {"id": "r-over", "text": "ok", "cost_usd": 0.6}
+
+    with pytest.raises(WouldCrossCap):
+        meta_client.call_meta_text(MODEL, "hi", transport=_overbilled, ledger_path=ledger)
+    assert meta_client.read_spend_total(ledger) <= 100.0
+    assert meta_client.read_spend_total(ledger) == pytest.approx(99.50)
+
+
+def test_actual_above_reservation_settles_under_cap(ledger, key):
+    # Same over-billing, but the reservation fits inside the headroom: the
+    # call goes through and the settled total still never passes $100.
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-10-26T00:00:00+00:00",
+                "model": MODEL,
+                "estimated_usd": 98.90,
+                "actual_usd": 98.90,
+                "request_id": "r",
+                "call_id": "c",
+                "status": "complete",
+            }
+        )
+        + "\n"
+    )
+
+    def _overbilled(url, headers, body):
+        return {"id": "r-over", "text": "ok", "cost_usd": 0.5}
+
+    out = meta_client.call_meta_text(MODEL, "hi", transport=_overbilled, ledger_path=ledger)
+    assert out["actual_usd"] == pytest.approx(0.5)
+    assert meta_client.read_spend_total(ledger) == pytest.approx(99.40)
+
+
+def test_heavy_but_fitting_call_settles_under_cap(ledger, key):
+    # Same 4x-actual usage, but the worst case still fits inside the $99
+    # headroom: the call goes through and the settled total stays under $100.
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-10-26T00:00:00+00:00",
+                "model": MODEL,
+                "estimated_usd": 98.99,
+                "actual_usd": 98.99,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
