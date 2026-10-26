@@ -86,8 +86,7 @@ def scan(paths: list[str]) -> list[str]:
         deep = _deep_tags(path)
         if deep:
             gps_hit = any(
-                key.split()[-1].startswith("GPS") or key.startswith("GPS ")
-                for key in deep
+                key.split()[-1].startswith("GPS") or key.startswith("GPS ") for key in deep
             )
             if gps_hit:
                 bad.append(f"{name}: GPS block")
