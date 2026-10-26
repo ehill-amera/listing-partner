@@ -204,10 +204,11 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
             lightroom_labels[name] = "missing"
 
     mls_matches = match_mls(sets, mls_dir, merged_dir)
-    # Copy MLS photos beside the page so it opens anywhere.
+    # Copy MLS photos beside the page so it opens anywhere, stripped of
+    # metadata like every other output JPEG.
     for photo in mls_dir.glob("*.jpg"):
-        data = photo.read_bytes()
-        (review_dir / f"mls_{photo.name}").write_bytes(data)
+        with Image.open(photo) as img:
+            hdr.save_clean_jpeg(np.asarray(img.convert("RGB")), review_dir / f"mls_{photo.name}")
 
     manifest = {
         "summary": {
