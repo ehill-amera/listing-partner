@@ -1,0 +1,29 @@
+#!/bin/sh
+# listing-partner fence: runs before every commit. Installed copy lives in .git/hooks.
+# Blocks commits on main, commits of local-only paths, and any committed text or
+# file name containing a banned string (street address and other private tokens).
+top=$(git rev-parse --show-toplevel) || exit 1
+branch=$(git symbolic-ref --short -q HEAD)
+if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+  echo "FENCE: commits on $branch are blocked. Work on a unit branch. Merging to main needs Erik's yes." >&2
+  exit 1
+fi
+bad_paths=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^(inputs|output|outputs|\.spend|\.navigator|local|\.muse|facts)/|(^|/)\.env' )
+if [ -n "$bad_paths" ]; then
+  echo "FENCE: these paths must never be committed:" >&2; echo "$bad_paths" >&2; exit 1
+fi
+list="$top/local/banned-strings.txt"
+if [ ! -s "$list" ]; then
+  echo "FENCE: local/banned-strings.txt is missing or empty, so the address check cannot run. Commit refused." >&2
+  exit 1
+fi
+patterns=$(grep -v '^[[:space:]]*#' "$list" | grep -v '^[[:space:]]*$')
+hit=$(printf '%s\n' "$patterns" | while IFS= read -r p; do
+  git diff --cached --name-only --diff-filter=ACMR | grep -i -F -- "$p" >/dev/null && echo "file name contains a banned string"
+  git diff --cached --diff-filter=ACMR -U0 | grep '^+' | grep -i -F -- "$p" >/dev/null && echo "staged text contains a banned string"
+done | sort -u)
+if [ -n "$hit" ]; then
+  echo "FENCE: $hit (see local/banned-strings.txt). Commit refused." >&2
+  exit 1
+fi
+exit 0

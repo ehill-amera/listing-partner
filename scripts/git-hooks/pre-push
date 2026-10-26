@@ -1,0 +1,9 @@
+#!/bin/sh
+# listing-partner fence: pushing needs Erik's yes. Claude Code creates
+# .git/push-approved only after he says yes, and removes it after the push.
+gd=$(git rev-parse --git-dir) || exit 1
+if [ ! -f "$gd/push-approved" ]; then
+  echo "FENCE: push blocked. Pushing needs Erik's yes." >&2
+  exit 1
+fi
+exit 0

@@ -1,0 +1,68 @@
+# Secrets. The Meta API key lives only in the Mac's environment.
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials*.json
+token*.json
+
+# Spend ledger (running total of Meta spend)
+.spend/
+
+# Navigator mailbox and status (local only)
+.navigator/
+
+# Local-only notes: test-set source paths and banned strings (address etc.)
+local/
+
+# Muse Code's own event log, worktrees and memory
+.muse/
+.agents/memory/
+
+# Raw photos and footage (never committed)
+inputs/
+*.CR2
+*.CR3
+*.cr2
+*.cr3
+*.NEF
+*.nef
+*.ARW
+*.arw
+*.DNG
+*.dng
+*.RAF
+*.raf
+*.ORF
+*.orf
+*.RW2
+*.rw2
+*.HEIC
+*.heic
+*.MOV
+*.mov
+*.MP4
+*.mp4
+
+# Pipeline outputs
+output/
+outputs/
+
+# Unit facts pulled from AppFolio
+facts/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# macOS
+.DS_Store

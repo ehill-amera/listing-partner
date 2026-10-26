@@ -1,0 +1,17 @@
+#!/bin/sh
+# listing-partner fence: blocks any update to main (commit, merge, fast-forward,
+# reset, delete) unless .git/main-approved exists. Claude Code creates that file
+# only after Erik says ship, and removes it after the merge.
+[ "$1" = "prepared" ] || { cat >/dev/null; exit 0; }
+gd=$(git rev-parse --git-dir) || exit 1
+blocked=0
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/main|refs/heads/master) [ -f "$gd/main-approved" ] || blocked=1 ;;
+  esac
+done
+if [ "$blocked" = 1 ]; then
+  echo "FENCE: main can only change after Erik says ship." >&2
+  exit 1
+fi
+exit 0
