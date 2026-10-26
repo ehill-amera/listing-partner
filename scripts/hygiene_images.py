@@ -49,10 +49,33 @@ IMAGE_SUFFIXES = frozenset(
 SERIAL_TAGS = ("BodySerialNumber", "CameraSerialNumber", "SerialNumber")
 
 
+# Suffixes whose containers can hold EXIF directories (TIFF family,
+# including raw). Other files cannot carry a deep serial or GPS block, so
+# the deep parse skips them; Pillow above still attempts every file.
+EXIF_SUFFIXES = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".tif",
+        ".tiff",
+        ".dng",
+        ".nef",
+        ".cr2",
+        ".cr3",
+        ".arw",
+        ".orf",
+        ".rw2",
+        ".raf",
+    }
+)
+
+
 def _deep_tags(path: Path) -> dict[str, str]:
     """Every metadata directory exifread can parse: top level, the Exif
     sub-IFD, the GPS IFD, interoperability, and maker notes. Cameras hide
     the body serial and GPS coordinates below the top level."""
+    if path.suffix and path.suffix.lower() not in EXIF_SUFFIXES:
+        return {}
     try:
         with open(path, "rb") as handle:
             tags = exifread.process_file(handle, details=False)
@@ -83,7 +106,10 @@ def scan(paths: list[str]) -> list[str]:
             for serial in SERIAL_TAGS:
                 if serial in names:
                     bad.append(f"{name}: {serial}")
-        deep = _deep_tags(path)
+        # The deep parse runs when Pillow saw image structure (covers
+        # extensionless images too) or the suffix promises an EXIF
+        # container; anything else cannot carry a deep serial or GPS block.
+        deep = _deep_tags(path) if (pillow_ok or path.suffix.lower() in EXIF_SUFFIXES) else {}
         if deep:
             gps_hit = any(
                 key.split()[-1].startswith("GPS") or key.startswith("GPS ") for key in deep
