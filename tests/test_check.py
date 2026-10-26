@@ -12,9 +12,7 @@ CHECK = Path(__file__).resolve().parent.parent / "scripts" / "check"
 
 
 def _run(*args, cwd):
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
-    )
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def _scaffold_repo(root: Path) -> Path:
