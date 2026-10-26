@@ -119,6 +119,21 @@ class TransportFailed(MetaRefused):
     """The HTTP call failed; the ledger reservation is kept."""
 
 
+class ResponseUnreadable(Exception):
+    """The call was billed but its reply could not be read.
+
+    Deliberately NOT a MetaRefused: a refusal means no money moved, while
+    this error means the settlement line is already written and the cost
+    counts. Reading the reply text itself moves to unit 2; until then this
+    names the billed cost and the request id so the money stays visible.
+    """
+
+    def __init__(self, message: str, *, actual_usd: float, request_id: str | None):
+        super().__init__(message)
+        self.actual_usd = actual_usd
+        self.request_id = request_id
+
+
 def estimate_text_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimated USD for a text-model call from token counts."""
     price = PRICES.get(model)
@@ -225,7 +240,9 @@ def call_meta_text(
     Returns the response's text. Refuses (raising a MetaRefused subclass
     that names the reason) when the key is missing, the model is not
     allowlisted, its price is unknown, the ledger cannot be read, or the
-    cap is reached / would be crossed. A reservation sized at the request's
+    cap is reached / would be crossed. A billed call whose reply cannot be
+    read raises ResponseUnreadable instead (never a refusal: money moved).
+    A reservation sized at the request's
     worst-case cost is appended to the ledger before the HTTP call and a
     settlement line is appended after; a crash anywhere in between leaves
     the reservation counted, never less.
@@ -313,7 +330,12 @@ def call_meta_text(
         try:
             text = _response_text(response)
         except (KeyError, TypeError, IndexError) as exc:
-            raise MetaRefused(f"unrecognized API response shape: {exc}") from exc
+            raise ResponseUnreadable(
+                f"call was billed ${actual:.6f} (request {request_id}); "
+                f"the reply could not be read: {exc}",
+                actual_usd=actual,
+                request_id=request_id,
+            ) from exc
         return {"text": text, "actual_usd": actual, "request_id": request_id}
 
 

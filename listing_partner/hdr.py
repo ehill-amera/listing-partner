@@ -22,8 +22,41 @@ from PIL import Image
 SET_GAP_SECONDS = 8.0
 
 
+def _xmp_capture_time(path: Path) -> datetime | None:
+    """Capture time from the file's XMP block, or None when absent.
+
+    Some finished JPEGs (unit-a MLS 007.jpg) carry no EXIF dates at all;
+    their capture time sits only in XMP as ``xmp:CreateDate`` (which matches
+    EXIF DateTimeOriginal to the second on sibling files that carry both).
+    Times compare against naive local capture stamps, so a zone offset is
+    dropped after parsing: the wall time is what matters.
+    """
+    import re
+
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    start = raw.find(b"<x:xmpmeta")
+    end = raw.find(b"</x:xmpmeta>")
+    if start < 0 or end < 0:
+        return None
+    packet = raw[start : end + len(b"</x:xmpmeta>")].decode("utf-8", "replace")
+    for field in ("xmp:CreateDate", "exif:DateTimeOriginal", "photoshop:DateCreated"):
+        match = re.search(re.escape(field) + r'\s*=\s*"([^"]+)"', packet)
+        if not match:
+            continue
+        text = match.group(1).strip()
+        try:
+            stamp = datetime.fromisoformat(text)
+        except ValueError:
+            continue
+        if stamp.tzinfo is not None:
+            stamp = stamp.replace(tzinfo=None)
+        return stamp.replace(microsecond=0)
+    return None
+
+
 def read_capture_time(path: Path) -> datetime:
-    """Capture time of a NEF or JPEG, from EXIF DateTimeOriginal."""
+    """Capture time of a NEF or JPEG, from EXIF then XMP DateTimeOriginal."""
     with open(path, "rb") as handle:
         tags = exifread.process_file(handle, details=False)
     tag = (
@@ -32,9 +65,12 @@ def read_capture_time(path: Path) -> datetime:
         or tags.get("EXIF DateTimeDigitized")
         or tags.get("Image DateTime")
     )
-    if tag is None:
-        raise ValueError(f"no capture time in {path.name}")
-    return datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S")
+    if tag is not None:
+        return datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S")
+    stamp = _xmp_capture_time(path)
+    if stamp is not None:
+        return stamp
+    raise ValueError(f"no capture time in {path.name}")
 
 
 def read_exposure_seconds(path: Path) -> float:
@@ -123,8 +159,49 @@ def decode_raw(path: Path, half_size: bool = False) -> np.ndarray:
     return np.asarray(rgb, dtype=np.uint8)
 
 
+def _largest_tiff_preview(path: Path) -> np.ndarray | None:
+    """Largest decoded uint8 RGB preview series, or None when absent.
+
+    A Lightroom HDR DNG embeds several previews (a 256-pixel thumbnail, a
+    1024-pixel preview, and more). rawpy's thumbnail call only ever returns
+    the smallest, so the review page reads the file's own preview list and
+    takes the largest instead.
+    """
+    import tifffile
+
+    # Decodes happen inside the open block: a series reads lazily from the
+    # file, so decoding after close always fails. Largest first: one
+    # undecodable preview must not veto the rest.
+    try:
+        with tifffile.TiffFile(path) as tif:
+            candidates = [
+                series
+                for series in tif.series
+                if series.dtype == np.uint8 and len(series.shape) == 3 and series.shape[2] in (3, 4)
+            ]
+            decoded = []
+            for series in sorted(
+                candidates,
+                key=lambda s: int(s.shape[0]) * int(s.shape[1]),
+                reverse=True,
+            ):
+                try:
+                    decoded.append(
+                        np.asarray(np.asarray(series.asarray())[:, :, :3], dtype=np.uint8)
+                    )
+                    break
+                except Exception:
+                    continue
+    except Exception:
+        return None
+    return decoded[0] if decoded else None
+
+
 def extract_preview(path: Path) -> np.ndarray:
-    """Largest embedded JPEG preview of a raw file (fallback only)."""
+    """Largest embedded preview of a raw file (fallback only)."""
+    largest = _largest_tiff_preview(path)
+    if largest is not None:
+        return largest
     with rawpy.imread(str(path)) as raw:
         thumb = raw.extract_thumb()
     if thumb.format == rawpy.ThumbFormat.JPEG:

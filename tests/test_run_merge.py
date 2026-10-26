@@ -124,6 +124,50 @@ def test_review_lists_every_frame_in_each_set(tmp_path):
     assert "darkest" in html and "brightest" in html, "thumbnails stay"
 
 
+def test_review_footer_reads_live_ledger_by_default(tmp_path, monkeypatch):
+    """The footer reads the ledger when the page is built, never a stale number."""
+    from listing_partner import run_merge as rm
+
+    monkeypatch.setattr(rm, "read_spend_total", lambda: 0.001234)
+    page = build_review(tmp_path, _manifest(), {}, {"001": "Lightroom's own preview"})
+    assert "$0.0012" in page.read_text()
+
+
+def test_review_footer_live_read_failure_shows_unknown(tmp_path, monkeypatch):
+    from listing_partner import meta_client, run_merge as rm
+
+    def _broken():
+        raise meta_client.LedgerError("ledger corrupt")
+
+    monkeypatch.setattr(rm, "read_spend_total", _broken)
+    page = build_review(tmp_path, _manifest(), {}, {"001": "Lightroom's own preview"})
+    html = page.read_text()
+    assert "Meta spend unknown, ledger unreadable" in html
+    assert "$0.0000" not in html
+
+
+def test_xmp_only_photo_matches_by_capture_time(tmp_path):
+    """An XMP-only photo (shaped like MLS 007.jpg) matches by time, not look."""
+    from test_hdr import _xmp_only_jpeg
+
+    base = datetime(2026, 10, 12, 13, 49, 8)
+    frames = []
+    for i, offset in enumerate((0, 9)):
+        frame = tmp_path / f"frame_{i}.jpg"
+        _stamp(frame, base + timedelta(seconds=offset))
+        frames.append(frame)
+    sets = [frames]
+    mls = tmp_path / "mls"
+    mls.mkdir()
+    _xmp_only_jpeg(mls / "007.jpg", "2026-10-12T13:49:17.101")
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    Image.new("RGB", (64, 64), (200, 10, 10)).save(merged / "001.jpg")
+    matches = match_mls(sets, mls, merged)
+    assert matches["007.jpg"]["how"] == "capture time"
+    assert "matched by look" not in matches["007.jpg"]["how"]
+
+
 def test_lightroom_column_uses_embedded_preview_not_own_render(tmp_path, monkeypatch):
     # The review page must show Lightroom's own embedded preview, never our
     # color processing: our render is rigged to explode if it runs at all.

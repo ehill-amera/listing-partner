@@ -105,13 +105,23 @@ def match_mls(sets: list[list[Path]], mls_dir: Path, merged_dir: Path) -> dict:
     return matches
 
 
+#: Default for build_review: read the ledger when the page is built, so the
+#: footer can never go stale behind a number computed earlier in the run.
+_READ_LIVE = object()
+
+
 def build_review(
     output_dir: Path,
     manifest: dict,
     mls_matches: dict,
     lightroom_labels: dict,
-    spend_total: float | None,
+    spend_total: float | None | object = _READ_LIVE,
 ) -> Path:
+    if spend_total is _READ_LIVE:
+        try:
+            spend_total = read_spend_total()
+        except MetaRefused:
+            spend_total = None
     rows = []
     for entry in manifest["sets"]:
         idx = entry["index"]
@@ -245,11 +255,9 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
         "sets": entries,
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    try:
-        spend_total: float | None = read_spend_total()
-    except MetaRefused:
-        spend_total = None
-    build_review(output_dir, manifest, mls_matches, lightroom_labels, spend_total)
+    # The page reads the ledger itself when it is built: passing a number
+    # computed earlier would let the footer go stale behind later calls.
+    build_review(output_dir, manifest, mls_matches, lightroom_labels)
     return manifest
 
 

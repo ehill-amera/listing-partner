@@ -17,6 +17,7 @@ from listing_partner.meta_client import (
     MetaRefused,
     MissingKey,
     ModelNotAllowed,
+    ResponseUnreadable,
     TransportFailed,
     UnknownPrice,
     WouldCrossCap,
@@ -429,6 +430,23 @@ def test_docstring_claims_no_check_enforcement():
     assert "enforced by the check" not in source, (
         "the check command does not scan for HTTP imports; the docstring must not say it does"
     )
+
+
+def test_billed_call_with_unreadable_reply_is_not_a_refusal(ledger, key):
+    """A billed call whose reply cannot be read says so plainly, never refused."""
+
+    def _nonsense(url, headers, body):
+        return {"id": "resp-nonsense", "usage": {"input_tokens": 10, "output_tokens": 5}}
+
+    with pytest.raises(ResponseUnreadable, match="[Bb]illed") as excinfo:
+        meta_client.call_meta_text(MODEL, "hi", transport=_nonsense, ledger_path=ledger)
+    assert not isinstance(excinfo.value, MetaRefused), "billed is not refused"
+    assert "resp-nonsense" in str(excinfo.value), "the error carries the request id"
+    assert excinfo.value.actual_usd > 0, "the error carries the billed cost"
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 2 and lines[1]["status"] == "complete", "the call settled: money moved"
+    text = str(excinfo.value).lower()
+    assert "reply" in text and "could not be read" in text
 
 
 def test_key_only_from_env(ledger, monkeypatch):

@@ -63,6 +63,71 @@ def test_fuse_exposures_keeps_shape_and_range():
     assert out[:, -1].mean() > out[:, 0].mean(), "bright stays bright"
 
 
+def test_extract_preview_returns_largest_embedded(tmp_path):
+    """A file holding a small thumbnail and a large preview must yield large.
+
+    Regression: the review page showed the 256-pixel thumbnail while every
+    unit-a DNG also holds a 1024-pixel preview.
+    """
+    import tifffile
+
+    small = np.zeros((34, 51, 3), dtype=np.uint8) + 10
+    large = np.zeros((136, 205, 3), dtype=np.uint8) + 200
+    p = tmp_path / "two-previews.tiff"
+    with tifffile.TiffWriter(p) as writer:
+        writer.write(small, photometric="rgb")
+        writer.write(large, photometric="rgb")
+    out = hdr.extract_preview(p)
+    assert out.shape == (136, 205, 3), f"must pick the largest preview, got {out.shape}"
+    assert float(out.mean()) > 100.0, "must be the bright large preview, not the dark thumb"
+
+
+def _xmp_only_jpeg(path, create_date: str):
+    """JPEG with an XMP CreateDate and no EXIF, shaped like MLS 007.jpg."""
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(path, format="JPEG")
+    raw = path.read_bytes()
+    assert raw[:2] == b"\xff\xd8"
+    packet = (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        f'<rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:CreateDate="{create_date}">'
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+    ).encode("utf-8")
+    segment = b"http://ns.adobe.com/xap/1.0/\x00" + packet
+    app1 = b"\xff\xe1" + (len(segment) + 2).to_bytes(2, "big") + segment
+    path.write_bytes(raw[:2] + app1 + raw[2:])
+
+
+def test_read_capture_time_reads_xmp_block(tmp_path):
+    """MLS 007.jpg carries its capture time only in XMP: exifread misses it."""
+    p = tmp_path / "007.jpg"
+    _xmp_only_jpeg(p, "2026-10-12T13:49:17.101")
+    assert hdr.read_capture_time(p) == datetime(2026, 10, 12, 13, 49, 17)
+
+
+def test_read_capture_time_prefers_exif_over_xmp(tmp_path):
+    """When both blocks exist, EXIF DateTimeOriginal still wins."""
+    from PIL.Image import Exif
+
+    p = tmp_path / "both.jpg"
+    img = Image.new("RGB", (32, 32), (1, 2, 3))
+    exif = Exif()
+    exif[36867] = "2026:10:12 14:03:05"  # DateTimeOriginal
+    img.save(p, format="JPEG", exif=exif)
+    raw = p.read_bytes()
+    packet = (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/"'
+        ' xmp:CreateDate="2020-01-01T00:00:00">'
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+    ).encode("utf-8")
+    segment = b"http://ns.adobe.com/xap/1.0/\x00" + packet
+    app1 = b"\xff\xe1" + (len(segment) + 2).to_bytes(2, "big") + segment
+    p.write_bytes(raw[:2] + app1 + raw[2:])
+    assert hdr.read_capture_time(p) == datetime(2026, 10, 12, 14, 3, 5)
+
+
 def test_save_clean_jpeg_strips_metadata(tmp_path):
     src = tmp_path / "dirty.jpg"
     img = Image.new("RGB", (16, 16), (1, 2, 3))
