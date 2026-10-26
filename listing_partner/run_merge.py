@@ -41,19 +41,17 @@ def gray_thumb(path: Path, size: int = 256) -> np.ndarray:
 
 
 def render_lightroom(dng: Path, out: Path) -> str:
-    """Render a Lightroom DNG in full, else its largest embedded preview.
+    """Show the largest preview Lightroom embedded in a DNG.
 
-    Returns "full render", "preview only", or "preview unavailable". Never
-    raises: the review page must survive one bad DNG.
+    That is what Lightroom itself shows, so the comparison is fair; our own
+    color processing stays out of the review page entirely. Returns
+    "Lightroom's own preview", or "preview unavailable" when the DNG holds
+    no embedded preview. Never raises: the review page must survive one
+    bad DNG.
     """
     try:
-        hdr.save_clean_jpeg(hdr.render_linear_dng(dng), out)
-        return "full render"
-    except Exception:
-        pass
-    try:
         hdr.save_clean_jpeg(hdr.extract_preview(dng), out)
-        return "preview only"
+        return "Lightroom's own preview"
     except Exception:
         placeholder = np.zeros((256, 256, 3), dtype=np.uint8) + 114
         hdr.save_clean_jpeg(placeholder, out)
@@ -138,7 +136,7 @@ def build_review(
             f"<p>brightest: {entry['brightest']}</p></div>"
             f'<div><img src="merged/{name}.jpg" loading="lazy"><p>our merge</p></div>'
             f'<div><img src="review/lightroom_{name}.jpg" loading="lazy">'
-            f"<p>Lightroom ({lightroom_labels[name]})</p></div>"
+            f"<p>{lightroom_labels[name]}</p></div>"
             f"<div>{mls_cell}</div></div></section>"
         )
     top = manifest["summary"]
@@ -225,7 +223,7 @@ def run_merge(raw_dir: Path, lightroom_dir: Path, mls_dir: Path, output_dir: Pat
                 candidates[0], review_dir / f"lightroom_{name}.jpg"
             )
         else:
-            lightroom_labels[name] = "missing"
+            lightroom_labels[name] = "Lightroom merge missing"
 
     mls_matches = match_mls(sets, mls_dir, merged_dir)
     # Copy MLS photos beside the page so it opens anywhere, stripped of

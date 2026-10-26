@@ -47,14 +47,14 @@ def _manifest(n_sets=1):
 
 
 def test_footer_shows_unknown_when_ledger_unreadable(tmp_path):
-    page = build_review(tmp_path, _manifest(), {}, {"001": "full render"}, None)
+    page = build_review(tmp_path, _manifest(), {}, {"001": "Lightroom's own preview"}, None)
     html = page.read_text()
     assert "Meta spend unknown, ledger unreadable" in html
     assert "$0.0000" not in html, "an unreadable ledger must never read as $0"
 
 
 def test_footer_shows_measured_spend(tmp_path):
-    page = build_review(tmp_path, _manifest(), {}, {"001": "full render"}, 0.0008)
+    page = build_review(tmp_path, _manifest(), {}, {"001": "Lightroom's own preview"}, 0.0008)
     assert "$0.0008" in page.read_text()
 
 
@@ -105,7 +105,7 @@ def test_review_shows_every_mls_photo_on_a_shared_set(tmp_path):
         "a.jpg": {"set": 0, "how": "capture time"},
         "b.jpg": {"set": 0, "how": "matched by look"},
     }
-    page = build_review(tmp_path, _manifest(), matches, {"001": "full render"}, 0.0)
+    page = build_review(tmp_path, _manifest(), matches, {"001": "Lightroom's own preview"}, 0.0)
     html = page.read_text()
     assert "mls_a.jpg" in html and "mls_b.jpg" in html, "a second match is shown, never dropped"
 
@@ -116,32 +116,44 @@ def test_review_lists_every_frame_in_each_set(tmp_path):
     manifest["sets"][0]["size"] = 3
     manifest["sets"][1]["frames"] = ["dsc0006.nef", "dsc0007.nef"]
     manifest["sets"][1]["size"] = 2
-    page = build_review(tmp_path, manifest, {}, {"001": "full render", "002": "full render"}, 0.0)
+    labels = {"001": "Lightroom's own preview", "002": "Lightroom's own preview"}
+    page = build_review(tmp_path, manifest, {}, labels, 0.0)
     html = page.read_text()
     for name in ("dsc0001.nef", "dsc0002.nef", "dsc0003.nef", "dsc0006.nef", "dsc0007.nef"):
         assert name in html, f"{name} must be named on the page"
     assert "darkest" in html and "brightest" in html, "thumbnails stay"
 
 
-def test_lightroom_fallback_uses_largest_preview_label(tmp_path, monkeypatch):
-    dng = tmp_path / "fake.dng"
-    dng.write_text("not a dng at all")
-    monkeypatch.setattr(
-        hdr, "render_linear_dng", lambda p: (_ for _ in ()).throw(ValueError("no decode"))
-    )
+def test_lightroom_column_uses_embedded_preview_not_own_render(tmp_path, monkeypatch):
+    # The review page must show Lightroom's own embedded preview, never our
+    # color processing: our render is rigged to explode if it runs at all.
+    calls = []
+
+    def _must_not_run(path):
+        calls.append(path)
+        raise AssertionError("our DNG render must not run on the review page")
+
+    monkeypatch.setattr(hdr, "render_linear_dng", _must_not_run)
     preview = (np.zeros((8, 8, 3), dtype=np.uint8) + 9).copy()
     monkeypatch.setattr(hdr, "extract_preview", lambda p: preview)
+    dng = tmp_path / "fake.dng"
+    dng.write_text("not a dng at all")
     label = render_lightroom(dng, tmp_path / "out.jpg")
-    assert label == "preview only"
+    assert label == "Lightroom's own preview"
+    assert calls == [], "our DNG rendering ran on the review page"
     assert (tmp_path / "out.jpg").exists()
+
+
+def test_review_caption_names_lightrooms_own_preview(tmp_path):
+    page = build_review(tmp_path, _manifest(), {}, {"001": "Lightroom's own preview"}, 0.0)
+    html = page.read_text()
+    assert "Lightroom's own preview" in html
+    assert "our merge" in html and "full render" not in html
 
 
 def test_lightroom_total_failure_never_crashes_run(tmp_path, monkeypatch):
     dng = tmp_path / "fake.dng"
     dng.write_text("not a dng at all")
-    monkeypatch.setattr(
-        hdr, "render_linear_dng", lambda p: (_ for _ in ()).throw(ValueError("no decode"))
-    )
     monkeypatch.setattr(
         hdr, "extract_preview", lambda p: (_ for _ in ()).throw(ValueError("no preview"))
     )
