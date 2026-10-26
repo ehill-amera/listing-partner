@@ -128,8 +128,10 @@ def build_review(
             mls_cell = "<p>not published</p>"
         flag = " <b>FLAG: odd set size</b>" if entry["flagged"] else ""
         fail = f"<p>FAILED: {entry['error']}</p>" if entry["error"] else ""
+        frames = ", ".join(entry["frames"])
         rows.append(
             f"<section><h2>Set {name}{flag}</h2>{fail}"
+            f"<p>{entry['size']} frames: {frames}</p>"
             f'<div class="row"><div><img src="review/frame_{name}_dark.jpg" loading="lazy">'
             f"<p>darkest: {entry['darkest']}</p></div>"
             f'<div><img src="review/frame_{name}_bright.jpg" loading="lazy">'

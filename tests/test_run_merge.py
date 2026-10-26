@@ -38,6 +38,8 @@ def _manifest(n_sets=1):
                 "error": None,
                 "darkest": "a.nef",
                 "brightest": "b.nef",
+                "frames": ["a.nef", "b.nef", "c.nef"],
+                "size": 3,
             }
             for i in range(n_sets)
         ],
@@ -106,6 +108,19 @@ def test_review_shows_every_mls_photo_on_a_shared_set(tmp_path):
     page = build_review(tmp_path, _manifest(), matches, {"001": "full render"}, 0.0)
     html = page.read_text()
     assert "mls_a.jpg" in html and "mls_b.jpg" in html, "a second match is shown, never dropped"
+
+
+def test_review_lists_every_frame_in_each_set(tmp_path):
+    manifest = _manifest(n_sets=2)
+    manifest["sets"][0]["frames"] = ["dsc0001.nef", "dsc0002.nef", "dsc0003.nef"]
+    manifest["sets"][0]["size"] = 3
+    manifest["sets"][1]["frames"] = ["dsc0006.nef", "dsc0007.nef"]
+    manifest["sets"][1]["size"] = 2
+    page = build_review(tmp_path, manifest, {}, {"001": "full render", "002": "full render"}, 0.0)
+    html = page.read_text()
+    for name in ("dsc0001.nef", "dsc0002.nef", "dsc0003.nef", "dsc0006.nef", "dsc0007.nef"):
+        assert name in html, f"{name} must be named on the page"
+    assert "darkest" in html and "brightest" in html, "thumbnails stay"
 
 
 def test_lightroom_fallback_uses_largest_preview_label(tmp_path, monkeypatch):
