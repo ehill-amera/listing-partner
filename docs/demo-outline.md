@@ -4,6 +4,7 @@ Erik's outline, adopted Oct 26, 2026. Every time and number shown on screen is m
 
 ## The video
 
+0. **Opening line, required.** The official FAQ says a project that uses anything pre-existing must open its video with one line stating what was pre-existing and what was built this week. The first spoken line, with matching on-screen text, over the start of the hook: "Everything you see was built this week during the hackathon, except the read-only AppFolio connector, an existing tool I plug in for unit facts."
 1. **Hook, 15 seconds.** Split screen, messy versus clean. The messy side is the merged photo as shot. The clean side is the product's tidied version of the same photo. No staged mess.
 2. **The problem, on site.** Erik at the vacant unit: bracketed shooting, and what it takes today to get from raw files to a live listing.
 3. **Live run, no slides.** The product running on the real files: HDR merge, curation, room labels, SAM 3.1 masks.
