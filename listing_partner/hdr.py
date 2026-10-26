@@ -107,12 +107,16 @@ def decode_frame(path: Path, half_size: bool = False) -> np.ndarray:
 
 
 def decode_raw(path: Path, half_size: bool = False) -> np.ndarray:
-    """Decode a NEF/DNG to an sRGB uint8 RGB array."""
+    """Decode a NEF/DNG to an sRGB uint8 RGB array.
+
+    Auto-brightening stays off: every frame reaches fusion at its true
+    exposure, so the dark brackets keep their window highlights unclipped.
+    """
     with rawpy.imread(str(path)) as raw:
         rgb = raw.postprocess(
             use_camera_wb=True,
             half_size=half_size,
-            no_auto_bright=False,
+            no_auto_bright=True,
             output_bps=8,
             output_color=rawpy.ColorSpace.sRGB,
         )

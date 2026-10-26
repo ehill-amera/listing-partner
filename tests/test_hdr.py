@@ -139,6 +139,61 @@ def test_merge_set_accepts_jpeg_brackets(tmp_path):
     assert out.shape == (48, 64, 3) and out.dtype == np.uint8
 
 
+def test_fusion_sees_true_exposures_window_keeps_detail(tmp_path, monkeypatch):
+    """Synthetic brackets through decode_raw and fusion.
+
+    The scene has a dim interior and a bright window with a left-to-right
+    gradient. The fake sensor clips above 1.0; its postprocess mimics
+    rawpy: no_auto_bright=False lifts each frame toward mid gray (the old
+    call), True keeps one global gain (true exposure). The fused window
+    must keep the gradient, which only survives at true exposure.
+    """
+    h, w = 96, 128
+    scene = np.full((h, w), 0.05, dtype=np.float32)
+    scene[24:72, 80:120] = np.tile(np.linspace(0.7, 1.1, 40, dtype=np.float32), (48, 1))
+    scene = np.clip(scene, 0, 1.0)
+    frames = {"dark.nef": scene * 1.0, "bright.nef": np.clip(scene * 4.0, 0, 1.0)}
+
+    class _FakeRaw:
+        def __init__(self, linear):
+            self.linear = linear
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def postprocess(self, **kwargs):
+            if kwargs.get("no_auto_bright"):
+                out = np.clip(self.linear, 0, 1)
+            else:
+                gain = 0.25 / max(float(self.linear.mean()), 1e-6)
+                out = np.clip(self.linear * gain, 0, 1)
+            rgb = np.stack([out] * 3, axis=-1)
+            return (rgb * 255.0 + 0.5).astype(np.uint8)
+
+    def _fake_imread(path):
+        return _FakeRaw(frames[Path(path).name])
+
+    from pathlib import Path
+
+    monkeypatch.setattr(hdr.rawpy, "imread", _fake_imread)
+    # Alignment is covered by its own test; here it would only add warp
+    # noise to the gradient measurement.
+    monkeypatch.setattr(hdr, "align_to_first", lambda images: list(images))
+    dark = tmp_path / "dark.nef"
+    bright = tmp_path / "bright.nef"
+    dark.write_bytes(b"fake")
+    bright.write_bytes(b"fake")
+    out = hdr.merge_set([dark, bright])
+    # Per-column brightness across the window band (rows, then channels).
+    band = out[40:56, 82:118].astype(float).mean(axis=0).mean(axis=1)
+    assert band[-1] - band[0] > 20.0, (
+        "window gradient must survive fusion; auto-brightened frames clip it flat"
+    )
+
+
 def test_no_meta_imports_in_hdr():
     import inspect
 
