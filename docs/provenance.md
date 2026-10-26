@@ -6,6 +6,8 @@ Meta Global AI Developer Hackathon, Indie track, solo. Kickoff Mon Oct 26, 2026,
 
 Everything in this repository. The first commit was made Oct 26, 2026 at 12:37 PM ET, after kickoff, and every commit's date is in the git history. No code was copied in from any earlier project.
 
+One disclosure: the planning documents (PRODUCT.md, AGENTS.md, the first contract, the reviewer instructions) and the git safety hooks in `scripts/git-hooks/` were written the morning of Oct 26, before the noon kickoff, and committed after it. They are planning notes and repo guardrails, not product code. All product code was written after kickoff.
+
 ## Existing tools plugged in, not built here
 
 - **AppFolio read-only connector.** Built before the hackathon. Listing Partner reads public unit facts from it (beds, baths, square feet, rent, amenities, public address). It is not part of this repository and is not presented as hackathon work.

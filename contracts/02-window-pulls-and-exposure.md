@@ -1,0 +1,80 @@
+# Contract 02: Window pulls and exposure balance
+
+Branch: `unit-02-window-pulls`, from `main` after unit 1 has shipped.
+Target: Tue Oct 27, 2026
+Meta budget for this unit: **$2.00**, through the capped client only.
+
+Read PRODUCT.md and AGENTS.md first.
+
+## Why
+
+Erik's goal: a photographer drops raw files in a folder and gets listing photos back with Lightroom gone from the workflow. Today he finishes every merged photo by hand in Lightroom: he turns on HDR editing with Visualize HDR (which lowers contrast, opens the view out the windows and lifts the shadows), adjusts sliders, draws window masks plus linear, radial and luminance masks, sets white balance, and denoises last, because HDR processing and lifted shadows bring up noise. This unit does that finishing automatically, and it is the step that turns a merge into a photo he would publish.
+
+## Inputs
+
+- Unit 1's merged photos in `output/unit-a/merged/` and its set manifest (which NEFs belong to each set).
+- The NEF brackets in `inputs/unit-a/raw/`.
+- Erik's 16 finished MLS photos in `inputs/unit-a/mls/` and the 17 Lightroom merges in `inputs/unit-a/lightroom/`, as benchmarks only.
+
+## Build
+
+### A0. Lens and geometry, first
+
+- Lens profile correction: distortion, vignetting and chromatic aberration, from open lens profile data for the camera and lens in each file's metadata (the D5500 and its lens for unit-a). If no profile matches, skip the step for that photo and say so on the review page.
+- Vertical and perspective correction: walls and door frames that should be vertical come out vertical, the most visible fix in real estate photography. Crop only as much as the correction needs.
+- Ghosting check: measure ghosting from movement between brackets (ceiling fans, trees, shadows). Deghost in the merge only if unit-a shows it. Report the measurement either way.
+
+### A. Find the windows
+
+- SAM 3.1 segments every window in each merged photo through the capped client, using a text prompt for windows (and glass doors with an outdoor view). Masks are saved as PNGs in `output/unit-a/windows/masks/`.
+- Muse Spark checks each candidate with crop and zoom tools (it asks for a crop of a region and gets that region back at full detail) and rejects anything that is not a view to the outdoors: mirrors, screens, framed pictures, light fixtures, cabinet glass. Each rejection is listed on the review page with its reason.
+- The mask covers glass only. Window frames, sills and trim stay from the merge.
+- Every crop and zoom round goes through the capped client and counts toward the budget.
+
+### B. Window pull
+
+- Inside each confirmed window mask, the view comes from the same set's real bracket frames: the frame or blend of frames whose window region is best exposed (fewest clipped highlights, detail in the view), aligned to the merge.
+- Match the pulled view's brightness and color to read naturally against the room, then blend with a feathered edge sized to the image. No halos, no hard edges, no dark outline on the frame.
+- Real pixels only. No generative model touches a window. Outside the window masks this step changes nothing, measured.
+
+### C. Exposure balance
+
+The automatic version of Erik's linear, radial and luminance masks:
+- Even out exposure region by region: dark corners and ceilings lifted, hot floors and walls near windows brought down, dim hallways opened up. SAM 3.1 region masks (walls, ceiling, floor) may guide it.
+- The target look is what Erik gets from Lightroom's Visualize HDR plus his sliders: lower overall contrast, shadows lifted, highlights held, windows readable. Output stays a standard JPEG, the same format Erik uploads to the MLS today. His MLS photos are the reference for how far to take it.
+- Keep it natural. No crushed shadows, no gray haze, no visible region edges, no change inside the pulled windows.
+- Neutral white balance, so walls and ceilings read as their real color under mixed light.
+
+### D. Denoise, last
+
+- Denoise every finished photo as the final step, because the merge, the shadow lift and the exposure balance raise noise, mostly in shadows and flat walls.
+- Non-generative only: the denoiser may smooth noise but must not invent texture or detail. No generative model.
+- Measure it: noise in flat shadow and wall patches drops, and edge detail in textured areas (trim, flooring grain, cabinet edges) is not smeared, measured as edge strength before and after.
+
+### E. Output and review page
+
+- Finished photos in `output/unit-a/finished/` (`001.jpg` and so on, full resolution, sRGB, no GPS or camera serial).
+- `output/unit-a/review-finish.html`, one row per shot: our merge from unit 1, our finished photo, the window mask over the merge, and Erik's MLS photo of the same shot.
+- Top line: photos processed, median shadow-noise before and after denoise, windows found, windows confirmed, candidates rejected, photos with at least one window, clipped highlights inside confirmed windows before and after (as a percentage of window pixels), run time, and Meta spend. All measured from this run.
+- Footer: Meta spend to date and the $100 cap, read from the ledger (or "unknown" if the ledger cannot be read).
+
+## Acceptance criteria
+
+1. `./scripts/check` passes on the final commit.
+2. Every merged photo has a finished photo, or a plain-words reason it failed. Processed plus failed equals 17.
+3. Every window mask and every rejection is saved and shown. Rejections carry Muse Spark's reason.
+4. Clipped highlights inside confirmed windows drop from before to after on every photo that has a confirmed window. Report the before and after numbers per photo.
+5. Outside the window masks, step B changes no pixels, measured on every photo.
+6. A test with a synthetic room and window proves the pull uses real bracket pixels inside the mask, blends with no hard edge, and leaves outside pixels unchanged.
+7. No output carries GPS or camera serial metadata. No banned string appears in any tracked file, file name, commit message or branch name.
+8. Meta spend for this unit is under $2.00, every call through the capped client.
+9. Denoise lowers measured noise in flat shadow and wall patches on every photo, and edge strength in textured areas stays within 10% of before. Report both per photo.
+10. On every photo with a lens profile match, measured line straightness improves after correction, and near-vertical lines (walls, door frames) end within 0.5 degrees of vertical. Report per photo.
+
+## Observable criterion (Erik, two minutes, no code)
+
+Finder, Shift+Cmd+G, `~/projects/listing-partner/output/unit-a`, then open `review-finish.html`. Pick three rooms with windows. In our finished photo, the view outside is clear and real, the window frames are clean with no halo, the room reads evenly bright with no dark corners, and the walls look their true color, and the shadows and walls are clean, not grainy. Next to it, your MLS photo of the same shot lets you judge whether ours could go out without opening Lightroom.
+
+## Out of scope
+
+Crop to listing aspect ratio, output sharpening, export sizing and naming (unit 7), curation, room labels, tidying, writing, AppFolio, and any generative edit.

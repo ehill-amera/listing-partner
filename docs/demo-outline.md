@@ -4,7 +4,7 @@ Erik's outline, adopted Oct 26, 2026. Every time and number shown on screen is m
 
 ## The video
 
-0. **Opening line, required.** The official FAQ says a project that uses anything pre-existing must open its video with one line stating what was pre-existing and what was built this week. The first spoken line, with matching on-screen text, over the start of the hook: "Everything you see was built this week during the hackathon, except the read-only AppFolio connector, an existing tool I plug in for unit facts."
+0. **Opening line, required.** The official FAQ says a project that uses anything pre-existing must open its video with one line stating what was pre-existing and what was built this week. The first spoken line, with matching on-screen text, over the start of the hook: "Everything you see was built this week during the hackathon. The only pieces from before kickoff are the read-only AppFolio connector, an existing tool I plug in for unit facts, and the planning notes and repo safety hooks I wrote the morning of kickoff."
 1. **Hook, 15 seconds.** Split screen, messy versus clean. The messy side is the merged photo as shot. The clean side is the product's tidied version of the same photo. No staged mess.
 2. **The problem, on site.** Erik at the vacant unit: bracketed shooting, and what it takes today to get from raw files to a live listing.
 3. **Live run, no slides.** The product running on the real files: HDR merge, curation, room labels, SAM 3.1 masks.
@@ -17,6 +17,10 @@ Erik's outline, adopted Oct 26, 2026. Every time and number shown on screen is m
 The first 30 seconds are also cut as a vertical clip with burned-in captions for X. It has to make sense on its own.
 
 ## Rules for the video
+
+- Every photo on screen comes from the public sample set Erik owns (his own home, interiors only). unit-a never appears in the video, the README or the X post.
+- Record from a renamed copy outside Google Drive (for example ~/listing-partner-demo/), so no Finder, Terminal or Muse Code window shows a source path. Before posting, scan the final video's frames and captions for every banned string.
+- Describe the company as "a Metro Detroit property manager with about 493 units" unless Erik decides to name Bokani.
 
 - Show only what was built Oct 26 to Nov 4. Wherever unit facts appear, label the AppFolio connector as an existing tool plugged in.
 - No street address, tenant, owner or staff name, phone number or email on screen, in captions, or in file names shown on screen. Use the slug or a neutral name for the unit.
