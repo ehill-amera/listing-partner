@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import exifread
 from PIL import ExifTags, Image
 
 # Suffixes that promise image content. A file with one of these that Pillow
@@ -48,6 +49,18 @@ IMAGE_SUFFIXES = frozenset(
 SERIAL_TAGS = ("BodySerialNumber", "CameraSerialNumber", "SerialNumber")
 
 
+def _deep_tags(path: Path) -> dict[str, str]:
+    """Every metadata directory exifread can parse: top level, the Exif
+    sub-IFD, the GPS IFD, interoperability, and maker notes. Cameras hide
+    the body serial and GPS coordinates below the top level."""
+    try:
+        with open(path, "rb") as handle:
+            tags = exifread.process_file(handle, details=False)
+    except Exception:
+        return {}
+    return {name: str(value) for name, value in tags.items()}
+
+
 def scan(paths: list[str]) -> list[str]:
     """Return one loud line per file that fails. Empty means clean."""
     bad: list[str] = []
@@ -56,19 +69,34 @@ def scan(paths: list[str]) -> list[str]:
         if not path.is_file():
             bad.append(f"{name}: missing, cannot scan")
             continue
+        pillow_ok = True
         try:
             with Image.open(path) as img:
                 exif = img.getexif()
         except Exception:
-            if path.suffix.lower() in IMAGE_SUFFIXES:
-                bad.append(f"{name}: looks like an image but cannot be read")
+            pillow_ok = False
+            exif = {}
+        if pillow_ok:
+            names = {ExifTags.TAGS.get(k, k) for k in exif}
+            if "GPSInfo" in names or 34853 in exif:
+                bad.append(f"{name}: GPS block")
+            for serial in SERIAL_TAGS:
+                if serial in names:
+                    bad.append(f"{name}: {serial}")
+        deep = _deep_tags(path)
+        if deep:
+            gps_hit = any(
+                key.split()[-1].startswith("GPS") or key.startswith("GPS ")
+                for key in deep
+            )
+            if gps_hit:
+                bad.append(f"{name}: GPS block")
+            for key in sorted(deep):
+                if "serial" in key.lower():
+                    bad.append(f"{name}: {key.split()[-1]} ({deep[key][:24]})")
             continue
-        names = {ExifTags.TAGS.get(k, k) for k in exif}
-        if "GPSInfo" in names or 34853 in exif:
-            bad.append(f"{name}: GPS block")
-        for serial in SERIAL_TAGS:
-            if serial in names:
-                bad.append(f"{name}: {serial}")
+        if not pillow_ok and path.suffix.lower() in IMAGE_SUFFIXES:
+            bad.append(f"{name}: looks like an image but cannot be read")
     return bad
 
 

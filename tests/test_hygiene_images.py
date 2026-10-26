@@ -62,6 +62,20 @@ def test_camera_serial_is_flagged(tmp_path):
     assert any("Serial" in line for line in bad)
 
 
+def test_serial_only_in_exif_sub_ifd_is_flagged(tmp_path):
+    # BodySerialNumber lives in the Exif sub-IFD, not the top level: a
+    # top-level-only scan passes this file, the deep scan must flag it.
+    mod = _load_module()
+    target = tmp_path / "deep-serial.jpg"
+    exif = Exif()
+    exif[36867] = "2026:10:12 10:00:00"  # DateTimeOriginal, top level only
+    sub = exif.get_ifd(0x8769)
+    sub[0xA431] = "SN-DEEP-1"  # BodySerialNumber, Exif sub-IFD
+    Image.new("RGB", (16, 16), (1, 2, 3)).save(target, format="JPEG", exif=exif)
+    bad = mod.scan([str(target)])
+    assert any("Serial" in line for line in bad), "deep serial must be flagged"
+
+
 def test_clean_images_pass(tmp_path):
     mod = _load_module()
     files = []
