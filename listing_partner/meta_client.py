@@ -134,6 +134,21 @@ class ResponseUnreadable(Exception):
         self.request_id = request_id
 
 
+class SettlementFailed(Exception):
+    """The call was billed but its settlement line could not be written.
+
+    Deliberately NOT a MetaRefused: the transport already returned, so the
+    money moved and the reservation line stays counted. Reports the billed
+    cost and the request id so the money stays visible until a person
+    reconciles the ledger.
+    """
+
+    def __init__(self, message: str, *, actual_usd: float, request_id: str | None):
+        super().__init__(message)
+        self.actual_usd = actual_usd
+        self.request_id = request_id
+
+
 def estimate_text_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimated USD for a text-model call from token counts."""
     price = PRICES.get(model)
@@ -180,7 +195,9 @@ def _read_total(handle) -> float:
         if not isinstance(line, dict):
             raise LedgerError(f"ledger corrupt at line {lineno}: not an object")
         try:
-            estimated = _checked_amount(line.get("estimated_usd", 0.0), "estimated_usd")
+            if "estimated_usd" not in line:
+                raise LedgerError("missing estimated_usd")
+            estimated = _checked_amount(line["estimated_usd"], "estimated_usd")
             raw_actual = line.get("actual_usd")
             actual = None if raw_actual is None else _checked_amount(raw_actual, "actual_usd")
         except LedgerError as exc:
@@ -323,13 +340,18 @@ def call_meta_text(
             actual = estimated
         try:
             _settle(handle, call_id, model, estimated, actual, request_id)
-        except LedgerError:
+        except SettlementFailed:
             raise
-        except Exception as exc:  # noqa: BLE001 - a settle crash keeps the reservation
-            raise MetaRefused(f"settlement failed; reservation kept: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - billed already; never a refusal
+            raise SettlementFailed(
+                f"call was billed ${actual:.6f} (request {request_id}); "
+                f"settlement failed, reservation kept: {exc}",
+                actual_usd=actual,
+                request_id=request_id,
+            ) from exc
         try:
             text = _response_text(response)
-        except (KeyError, TypeError, IndexError) as exc:
+        except Exception as exc:  # noqa: BLE001 - billed already; any unreadable shape counts
             raise ResponseUnreadable(
                 f"call was billed ${actual:.6f} (request {request_id}); "
                 f"the reply could not be read: {exc}",

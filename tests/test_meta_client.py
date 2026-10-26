@@ -18,6 +18,7 @@ from listing_partner.meta_client import (
     MissingKey,
     ModelNotAllowed,
     ResponseUnreadable,
+    SettlementFailed,
     TransportFailed,
     UnknownPrice,
     WouldCrossCap,
@@ -391,8 +392,9 @@ def test_crash_during_settle_cannot_lower_total(ledger, key, monkeypatch):
         raise RuntimeError("died while settling")
 
     monkeypatch.setattr(meta_client, "_settle", _crash)
-    with pytest.raises(MetaRefused, match="settlement failed"):
+    with pytest.raises(SettlementFailed, match="[Bb]illed") as excinfo:
         meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    assert not isinstance(excinfo.value, MetaRefused), "billed is not refused"
     lines = _ledger_lines(ledger)
     assert len(lines) == 3, "the crashed call leaves its reservation, nothing else"
     crashed = lines[2]
@@ -443,10 +445,50 @@ def test_billed_call_with_unreadable_reply_is_not_a_refusal(ledger, key):
     assert not isinstance(excinfo.value, MetaRefused), "billed is not refused"
     assert "resp-nonsense" in str(excinfo.value), "the error carries the request id"
     assert excinfo.value.actual_usd > 0, "the error carries the billed cost"
+    assert type(excinfo.value) is ResponseUnreadable, "exactly this error, no refusal wrapper"
     lines = _ledger_lines(ledger)
     assert len(lines) == 2 and lines[1]["status"] == "complete", "the call settled: money moved"
     text = str(excinfo.value).lower()
     assert "reply" in text and "could not be read" in text
+
+
+def test_oddly_shaped_billed_reply_is_not_a_refusal(ledger, key):
+    """A reply the reader chokes on (None item: AttributeError, not
+    KeyError) is still a billed call, never a refusal and never a crash."""
+
+    def _odd(url, headers, body):
+        return {
+            "id": "resp-odd",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "output": [None],
+        }
+
+    with pytest.raises(ResponseUnreadable, match="[Bb]illed") as excinfo:
+        meta_client.call_meta_text(MODEL, "hi", transport=_odd, ledger_path=ledger)
+    assert not isinstance(excinfo.value, MetaRefused), "billed is not refused"
+    assert type(excinfo.value) is ResponseUnreadable
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 2 and lines[1]["status"] == "complete", "the call settled: money moved"
+
+
+def test_settle_failure_is_not_a_refusal(ledger, key, monkeypatch):
+    """Transport succeeded, so money moved; a crash while writing the
+    settlement line must say billed, never refused."""
+
+    # Same signature as the real _settle: a wrong-shaped stub would raise
+    # TypeError and pass for the wrong reason, so the names are pinned here.
+    def _crash(handle, call_id, model, estimated, actual, request_id):
+        raise RuntimeError("died while settling")
+
+    monkeypatch.setattr(meta_client, "_settle", _crash)
+    with pytest.raises(meta_client.SettlementFailed, match="[Bb]illed") as excinfo:
+        meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    assert not isinstance(excinfo.value, MetaRefused), "billed is not refused"
+    assert "reservation kept" in str(excinfo.value).lower()
+    assert excinfo.value.actual_usd > 0, "the error carries the billed cost"
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 1, "the crashed call leaves its reservation, nothing else"
+    assert lines[0]["status"] == "reserved" and lines[0]["actual_usd"] is None
 
 
 def test_key_only_from_env(ledger, monkeypatch):
@@ -455,3 +497,73 @@ def test_key_only_from_env(ledger, monkeypatch):
     monkeypatch.setenv("MODEL_API_KEY", "wrong-var")
     with pytest.raises(MetaRefused):
         meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+
+
+def test_worst_case_guard_refuses_from_below_ceiling(ledger, key):
+    # The total sits BELOW the $99 reservation ceiling: only this call's
+    # worst-case cost pushes past it (98.996 + 0.0061 > 99). A guard that
+    # refuses only when the total is already past the ceiling, or a naive
+    # len/4 estimate (98.996 + 0.0024 < 99, still fits), lets this through.
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-10-26T00:00:00+00:00",
+                "model": MODEL,
+                "estimated_usd": 98.996,
+                "actual_usd": 98.996,
+                "request_id": "r",
+                "call_id": "c",
+                "status": "complete",
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(WouldCrossCap):
+        meta_client.call_meta_text(
+            MODEL, "x" * 4000, max_output_tokens=256, transport=_transport_ok, ledger_path=ledger
+        )
+    assert len(_ledger_lines(ledger)) == 1, "refused calls add no line"
+
+
+def _good_line(call_id, actual=0.0009):
+    return {
+        "ts": "2026-10-26T00:00:00+00:00",
+        "model": MODEL,
+        "estimated_usd": 0.001,
+        "actual_usd": actual,
+        "request_id": "r-" + call_id,
+        "call_id": call_id,
+        "status": "complete",
+    }
+
+
+def test_corrupt_middle_line_refuses(ledger, key):
+    before = (
+        json.dumps(_good_line("c1"))
+        + "\n{gah, truncated mid-write\n"
+        + json.dumps(_good_line("c3"))
+        + "\n"
+    )
+    ledger.write_text(before)
+    with pytest.raises(LedgerError, match="line 2"):
+        meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    with pytest.raises(LedgerError, match="line 2"):
+        meta_client.read_spend_total(ledger)
+    assert Path(ledger).read_text() == before, "a refused call writes nothing"
+
+
+def test_line_missing_estimated_usd_refuses(ledger, key):
+    damaged = _good_line("c2")
+    del damaged["estimated_usd"]
+    ledger.write_text(
+        json.dumps(_good_line("c1"))
+        + "\n"
+        + json.dumps(damaged)
+        + "\n"
+        + json.dumps(_good_line("c3"))
+        + "\n"
+    )
+    with pytest.raises(LedgerError, match="estimated_usd"):
+        meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    with pytest.raises(LedgerError, match="estimated_usd"):
+        meta_client.read_spend_total(ledger)
