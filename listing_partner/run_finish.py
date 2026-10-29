@@ -227,6 +227,19 @@ def replay_set(prior: dict, members: list[Path], mls_median: float | None, dirs:
     finish_tail(record, state, dirs, union)
     for key in ("candidates_found", "transcript", "windows", "rejections"):
         record[key] = prior[key]
+    # Collapse exact duplicate rejection rows: both text prompts can return
+    # the same region under one id, and one verdict then prints twice. Same
+    # id plus same reason carries no new information either way.
+    seen_rows = set()
+    unique_rejections = []
+    for rejection in record["rejections"]:
+        key = (rejection["id"], rejection["reason"])
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        unique_rejections.append(rejection)
+    record["rejections"] = unique_rejections
+    record["candidates_found"] = len(record["windows"]) + len(unique_rejections)
     record["error"] = None
     return record
 
@@ -247,6 +260,7 @@ def process_set(
         candidates = []
         for prompt in SAM_PROMPTS:
             candidates.extend(segment.find_candidates(state["sent_jpeg"], prompt))
+        candidates = segment.dedupe_candidates(candidates)
         record["candidates_found"] = len(candidates)
         if candidates:
             verdicts = segment.verify_candidates(state["small"], candidates, transcript=transcript)

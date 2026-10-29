@@ -103,6 +103,20 @@ def test_verify_zooms_to_skipped_candidates(tmp_path, monkeypatch):
     assert verdicts[1][0] is True
 
 
+def test_dedupe_candidates_collapses_same_box_and_reids():
+    mask = np.zeros((10, 10), bool)
+    candidates = [
+        {"object_id": 0, "box": (0, 0, 5, 5), "mask": mask},
+        {"object_id": 0, "box": (5, 5, 9, 9), "mask": mask},
+        {"object_id": 1, "box": (0, 0, 5, 5), "mask": mask},
+    ]
+    unique = segment.dedupe_candidates(candidates)
+    assert [(c["object_id"], c["box"]) for c in unique] == [
+        (0, (0, 0, 5, 5)),
+        (1, (5, 5, 9, 9)),
+    ]
+
+
 def test_scale_candidates_to_full_resolution():
     mask = np.zeros((684, 1024), bool)
     mask[74:680, 0:77] = True

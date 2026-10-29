@@ -62,6 +62,26 @@ def parse_lane(text: str, frame_w: int, frame_h: int) -> list[dict]:
     return candidates
 
 
+def dedupe_candidates(candidates: list[dict]) -> list[dict]:
+    """One entry per detected region, with sequential ids.
+
+    Both text prompts run on the same photo, so the same glass can come
+    back twice, and each lane numbers from zero, so two regions can share
+    an id. Same box twice keeps the first; then ids are reassigned 0..n-1
+    in first-seen order so every verdict names exactly one region.
+    """
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        if candidate["box"] in seen:
+            continue
+        seen.add(candidate["box"])
+        unique.append(candidate)
+    for new_id, candidate in enumerate(unique):
+        candidate["object_id"] = new_id
+    return unique
+
+
 def find_candidates(
     image_jpeg: bytes, prompt: str, *, transport=None, ledger_path=None
 ) -> list[dict]:
