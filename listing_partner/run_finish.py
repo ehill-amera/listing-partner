@@ -114,7 +114,13 @@ def build_inputs(
     record["straight_before"] = straight_before
     record["straight_after"] = geometry.line_measure(cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY))
 
-    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=valid)
+    # The gain anchors on the exact pixels the final crop keeps: the
+    # centered crop can cut valid-but-dark edges past the validity mask,
+    # which would otherwise land the shipped file off target.
+    y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
+    anchor = np.zeros_like(valid)
+    anchor[y0:y1, x0:x1] = True
+    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=anchor)
     record["balance"] = balance_report
 
     h, w = balanced.shape[:2]

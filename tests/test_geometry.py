@@ -165,6 +165,16 @@ def test_vertical_correction_roundtrip_on_real_photo():
     assert residual is not None and abs(residual) <= 0.5
 
 
+def test_crop_rect_matches_crop_valid():
+    valid = np.ones((400, 500), bool)
+    valid[0:10, :] = False
+    y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
+    img = np.zeros((400, 500, 3), np.uint8)
+    assert (geometry.crop_valid(img, valid) == img[y0:y1, x0:x1]).all()
+    assert y0 >= 10, "the rect must exclude the invalid top rows"
+    assert valid[y0:y1, x0:x1].all(), "the rect holds only valid pixels"
+
+
 def test_crop_valid_removes_rotation_borders():
     img = np.full((400, 500, 3), 200, np.uint8)
     tilted, angle = geometry.rotate_image(img, 5.0)

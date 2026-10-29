@@ -496,13 +496,10 @@ def correct_verticals(img: np.ndarray) -> tuple[np.ndarray, float | None]:
     return fixed, -tilt
 
 
-def crop_valid(img: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    """Largest centered same-aspect rectangle holding only valid pixels.
-
-    Rotations and undistortion leave black borders; finished photos must
-    not show them. valid marks samplable pixels (True inside). Found by
-    bisection on an integral image, so partial edge rows cannot fool it.
-    """
+def crop_valid_rect(valid: np.ndarray) -> tuple[int, int, int, int]:
+    """Coordinates of the largest centered same-aspect rectangle holding
+    only valid pixels. Found by bisection on an integral image, so
+    partial edge rows cannot fool it."""
     h, w = valid.shape
     integ = cv2.integral(valid.astype(np.uint8))
 
@@ -525,6 +522,16 @@ def crop_valid(img: np.ndarray, valid: np.ndarray) -> np.ndarray:
     x0, x1 = int(round(w / 2.0 - hw)), int(round(w / 2.0 + hw))
     if y1 <= y0 or x1 <= x0:
         raise ValueError("no valid centered crop")
+    return y0, y1, x0, x1
+
+
+def crop_valid(img: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Largest centered same-aspect rectangle holding only valid pixels.
+
+    Rotations and undistortion leave black borders; finished photos must
+    not show them. valid marks samplable pixels (True inside).
+    """
+    y0, y1, x0, x1 = crop_valid_rect(valid)
     return img[y0:y1, x0:x1]
 
 
