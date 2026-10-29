@@ -121,18 +121,23 @@ def annotate(photo_rgb: np.ndarray, candidates: list[dict]) -> np.ndarray:
 
 
 _VERDICT = re.compile(r"^\s*(\d+)\s*:\s*(window|not a window)\s*[-–]\s*(.+?)\s*$")
-_CROP = re.compile(r"^\s*CROP\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$")
+_CROP = re.compile(r"CROP\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
 
 
-def _parse_verdicts(text: str) -> dict[int, tuple[bool, str]] | None:
+def _parse_verdicts(text: str) -> dict[int, tuple[bool, str]]:
+    """Every verdict line anywhere in the reply (chatter ignored)."""
     verdicts = {}
     for line in text.strip().splitlines():
         match = _VERDICT.match(line)
-        if not match:
-            return None
-        object_id = int(match.group(1))
-        verdicts[object_id] = (match.group(2) == "window", match.group(3))
-    return verdicts or None
+        if match:
+            object_id = int(match.group(1))
+            verdicts[object_id] = (match.group(2) == "window", match.group(3))
+    return verdicts
+
+
+def _wants_closer_look(text: str) -> bool:
+    lowered = text.lower()
+    return "crop" in lowered or "zoom" in lowered or "closer look" in lowered
 
 
 VERIFY_PROMPT = (
@@ -200,36 +205,30 @@ def verify_candidates(
         )
         if transcript is not None:
             transcript.append(out["text"])
-        verdicts = _parse_verdicts(out["text"])
-        if verdicts is not None:
-            found.update(verdicts)
-            missing = sorted(wanted - set(found))
-            if not missing:
-                return {k: found[k] for k in wanted}
-            if rounds >= MAX_CROP_ROUNDS:
-                raise ValueError(f"Spark skipped candidates {missing}")
-            need = missing[0]
-            box = next(c["box"] for c in candidates if c["object_id"] == need)
-            prompt = ZOOM_PROMPT.format(object_id=need)
-            current_jpeg = jpeg_bytes(_zoom_crop(photo_rgb, box))
+        found.update(_parse_verdicts(out["text"]))
+        missing = sorted(wanted - set(found))
+        if not missing:
+            return {k: found[k] for k in wanted}
+        if rounds >= MAX_CROP_ROUNDS:
+            raise ValueError(f"Spark left candidates {missing} undecided after {rounds + 1} rounds")
+        match = _CROP.search(out["text"])
+        if match:
+            x, y, w, h = (int(v) for v in match.groups())
+            crop = photo_rgb[y : y + h, x : x + w]
+            if crop.size == 0:
+                raise ValueError(f"empty crop {x},{y},{w},{h}")
+            current_jpeg = jpeg_bytes(crop)
+            prompt = VERIFY_PROMPT
             rounds += 1
             continue
-        if rounds >= MAX_CROP_ROUNDS:
-            raise ValueError(f"unreadable verdicts after {rounds + 1} rounds")
-        first_line = out["text"].strip().splitlines()[0]
-        match = _CROP.match(first_line)
-        if not match:
-            if first_line.strip().upper() == "CROP":
-                prompt = CROP_ASK
-                rounds += 1
-                continue
-            raise ValueError(f"unreadable verdicts: {out['text'][:120]!r}")
-        x, y, w, h = (int(v) for v in match.groups())
-        crop = photo_rgb[y : y + h, x : x + w]
-        if crop.size == 0:
-            raise ValueError(f"empty crop {x},{y},{w},{h}")
-        current_jpeg = jpeg_bytes(crop)
-        prompt = VERIFY_PROMPT
+        if _wants_closer_look(out["text"]) or not found:
+            prompt = CROP_ASK
+            rounds += 1
+            continue
+        need = missing[0]
+        box = next(c["box"] for c in candidates if c["object_id"] == need)
+        prompt = ZOOM_PROMPT.format(object_id=need)
+        current_jpeg = jpeg_bytes(_zoom_crop(photo_rgb, box))
         rounds += 1
 
 

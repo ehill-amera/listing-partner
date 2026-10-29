@@ -143,6 +143,55 @@ def test_verify_clarifies_a_bare_crop_ask(tmp_path, monkeypatch):
     assert "CROP x,y,w,h" in json.dumps(prompts[1]), "the follow-up asks for coords"
 
 
+def test_verify_reads_chatter_embedded_crop_and_verdicts(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    replies = iter(
+        [
+            "This yard view needs a closer look. CROP 10,10,40,40\n",
+            "0: window - sky and trees\n",
+        ]
+    )
+
+    def _spark(url, headers, body):
+        return {
+            "id": "r-e",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    verdicts = segment.verify_candidates(
+        photo,
+        [{"object_id": 0, "box": (10, 10, 50, 50)}],
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0][0] is True
+
+
+def test_verify_collects_partial_verdicts_across_rounds(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    replies = iter(["Some chatter here.\n1: window - trees\n", "0: not a window - mirror\n"])
+
+    def _spark(url, headers, body):
+        return {
+            "id": "r-p",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    boxes = [
+        {"object_id": 0, "box": (0, 0, 30, 30)},
+        {"object_id": 1, "box": (30, 30, 60, 60)},
+    ]
+    verdicts = segment.verify_candidates(photo, boxes, transport=_spark, ledger_path=ledger)
+    assert verdicts[1] == (True, "trees")
+    assert verdicts[0] == (False, "mirror")
+
+
 def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"
