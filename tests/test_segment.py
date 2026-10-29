@@ -231,6 +231,42 @@ def test_verify_crops_keep_the_red_annotation(tmp_path, monkeypatch):
         assert red.any(), "follow-up crop lost the red numbered boxes"
 
 
+def test_verify_zooms_after_one_spark_crop(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    bodies = []
+    replies = iter(
+        [
+            "Need a closer look. CROP 0,0,60,60\n",
+            "Still looking. CROP 0,0,50,50\n",
+            "0: window - trees\n",
+            "1: not a window - mirror\n",
+        ]
+    )
+
+    def _spark(url, headers, body):
+        bodies.append(body)
+        return {
+            "id": "r-s",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    boxes = [
+        {"object_id": 0, "box": (10, 10, 50, 50)},
+        {"object_id": 1, "box": (60, 60, 90, 90)},
+    ]
+    verdicts = segment.verify_candidates(photo, boxes, transport=_spark, ledger_path=ledger)
+    assert verdicts[0][0] is True
+    assert verdicts[1] == (False, "mirror")
+    prompts = [json.loads(b.decode("utf-8"))["input"] for b in bodies]
+    assert "Visible candidate ids" in str(prompts[1])
+    assert "Close-up of candidate box" in str(prompts[2])
+
+
 def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"

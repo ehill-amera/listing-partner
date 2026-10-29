@@ -25,9 +25,12 @@ from listing_partner import meta_client
 SAM_MODEL = "sam-3.1"
 SPARK_MODEL = "muse-spark-1.3"
 
-# Extra verify rounds after the first annotated photo. Each round is one
+# Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
-MAX_CROP_ROUNDS = 2
+# Spark drives at most once (its crop request); after that we drive,
+# zooming each undecided candidate in turn, so chatter can never stall
+# the loop.
+MAX_CROP_ROUNDS = 6
 
 
 def parse_lane(text: str, frame_w: int, frame_h: int) -> list[dict]:
@@ -190,10 +193,13 @@ def verify_candidates(
     wanted = {c["object_id"] for c in candidates}
     if not wanted:
         return {}
+    boxes = {c["object_id"]: c["box"] for c in candidates}
     annotated = annotate(photo_rgb, candidates)
     current_jpeg = jpeg_bytes(annotated)
     prompt = VERIFY_PROMPT
     rounds = 0
+    spark_drove = False
+    zoomed: set[int] = set()
     found: dict[int, tuple[bool, str]] = {}
     while True:
         out = meta_client.call_meta_text(
@@ -212,25 +218,45 @@ def verify_candidates(
             return {k: found[k] for k in wanted}
         if rounds >= MAX_CROP_ROUNDS:
             raise ValueError(f"Spark left candidates {missing} undecided after {rounds + 1} rounds")
-        match = _CROP.search(out["text"])
+        match = None if spark_drove else _CROP.search(out["text"])
         if match:
+            spark_drove = True
             x, y, w, h = (int(v) for v in match.groups())
             crop = annotated[y : y + h, x : x + w]
             if crop.size == 0:
                 raise ValueError(f"empty crop {x},{y},{w},{h}")
             current_jpeg = jpeg_bytes(crop)
-            prompt = VERIFY_PROMPT
+            prompt = VERIFY_PROMPT + _visible_note(boxes, (x, y, w, h))
             rounds += 1
             continue
         if _wants_closer_look(out["text"]) or not found:
-            prompt = CROP_ASK
-            rounds += 1
-            continue
-        need = missing[0]
-        box = next(c["box"] for c in candidates if c["object_id"] == need)
+            if spark_drove:
+                need = next((m for m in missing if m not in zoomed), missing[0])
+            else:
+                prompt = CROP_ASK
+                rounds += 1
+                continue
+        else:
+            need = next((m for m in missing if m not in zoomed), missing[0])
+        box = boxes[need]
+        zoomed.add(need)
         prompt = ZOOM_PROMPT.format(object_id=need)
         current_jpeg = jpeg_bytes(_zoom_crop(annotated, box))
         rounds += 1
+
+
+def _visible_note(boxes: dict[int, tuple], crop: tuple) -> str:
+    """Name the candidate ids whose box centers land inside a crop."""
+    x, y, w, h = crop
+    inside = sorted(
+        object_id
+        for object_id, (left, top, right, bottom) in boxes.items()
+        if x <= (left + right) / 2 <= x + w and y <= (top + bottom) / 2 <= y + h
+    )
+    if not inside:
+        return ""
+    ids = ", ".join(str(i) for i in inside)
+    return f" Visible candidate ids in this view: {ids}. Reply one verdict line for each."
 
 
 def pull_window(
