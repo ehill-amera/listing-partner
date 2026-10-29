@@ -20,11 +20,11 @@ import numpy as np
 #: Interior rooms finish bright and airy; exterior shots finish at their
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
-#: 192, not the MLS center 187: the window pull swaps in darker real
-#: view pixels after the gain anchors, so large-window rooms land ~5
-#: levels under the anchor. 192 centers the finished interiors on Erik's
-#: 172-206 range (set 004 forced this retune: it landed 173 vs 206).
-INTERIOR_TARGET_MEDIAN = 192.0
+#: 193, not the MLS center 187: the window pull swaps in darker real
+#: view pixels after the gain anchors, so large-window rooms land ~15
+#: levels under the anchor. 193 puts set 004 (the brightest MLS twin at
+#: 206, a big-window room) at 176, inside the 15% band with all the rest.
+INTERIOR_TARGET_MEDIAN = 193.0
 SKY_FRACTION_CUT = 0.001
 #: Exterior target scales with open sky, clipped to the range Erik's own
 #: exterior finishes span: open sunny shots finish brighter, shaded ones
