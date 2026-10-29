@@ -1,0 +1,27 @@
+{
+  "object": "response",
+  "status": "incomplete",
+  "model": "muse-spark-1.3",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "STRIPPED",
+      "summary": [],
+      "status": "incomplete"
+    }
+  ],
+  "usage": {
+    "input_tokens": 15,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 16,
+    "output_tokens_details": {
+      "reasoning_tokens": 14
+    },
+    "total_tokens": 31
+  },
+  "incomplete_details": {
+    "reason": "max_output_tokens"
+  }
+}

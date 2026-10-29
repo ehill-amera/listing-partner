@@ -526,6 +526,39 @@ def test_settlement_records_reservation_to_bill_ratio(ledger, key):
     ), "every settled call records reservation divided by bill"
 
 
+def _fixture(name):
+    from pathlib import Path as _Path
+    import json as _json
+
+    return _json.loads((_Path(__file__).resolve().parent / "fixtures" / name).read_text())
+
+
+def test_response_text_reads_saved_live_message_shape(ledger, key):
+    # Fixture is a real Muse Spark reply (ids stripped): a reasoning item
+    # plus an assistant message whose output_text block holds the text.
+    def _live(url, headers, body):
+        return _fixture("spark_text_response.json")
+
+    out = meta_client.call_meta_text(MODEL, "hi", transport=_live, ledger_path=ledger)
+    assert out["text"] == "done"
+    assert out["actual_usd"] == pytest.approx((15 * 1.25 + 140 * 4.25) / 1e6), (
+        "the live usage reconciles from input plus output tokens"
+    )
+
+
+def test_billed_incomplete_reply_names_status_and_reason(ledger, key):
+    # Fixture is a real reply whose output holds only a reasoning item: the
+    # budget ran out (status incomplete, reason max_output_tokens), so there
+    # is no text to read. Billed, but the error must say why.
+    def _incomplete(url, headers, body):
+        return _fixture("spark_incomplete_reasoning.json")
+
+    with pytest.raises(ResponseUnreadable, match="[Bb]illed") as excinfo:
+        meta_client.call_meta_text(MODEL, "hi", transport=_incomplete, ledger_path=ledger)
+    assert "incomplete" in str(excinfo.value)
+    assert "max_output_tokens" in str(excinfo.value)
+
+
 def test_reconcile_prices_nested_cached_tokens(ledger, key):
     # The Responses usage schema nests cached tokens at
     # input_tokens_details.cached_tokens, as a subset of input_tokens billed

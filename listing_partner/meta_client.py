@@ -126,8 +126,9 @@ class ResponseUnreadable(Exception):
 
     Deliberately NOT a MetaRefused: a refusal means no money moved, while
     this error means the settlement line is already written and the cost
-    counts. Reading the reply text itself moves to unit 2; until then this
-    names the billed cost and the request id so the money stays visible.
+    counts. This names the billed cost and the request id so the money stays
+    visible; when the reply has no text the response status and incomplete
+    reason ride along too.
     """
 
     def __init__(self, message: str, *, actual_usd: float, request_id: str | None):
@@ -402,17 +403,21 @@ def _reconcile_text(model: str, response: dict) -> tuple[float, str | None]:
 
 
 def _response_text(response: dict) -> str:
-    # Responses API shape: {output: [{content: [{text: ...}]}]}; accept a
-    # plain {"text": ...} from test doubles as well.
+    # Responses API shape: output holds items; assistant message items carry
+    # content blocks of type output_text with the text, while reasoning items
+    # carry none. A plain {"text": ...} is accepted from test doubles.
+    # Live shape confirmed 2026-10-29; see tests/fixtures/spark_*.json.
     if isinstance(response.get("text"), str):
         return response["text"]
     parts = []
-    for item in response.get("output", []):
-        for block in item.get("content", []):
-            if isinstance(block.get("text"), str):
+    for item in response.get("output", []) or []:
+        for block in item.get("content", []) or []:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"])
     if not parts:
-        raise KeyError("no text in response")
+        status = response.get("status", "?")
+        details = response.get("incomplete_details") or {}
+        raise KeyError(f"no text in response (status={status}, reason={details.get('reason')})")
     return "".join(parts)
 
 
