@@ -113,6 +113,16 @@ def test_no_vertical_lines_means_unknown_not_level():
     assert rotation is None and img.shape == (200, 200)
 
 
+def test_crop_valid_removes_rotation_borders():
+    img = np.full((400, 500, 3), 200, np.uint8)
+    tilted, angle = geometry.rotate_image(img, 5.0)
+    assert (tilted == 0).any(), "rotation leaves black corners first"
+    valid = geometry.rotation_valid_mask(400, 500, angle)
+    cropped = geometry.crop_valid(tilted, valid)
+    assert not (cropped == 0).any(), "the crop holds only filled pixels"
+    assert cropped.shape[0] > 350 and cropped.shape[1] > 400, "crop stays generous"
+
+
 def test_ghosting_zero_on_identical_frames():
     frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(3)]
     assert geometry.ghosting_score(frames) == pytest.approx(0.0)

@@ -436,39 +436,50 @@ def score_merge(img: np.ndarray, mls_median: float | None = None) -> dict:
     return score
 
 
+def choose_from_merges(
+    merges: dict[str, np.ndarray], mls_median: float | None = None
+) -> tuple[str, dict, dict]:
+    """Best option key for pre-fused merges, its score, and the full-set
+    score for the written reason.
+
+    Lexicographic, no tuned weights: fewest clipped highlights wins, then
+    closest to the MLS brightness, then lowest noise.
+    """
+    scored = [(key, score_merge(img, mls_median)) for key, img in merges.items()]
+    scored.sort(
+        key=lambda item: (
+            round(item[1]["clip_frac"], 4),
+            round(item[1]["mls_gap"], 4),
+            item[1]["noise"],
+        )
+    )
+    by_key = dict(scored)
+    return scored[0][0], scored[0][1], by_key["full"]
+
+
 def choose_frames(
     frame_paths: list[Path], mls_median: float | None = None
 ) -> tuple[list[Path], str, str]:
     """Best frame subset for the room merge, its option key, and why.
 
-    Lexicographic, no tuned weights: fewest clipped highlights wins, then
-    closest to the MLS brightness, then lowest noise. Returns paths in the
-    set's own order.
+    Merges each option from disk; the pipeline prefuses from aligned arrays
+    and calls choose_from_merges instead. Returns paths in set order.
     """
     order = {p: i for i, p in enumerate(frame_paths)}
-    scored = []
-    for key, subset in merge_options(frame_paths).items():
-        merged = merge_set(subset)
-        scored.append((key, subset, score_merge(merged, mls_median)))
-    scored.sort(
-        key=lambda item: (
-            round(item[2]["clip_frac"], 4),
-            round(item[2]["mls_gap"], 4),
-            item[2]["noise"],
-        )
-    )
-    key, subset, score = scored[0]
-    best = sorted(subset, key=lambda p: order[p])
+    options = merge_options(frame_paths)
+    merges = {key: merge_set(subset) for key, subset in options.items()}
+    key, score, full_score = choose_from_merges(merges, mls_median)
+    best = sorted(options[key], key=lambda p: order[p])
     if key == "full":
         reason = (
             f"full set of {len(best)} frames: fewest clipped highlights "
             f"({score['clip_frac']:.4f}), closest to MLS, lowest noise"
         )
     else:
-        dropped = sorted(set(frame_paths) - set(subset), key=lambda p: order[p])
+        dropped = sorted(set(frame_paths) - set(options[key]), key=lambda p: order[p])
         names = ", ".join(p.name for p in dropped)
         reason = (
             f"{key} (dropped {names}): fewest clipped highlights "
-            f"({score['clip_frac']:.4f} vs {scored[1][2]['clip_frac']:.4f} for full)"
+            f"({score['clip_frac']:.4f} vs {full_score['clip_frac']:.4f} for full)"
         )
     return best, key, reason

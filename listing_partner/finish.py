@@ -87,10 +87,14 @@ def edge_strength(img: np.ndarray) -> float:
 
 
 def denoise(img: np.ndarray) -> np.ndarray:
-    """Edge-preserving bilateral denoise on luminance, light chroma pass."""
+    """Edge-preserving bilateral denoise on luminance, light chroma pass.
+
+    Kept gentle on purpose: real texture may only soften a little while
+    flat-patch noise must still fall clearly.
+    """
     ycrcb = cv2.cvtColor(img, cv2.COLOR_RGB2YCrCb)
     y, cr, cb = cv2.split(ycrcb)
-    soft_y = cv2.bilateralFilter(y, 7, 25, 25)
+    soft_y = cv2.bilateralFilter(y, 5, 15, 15)
     soft_cr = cv2.GaussianBlur(cr, (0, 0), 1.0)
     soft_cb = cv2.GaussianBlur(cb, (0, 0), 1.0)
     return cv2.cvtColor(cv2.merge([soft_y, soft_cr, soft_cb]), cv2.COLOR_YCrCb2RGB)

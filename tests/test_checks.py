@@ -1,0 +1,45 @@
+"""Tests for the unit-7 check thresholds."""
+
+from listing_partner import checks
+
+
+def test_highlights_must_not_grow():
+    assert checks.check_highlights(0.02, 0.01)[0] is True
+    assert checks.check_highlights(0.02, 0.02)[0] is True
+    assert checks.check_highlights(0.01, 0.02)[0] is False
+
+
+def test_outside_unchanged_is_exact():
+    assert checks.check_outside_unchanged(0)[0] is True
+    assert checks.check_outside_unchanged(1)[0] is False
+
+
+def test_noise_must_drop():
+    assert checks.check_noise(5.0, 3.0)[0] is True
+    assert checks.check_noise(3.0, 5.0)[0] is False
+
+
+def test_edges_within_ten_percent():
+    assert checks.check_edges(100.0, 95.0)[0] is True
+    assert checks.check_edges(100.0, 105.0)[0] is True
+    assert checks.check_edges(100.0, 80.0)[0] is False
+    assert checks.check_edges(0.0, 5.0)[0] is False
+
+
+def test_straightness_must_not_fall():
+    assert checks.check_straightness(300.0, 320.0)[0] is True
+    assert checks.check_straightness(300.0, 280.0)[0] is False
+
+
+def test_verticals_half_degree_or_unknown():
+    assert checks.check_verticals(0.3)[0] is True
+    assert checks.check_verticals(0.8)[0] is False
+    ok, reason = checks.check_verticals(None)
+    assert ok is True and "skipped" in reason
+
+
+def test_spend_and_counts():
+    assert checks.check_spend(1.99)[0] is True
+    assert checks.check_spend(2.01)[0] is False
+    assert checks.check_counts(16, 1)[0] is True
+    assert checks.check_counts(15, 1)[0] is False

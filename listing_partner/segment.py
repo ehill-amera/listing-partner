@@ -71,6 +71,29 @@ def find_candidates(
     return parse_lane(out["text"], frame_w, frame_h)
 
 
+def scale_candidates(
+    candidates: list[dict], old_w: int, old_h: int, new_w: int, new_h: int
+) -> list[dict]:
+    """Scale boxes and masks from the sent size to full resolution."""
+    sx, sy = new_w / old_w, new_h / old_h
+    scaled = []
+    for candidate in candidates:
+        left, top, right, bottom = candidate["box"]
+        box = (
+            int(round(left * sx)),
+            int(round(top * sy)),
+            int(round(right * sx)),
+            int(round(bottom * sy)),
+        )
+        mask = cv2.resize(
+            candidate["mask"].astype(np.uint8),
+            (new_w, new_h),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+        scaled.append({"object_id": candidate["object_id"], "box": box, "mask": mask})
+    return scaled
+
+
 def jpeg_bytes(photo_rgb: np.ndarray, long_side: int = 1024, quality: int = 88) -> bytes:
     """Downscale-and-encode a photo for a Meta image call."""
     h, w = photo_rgb.shape[:2]
@@ -223,7 +246,12 @@ def pull_window(
         room_dark = dark_rgb[:, :, channel][room].mean()
         if room_dark > 1e-6:
             matched[:, :, channel] *= room_merge / room_dark
-    matched = np.clip(matched, 0, 255)
+    # Highlight shoulder on the matched view, then a hard clamp: the
+    # room gain must never re-blow the sky it was pulled to save, and the
+    # highlights-held check counts anything at or above 250 as clipped.
+    over = matched > 235.0
+    matched[over] = 235.0 + (matched[over] - 235.0) * 0.15
+    matched = np.clip(matched, 0, 249)
     base = merge_rgb.astype(np.float32)
     pulled = base * (1 - alpha[:, :, None]) + matched * alpha[:, :, None]
     pulled = np.clip(pulled, 0, 255).astype(np.uint8)

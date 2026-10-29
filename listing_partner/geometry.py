@@ -318,6 +318,19 @@ def correct_tca(img: np.ndarray, tca: dict) -> np.ndarray:
     return out
 
 
+def read_focal(path) -> float | None:
+    """Focal length in mm from EXIF, fast path without MakerNote decoding."""
+    with open(path, "rb") as handle:
+        tags = exifread.process_file(handle, details=False)
+    tag = tags.get("EXIF FocalLength")
+    if tag is None:
+        return None
+    try:
+        return float(tag.values[0])
+    except (TypeError, ValueError, ZeroDivisionError, IndexError):
+        return None
+
+
 def read_lens_identity(path) -> dict:
     """Measured lens identity from a raw file's own metadata."""
     with open(path, "rb") as handle:
@@ -389,6 +402,53 @@ def correct_verticals(img: np.ndarray) -> tuple[np.ndarray, float | None]:
         return img, None
     fixed, _ = rotate_image(img, -tilt)
     return fixed, -tilt
+
+
+def crop_valid(img: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Largest centered same-aspect rectangle holding only valid pixels.
+
+    Rotations and undistortion leave black borders; finished photos must
+    not show them. valid marks samplable pixels (True inside). Found by
+    bisection on an integral image, so partial edge rows cannot fool it.
+    """
+    h, w = valid.shape
+    integ = cv2.integral(valid.astype(np.uint8))
+
+    def all_valid(y0: int, y1: int, x0: int, x1: int) -> bool:
+        area = integ[y1, x1] - integ[y0, x1] - integ[y1, x0] + integ[y0, x0]
+        return area == (y1 - y0) * (x1 - x0)
+
+    lo, hi = 0.0, 1.0
+    for _ in range(12):
+        mid = (lo + hi) / 2.0
+        hh, hw = mid * h / 2.0, mid * w / 2.0
+        y0, y1 = int(round(h / 2.0 - hh)), int(round(h / 2.0 + hh))
+        x0, x1 = int(round(w / 2.0 - hw)), int(round(w / 2.0 + hw))
+        if all_valid(y0, y1, x0, x1):
+            lo = mid
+        else:
+            hi = mid
+    hh, hw = lo * h / 2.0 - 1.0, lo * w / 2.0 - 1.0
+    y0, y1 = int(round(h / 2.0 - hh)), int(round(h / 2.0 + hh))
+    x0, x1 = int(round(w / 2.0 - hw)), int(round(w / 2.0 + hw))
+    if y1 <= y0 or x1 <= x0:
+        raise ValueError("no valid centered crop")
+    return img[y0:y1, x0:x1]
+
+
+def undistort_valid_mask(h: int, w: int, dx, dy) -> np.ndarray:
+    """Pixels the undistortion field samples from inside the frame."""
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    return (xs + dx >= 0) & (xs + dx <= w - 1) & (ys + dy >= 0) & (ys + dy <= h - 1)
+
+
+def rotation_valid_mask(h: int, w: int, angle_deg: float) -> np.ndarray:
+    """Pixels a rotation by angle_deg fills from inside the frame."""
+    matrix = cv2.getRotationMatrix2D(((w - 1) / 2.0, (h - 1) / 2.0), -angle_deg, 1.0)
+    warped = cv2.warpAffine(
+        np.ones((h, w), np.uint8) * 255, matrix, (w, h), flags=cv2.INTER_NEAREST
+    )
+    return warped > 0
 
 
 def ghosting_score(frames: list[np.ndarray]) -> float:

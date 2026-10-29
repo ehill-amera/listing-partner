@@ -103,6 +103,21 @@ def test_verify_zooms_to_skipped_candidates(tmp_path, monkeypatch):
     assert verdicts[1][0] is True
 
 
+def test_scale_candidates_to_full_resolution():
+    mask = np.zeros((684, 1024), bool)
+    mask[74:680, 0:77] = True
+    scaled = segment.scale_candidates(
+        [{"object_id": 0, "box": (0, 74, 77, 680), "mask": mask}],
+        1024,
+        684,
+        2048,
+        1368,
+    )
+    assert scaled[0]["box"] == (0, 148, 154, 1360)
+    assert scaled[0]["mask"].shape == (1368, 2048)
+    assert scaled[0]["mask"][148:1360, 0:154].mean() > 0.9
+
+
 def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"
