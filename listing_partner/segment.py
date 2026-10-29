@@ -190,7 +190,8 @@ def verify_candidates(
     wanted = {c["object_id"] for c in candidates}
     if not wanted:
         return {}
-    current_jpeg = jpeg_bytes(annotate(photo_rgb, candidates))
+    annotated = annotate(photo_rgb, candidates)
+    current_jpeg = jpeg_bytes(annotated)
     prompt = VERIFY_PROMPT
     rounds = 0
     found: dict[int, tuple[bool, str]] = {}
@@ -214,7 +215,7 @@ def verify_candidates(
         match = _CROP.search(out["text"])
         if match:
             x, y, w, h = (int(v) for v in match.groups())
-            crop = photo_rgb[y : y + h, x : x + w]
+            crop = annotated[y : y + h, x : x + w]
             if crop.size == 0:
                 raise ValueError(f"empty crop {x},{y},{w},{h}")
             current_jpeg = jpeg_bytes(crop)
@@ -228,7 +229,7 @@ def verify_candidates(
         need = missing[0]
         box = next(c["box"] for c in candidates if c["object_id"] == need)
         prompt = ZOOM_PROMPT.format(object_id=need)
-        current_jpeg = jpeg_bytes(_zoom_crop(photo_rgb, box))
+        current_jpeg = jpeg_bytes(_zoom_crop(annotated, box))
         rounds += 1
 
 

@@ -192,6 +192,45 @@ def test_verify_collects_partial_verdicts_across_rounds(tmp_path, monkeypatch):
     assert verdicts[0] == (False, "mirror")
 
 
+def test_verify_crops_keep_the_red_annotation(tmp_path, monkeypatch):
+    import base64
+    import io
+    import json
+
+    from PIL import Image
+
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    bodies = []
+    replies = iter(["CROP 0,0,60,60\n", "0: window - trees\n"])
+
+    def _spark(url, headers, body):
+        bodies.append(body)
+        return {
+            "id": "r-a",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    verdicts = segment.verify_candidates(
+        photo,
+        [{"object_id": 0, "box": (10, 10, 50, 50)}],
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0][0] is True
+    assert len(bodies) == 2
+    for body in bodies:
+        payload = json.loads(body.decode("utf-8"))
+        content = payload["input"][0]["content"]
+        url = next(p["image_url"] for p in content if p["type"] == "input_image")
+        raw = base64.b64decode(url.split(",", 1)[1])
+        pixels = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
+        red = (pixels[..., 0].astype(int) - pixels[..., 1].astype(int)) > 60
+        assert red.any(), "follow-up crop lost the red numbered boxes"
+
+
 def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"

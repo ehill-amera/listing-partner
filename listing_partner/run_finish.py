@@ -42,6 +42,7 @@ def process_set(
     """Finish one bracket set. Raises with a plain reason on failure."""
     name = f"{index:03d}"
     record: dict = {"index": index, "name": name, "notes": []}
+    transcript: list = []
     try:
         focals = [geometry.read_focal(p) for p in members]
         identity = geometry.read_lens_identity(members[len(members) // 2])
@@ -125,7 +126,6 @@ def process_set(
         for prompt in SAM_PROMPTS:
             candidates.extend(segment.find_candidates(sent_jpeg, prompt))
         record["candidates_found"] = len(candidates)
-        transcript: list = []
         if candidates:
             verdicts = segment.verify_candidates(small, candidates, transcript=transcript)
         else:
@@ -216,6 +216,7 @@ def process_set(
         save_clean_jpeg(overlay_thumb, dirs["review"] / f"overlay_{name}.jpg")
         record["error"] = None
     except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
+        record["transcript"] = transcript
         record["error"] = f"{type(exc).__name__}: {exc}"
         record["traceback"] = traceback.format_exc(limit=3)
     return record
