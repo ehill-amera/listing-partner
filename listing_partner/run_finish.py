@@ -114,7 +114,7 @@ def build_inputs(
     record["straight_before"] = straight_before
     record["straight_after"] = geometry.line_measure(cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY))
 
-    balanced, balance_report = finish.balance_exposure(merged)
+    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=valid)
     record["balance"] = balance_report
 
     h, w = balanced.shape[:2]

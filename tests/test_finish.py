@@ -77,6 +77,21 @@ def test_balance_does_not_hide_real_clipping():
     assert (hot >= 250).mean() > 0.9, "a blown window still reads blown"
 
 
+def test_gain_anchors_on_masked_pixels_only():
+    img = np.full((200, 200, 3), 100, np.uint8)
+    img[0:20, :] = 0
+    img[-20:, :] = 0
+    mask = np.ones((200, 200), bool)
+    mask[0:20, :] = False
+    mask[-20:, :] = False
+    out, _ = finish.balance_exposure(img, anchor_mask=mask)
+    room = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)[20:180, :]
+    assert (
+        abs(float(np.median(room)) - finish.INTERIOR_TARGET_MEDIAN) / finish.INTERIOR_TARGET_MEDIAN
+        < 0.1
+    )
+
+
 def test_exterior_class_targets_lower_brightness():
     assert finish.classify_scene(_room_cast()) == "interior"
     sky = np.full((200, 200, 3), 150, np.uint8)

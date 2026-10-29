@@ -48,7 +48,7 @@ AUTO_GAIN_HI = 3.5
 #: under artificial light correct hard; daylight exteriors keep their
 #: scene palette with a light touch.
 WB_BRIGHT_PERCENTILE = 90.0
-WB_INTERIOR_STRENGTH = 0.9
+WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
 
 
@@ -80,19 +80,29 @@ def target_median(img: np.ndarray) -> float:
     return INTERIOR_TARGET_MEDIAN
 
 
-def balance_exposure(img: np.ndarray, protect: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+def balance_exposure(
+    img: np.ndarray,
+    protect: np.ndarray | None = None,
+    anchor_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict]:
     """Balance a merged room photo. Returns (photo, report).
 
     White balance from the room's own below-bright pixels, shadow lift
     through a blurred luminance mask, automatic gain toward the shared
     class target (bounded), then a soft highlight shoulder. Pixels under
     protect keep their exact values. No MLS twin is read.
+
+    anchor_mask limits the gain anchor to the pixels that survive the
+    final crop (undistort borders are dark and would drag the median
+    under the target the shipped file is measured against).
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
     gray = _luminance(img)
     ceiling = float(np.percentile(gray, WB_BRIGHT_PERCENTILE))
     room = gray < ceiling
+    if anchor_mask is not None:
+        room = room & anchor_mask
     report: dict = {"white_balanced": False}
     if room.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
@@ -114,7 +124,8 @@ def balance_exposure(img: np.ndarray, protect: np.ndarray | None = None) -> tupl
     # anchor: per-photo automatic exposure, still with no twin read.
     post = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     target = target_median(img)
-    gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(post)))))
+    anchor = post[anchor_mask] if anchor_mask is not None else post.ravel()
+    gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(anchor)))))
     work *= gain
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
