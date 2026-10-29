@@ -39,22 +39,30 @@ def check_noise(noise_before: float, noise_after: float) -> tuple[bool, str]:
 def check_edges(edge_before: float, edge_after: float) -> tuple[bool, str]:
     """Edge strength stays within tolerance."""
     if edge_before <= 0:
-        return False, "no edges measured before"
+        return False, "not measured: no edge strength before"
     ratio = edge_after / edge_before
     ok = 1.0 - EDGE_TOLERANCE <= ratio <= 1.0 + EDGE_TOLERANCE
     return ok, f"edge strength ratio {ratio:.3f} (tolerance {EDGE_TOLERANCE})"
 
 
-def check_straightness(topmean_before: float, topmean_after: float) -> tuple[bool, str]:
+def check_straightness(
+    topmean_before: float | None, topmean_after: float | None
+) -> tuple[bool, str]:
     """Line straightness improves after correction."""
+    if topmean_before is None or topmean_after is None:
+        return False, "not measured: too few line segments to compare"
     ok = topmean_after >= topmean_before
     return ok, f"line measure {topmean_before:.0f} -> {topmean_after:.0f}"
 
 
 def check_verticals(residual_deg: float | None) -> tuple[bool, str]:
-    """Near-vertical lines stand within half a degree, or none were found."""
+    """Near-vertical lines stand within half a degree.
+
+    None means no agreeing verticals were found: not measured, never a
+    pass. A check that finds nothing to measure must say so.
+    """
     if residual_deg is None:
-        return True, "no near-vertical lines found, rotation skipped"
+        return False, "not measured: no agreeing near-vertical lines found"
     ok = abs(residual_deg) <= 0.5
     return ok, f"residual tilt {residual_deg:.2f} degrees"
 

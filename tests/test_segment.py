@@ -333,6 +333,80 @@ def test_pull_uses_real_dark_pixels_inside_leaves_rest():
     )
 
 
+def _three_frames():
+    """Same room, three views: black (no detail), clean gradient, blown white."""
+    room = np.full((200, 200, 3), 40, np.uint8)
+    black = room.copy()
+    black[40:160, 60:140] = 8
+    mid = room.copy()
+    view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
+    mid[40:160, 60:140] = view[:, :, None]
+    blown = room.copy()
+    blown[40:160, 60:140] = 255
+    merge = room.copy()
+    merge[40:160, 60:140] = 255
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    return merge, [black, mid, blown], mask
+
+
+def test_choose_pull_frame_skips_blown_and_empty_views():
+    merge, frames, mask = _three_frames()
+    assert segment.choose_pull_frame(frames, mask) == 1, (
+        "the view comes from the best-exposed frame, not the darkest"
+    )
+
+
+def test_choose_pull_frame_prefers_more_detail_on_ties():
+    room = np.full((100, 100, 3), 40, np.uint8)
+    dim = room.copy()
+    dim[20:80, 20:80] = 100
+    bright = room.copy()
+    bright[20:80, 20:80] = 180
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    assert segment.choose_pull_frame([dim, bright], mask) == 1, (
+        "with no clipping anywhere, the brighter frame holds more view detail"
+    )
+
+
+def _bright_room_brackets():
+    """Bright-room merge (150), dark-room view frame (40): the old room
+    match scaled the view up 3.75x and blew it out; the view must stay."""
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255
+    dark = np.full((200, 200, 3), 40, np.uint8)
+    view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
+    dark[40:160, 60:140] = view[:, :, None]
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    return merge, dark, mask
+
+
+def test_pull_never_pushes_view_brighter_than_its_frame():
+    merge, dark, mask = _bright_room_brackets()
+    pulled, _ = segment.pull_window(merge, dark, mask)
+    # Deep interior, past the feather band: the seam band blends toward
+    # the room by design, but where the view is in control it keeps its
+    # own brightness or darker, never brighter than its frame.
+    interior = np.zeros_like(mask)
+    interior[55:145, 75:125] = True
+    assert (pulled[interior].astype(int) <= dark[interior].astype(int) + 1).all(), (
+        "room matching may only darken the view, never brighten it past its frame"
+    )
+
+
+def test_pull_reports_real_clip_when_every_frame_is_blown():
+    merge, _, mask = _three_frames()
+    blown = np.full((200, 200, 3), 255, np.uint8)
+    blown[~mask] = 40
+    pulled, _ = segment.pull_window(merge, blown, mask)
+    gray = cv2.cvtColor(pulled, cv2.COLOR_RGB2GRAY)
+    assert float((gray[mask] >= 250).mean()) > 0.9, (
+        "a blown view must still measure blown: no clamp may fake the check"
+    )
+
+
 def test_pull_reaches_full_view_inside_without_overshoot():
     merge, dark, mask = _synthetic_brackets()
     pulled, _ = segment.pull_window(merge, dark, mask)

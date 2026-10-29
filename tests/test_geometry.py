@@ -113,6 +113,43 @@ def test_no_vertical_lines_means_unknown_not_level():
     assert rotation is None and img.shape == (200, 200)
 
 
+def test_verticals_found_on_real_interior():
+    gray = _real_merge_gray("001")
+    tilt = geometry.dominant_vertical_angle(gray)
+    assert tilt is not None, "door frames and wall corners must read"
+    assert abs(tilt) < 3.0, "a level tripod shot reads near zero"
+
+
+def test_verticals_found_on_real_laundry_room():
+    gray = _real_merge_gray("011")
+    tilt = geometry.dominant_vertical_angle(gray)
+    assert tilt is not None, "window and door frames must read"
+    assert abs(tilt) < 3.0
+
+
+def test_line_measure_needs_twenty_segments():
+    assert geometry.line_measure(np.zeros((200, 200), np.uint8)) is None
+    gray = _real_merge_gray("001")
+    assert geometry.line_measure(gray) is not None
+    assert geometry.line_measure(gray) > 0
+
+
+def test_wooded_lot_has_no_agreeing_verticals():
+    gray = _real_merge_gray("016")
+    assert geometry.dominant_vertical_angle(gray) is None, (
+        "leaning trunks must vote unknown, never a fake tilt"
+    )
+
+
+def test_vertical_correction_roundtrip_on_real_photo():
+    gray = _real_merge_gray("001")
+    tilted, _ = geometry.rotate_image(gray, 1.5)
+    fixed, applied = geometry.correct_verticals(tilted)
+    assert applied is not None
+    residual = geometry.dominant_vertical_angle(fixed)
+    assert residual is not None and abs(residual) <= 0.5
+
+
 def test_crop_valid_removes_rotation_borders():
     img = np.full((400, 500, 3), 200, np.uint8)
     tilted, angle = geometry.rotate_image(img, 5.0)

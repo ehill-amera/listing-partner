@@ -279,14 +279,37 @@ def _visible_note(boxes: dict[int, tuple], crop: tuple) -> str:
     return f" Visible candidate ids in this view: {ids}. Reply one verdict line for each."
 
 
+def choose_pull_frame(frames: list[np.ndarray], mask: np.ndarray) -> int:
+    """Index of the frame whose window region is best exposed.
+
+    Fewest near-white pixels (threshold 250, the same level the
+    highlights check measures) wins; ties go to the brighter window,
+    which holds more view detail. Never the darkest frame by default:
+    an almost-black frame holds no view at all.
+    """
+    from listing_partner.checks import CLIP_LEVEL
+
+    def score(frame: np.ndarray) -> tuple[float, float]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        clip = float((gray[mask] >= CLIP_LEVEL).mean()) if mask.any() else 0.0
+        return (clip, -float(gray[mask].mean()) if mask.any() else 0.0)
+
+    if not frames:
+        raise ValueError("no bracket frames to pull the view from")
+    return min(range(len(frames)), key=lambda i: score(frames[i]))
+
+
 def pull_window(
     merge_rgb: np.ndarray, dark_rgb: np.ndarray, mask: np.ndarray
 ) -> tuple[np.ndarray, int]:
-    """Fill the window mask from the real darker frame.
+    """Fill the window mask from the best-exposed real bracket frame.
 
-    The dark view is matched to the room's brightness and color, then
-    blended under a feathered edge sized to the image. Returns the pulled
-    photo and the count of changed pixels outside the mask (must be 0).
+    The view is matched to the room with a single uniform gain that can
+    only darken: it is never pushed brighter than its own frame, so a
+    held view stays held. Blended under a feathered edge sized to the
+    image. No clamp, no cap: what the view holds is what gets measured.
+    Returns the pulled photo and the count of changed pixels outside the
+    mask (must be 0).
     """
     feather = max(2, int(round(max(mask.shape) * 0.01)))
     inside = mask.astype(np.float32)
@@ -294,17 +317,11 @@ def pull_window(
     alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
     room = ~mask
     matched = dark_rgb.astype(np.float32)
-    for channel in range(3):
-        room_merge = merge_rgb[:, :, channel][room].mean()
-        room_dark = dark_rgb[:, :, channel][room].mean()
-        if room_dark > 1e-6:
-            matched[:, :, channel] *= room_merge / room_dark
-    # Highlight shoulder on the matched view, then a hard clamp: the
-    # room gain must never re-blow the sky it was pulled to save, and the
-    # highlights-held check counts anything at or above 250 as clipped.
-    over = matched > 235.0
-    matched[over] = 235.0 + (matched[over] - 235.0) * 0.15
-    matched = np.clip(matched, 0, 249)
+    if room.any():
+        merge_lum = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
+        view_lum = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
+        gain = min(1.0, float(merge_lum) / max(1e-6, float(view_lum)))
+        matched *= gain
     base = merge_rgb.astype(np.float32)
     pulled = base * (1 - alpha[:, :, None]) + matched * alpha[:, :, None]
     pulled = np.clip(pulled, 0, 255).astype(np.uint8)

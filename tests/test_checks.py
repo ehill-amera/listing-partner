@@ -35,7 +35,18 @@ def test_verticals_half_degree_or_unknown():
     assert checks.check_verticals(0.3)[0] is True
     assert checks.check_verticals(0.8)[0] is False
     ok, reason = checks.check_verticals(None)
-    assert ok is True and "skipped" in reason
+    assert ok is False and "not measured" in reason
+
+
+def test_empty_checks_report_not_measured_never_pass():
+    for check in (
+        lambda: checks.check_verticals(None),
+        lambda: checks.check_straightness(None, 300.0),
+        lambda: checks.check_straightness(300.0, None),
+        lambda: checks.check_edges(0.0, 0.0),
+    ):
+        ok, reason = check()
+        assert ok is False and "not measured" in reason
 
 
 def test_spend_and_counts():
