@@ -357,16 +357,23 @@ def test_choose_pull_frame_skips_blown_and_empty_views():
     )
 
 
-def test_choose_pull_frame_prefers_more_detail_on_ties():
+def test_choose_pull_frame_changes_clean_windows_least():
     room = np.full((100, 100, 3), 40, np.uint8)
     dim = room.copy()
     dim[20:80, 20:80] = 100
     bright = room.copy()
     bright[20:80, 20:80] = 180
+    merge = room.copy()
+    merge[20:80, 20:80] = 110
     mask = np.zeros((100, 100), bool)
     mask[20:80, 20:80] = True
-    assert segment.choose_pull_frame([dim, bright], mask) == 1, (
-        "with no clipping anywhere, the brighter frame holds more view detail"
+    assert segment.choose_pull_frame([dim, bright], mask, ref=merge) == 0, (
+        "with no clipping anywhere, the frame closest to the merge wins, "
+        "so a clean window gains nothing"
+    )
+    merge[20:80, 20:80] = 255
+    assert segment.choose_pull_frame([dim, bright], mask, ref=merge) == 1, (
+        "against a blown merge, the brighter clean frame still holds the view"
     )
 
 

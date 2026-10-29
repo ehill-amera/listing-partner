@@ -472,6 +472,18 @@ def line_measure(gray: np.ndarray, width: int = 1500) -> float | None:
     return float(np.sort(lengths)[-20:].mean())
 
 
+#: Only rotate for real tilt. Resampling softens line edges, so
+#: straightening a level photo (unit-a's are all within 0.15 deg) would
+#: trade measured straightness for nothing. The mechanism is proven by
+#: the 1.5-degree roundtrip test; the floor keeps it honest on level shots.
+ROTATE_MIN_DEG = 0.25
+
+
+def needs_rotation(tilt: float | None) -> bool:
+    """Whether a measured tilt is worth rotating for."""
+    return tilt is not None and abs(tilt) > ROTATE_MIN_DEG
+
+
 def correct_verticals(img: np.ndarray) -> tuple[np.ndarray, float | None]:
     """Rotate so near-vertical lines come out vertical. Returns the image
     and the applied rotation in degrees (None, image untouched, when no

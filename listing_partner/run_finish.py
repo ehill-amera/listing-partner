@@ -99,7 +99,7 @@ def build_inputs(
     tilt = geometry.dominant_vertical_angle(gray)
     # Keep the undistort validity above: rotations blacken more borders,
     # they never repair undistort's. Resetting here kept ~20px black bands.
-    if tilt is not None and abs(tilt) > 0.1:
+    if geometry.needs_rotation(tilt):
         merged, applied = geometry.correct_verticals(merged)
         valid &= geometry.rotation_valid_mask(*gray.shape, applied)
         record["verticals"] = f"rotated {applied:.2f} deg to upright"
@@ -169,7 +169,7 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     pulled = balanced
     changed_outside = 0
     if union.any():
-        pull_idx = segment.choose_pull_frame(state["aligned"], union)
+        pull_idx = segment.choose_pull_frame(state["aligned"], union, ref=balanced)
         view = state["aligned"][pull_idx]
         record["pull_frame"] = state["members"][pull_idx].name
         record["pull_frame_index"] = pull_idx
@@ -177,11 +177,15 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     else:
         record["pull_frame"] = None
 
-    noise_before = finish.flat_noise(pulled)
+    # Same patches both sides: the patch set is picked on the pulled
+    # photo, so the drop is the denoiser's work on the same pixels, not
+    # two different populations.
+    patches = finish.flat_patch_mask(pulled)
+    noise_before = finish.flat_noise(pulled, patches)
     edge_before = finish.edge_strength(pulled)
     finished = finish.denoise(pulled)
     record["noise_before"] = round(noise_before, 2)
-    record["noise_after"] = round(finish.flat_noise(finished), 2)
+    record["noise_after"] = round(finish.flat_noise(finished, patches), 2)
     record["edge_before"] = round(edge_before, 1)
     record["edge_after"] = round(finish.edge_strength(finished), 1)
     # One shared crop for every measurement: before and after count the

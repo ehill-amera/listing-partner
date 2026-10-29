@@ -20,7 +20,11 @@ import numpy as np
 #: Interior rooms finish bright and airy; exterior shots finish at their
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
-INTERIOR_TARGET_MEDIAN = 187.0
+#: 192, not the MLS center 187: the window pull swaps in darker real
+#: view pixels after the gain anchors, so large-window rooms land ~5
+#: levels under the anchor. 192 centers the finished interiors on Erik's
+#: 172-206 range (set 004 forced this retune: it landed 173 vs 206).
+INTERIOR_TARGET_MEDIAN = 192.0
 SKY_FRACTION_CUT = 0.001
 #: Exterior target scales with open sky, clipped to the range Erik's own
 #: exterior finishes span: open sunny shots finish brighter, shaded ones
@@ -123,14 +127,27 @@ def balance_exposure(img: np.ndarray, protect: np.ndarray | None = None) -> tupl
     return out, report
 
 
-def flat_noise(img: np.ndarray) -> float:
-    """Noise level: std of the Laplacian over dark flat patches."""
+def flat_patch_mask(img: np.ndarray) -> np.ndarray:
+    """Dark flat pixels of one image: the patch set both noise readings share."""
     gray = _luminance(img)
     dark = gray < np.percentile(gray, 25)
     lap = cv2.Laplacian(gray, cv2.CV_32F)
     flat = dark & (cv2.GaussianBlur(np.abs(lap), (0, 0), 2) < 3.0)
     if flat.sum() < 100:
         flat = dark
+    return flat
+
+
+def flat_noise(img: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Noise level: std of the Laplacian over dark flat patches.
+
+    With mask, the caller's patch set (picked on the before image), so
+    before and after measure the same pixels. Without, the image picks
+    its own patches, which must never compare across different images.
+    """
+    gray = _luminance(img)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    flat = mask if mask is not None else flat_patch_mask(img)
     return float(lap[flat].std())
 
 

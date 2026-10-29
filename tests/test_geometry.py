@@ -142,6 +142,13 @@ def test_line_measure_needs_twenty_segments():
     assert geometry.line_measure(gray) > 0
 
 
+def test_level_shots_do_not_rotate():
+    assert geometry.needs_rotation(0.11) is False
+    assert geometry.needs_rotation(None) is False
+    assert geometry.needs_rotation(0.3) is True
+    assert geometry.needs_rotation(-1.5) is True
+
+
 def test_wooded_lot_has_no_agreeing_verticals():
     gray = _real_merge_gray("016")
     assert geometry.dominant_vertical_angle(gray) is None, (

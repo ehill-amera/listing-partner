@@ -279,20 +279,29 @@ def _visible_note(boxes: dict[int, tuple], crop: tuple) -> str:
     return f" Visible candidate ids in this view: {ids}. Reply one verdict line for each."
 
 
-def choose_pull_frame(frames: list[np.ndarray], mask: np.ndarray) -> int:
+def choose_pull_frame(
+    frames: list[np.ndarray], mask: np.ndarray, ref: np.ndarray | None = None
+) -> int:
     """Index of the frame whose window region is best exposed.
 
     Fewest near-white pixels (threshold 250, the same level the
-    highlights check measures) wins; ties go to the brighter window,
-    which holds more view detail. Never the darkest frame by default:
-    an almost-black frame holds no view at all.
+    highlights check measures) wins. Ties go to the frame closest to
+    the merge: when the merge already holds the view, the pull changes
+    it the least, so clean windows gain nothing. Never the darkest
+    frame by default: an almost-black frame holds no view at all.
     """
     from listing_partner.checks import CLIP_LEVEL
+
+    ref_mean = None
+    if ref is not None and mask.any():
+        ref_mean = float(cv2.cvtColor(ref, cv2.COLOR_RGB2GRAY).astype(np.float32)[mask].mean())
 
     def score(frame: np.ndarray) -> tuple[float, float]:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
         clip = float((gray[mask] >= CLIP_LEVEL).mean()) if mask.any() else 0.0
-        return (clip, -float(gray[mask].mean()) if mask.any() else 0.0)
+        mean = float(gray[mask].mean()) if mask.any() else 0.0
+        tie = abs(mean - ref_mean) if ref_mean is not None else -mean
+        return (clip, tie)
 
     if not frames:
         raise ValueError("no bracket frames to pull the view from")

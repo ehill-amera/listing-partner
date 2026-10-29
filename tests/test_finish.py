@@ -102,6 +102,16 @@ def _noisy_edge():
     return np.clip(noisy, 0, 255).astype(np.uint8), clean
 
 
+def test_denoise_compared_on_shared_patches():
+    noisy, _ = _noisy_edge()
+    out = finish.denoise(noisy)
+    patches = finish.flat_patch_mask(noisy)
+    assert finish.flat_noise(out, patches) < finish.flat_noise(noisy, patches), (
+        "before and after share the before image's patches, so the drop "
+        "is the denoiser's, not two populations'"
+    )
+
+
 def test_denoise_drops_noise_keeps_edges():
     noisy, clean = _noisy_edge()
     before_n = finish.flat_noise(noisy)
