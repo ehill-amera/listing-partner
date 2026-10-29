@@ -8,7 +8,7 @@ Every unit's measurable checks are built as pass or fail functions the unit 7 ag
 
 How every unit runs in Muse Code: one kickoff that sets the unit's `/goal`, then `/plan` and `/grill` before any code, with the plan written to `.navigator/plan.md`. Muse Code then stops. The navigator checks the plan against the contract, Erik replies `approved` (or sends the navigator's corrections), Muse Code builds toward the goal, and the reviewer runs at the end.
 
-Muse Spark image tools: wherever Muse Spark judges photos (curation, clutter detection, the maintenance pass, the honesty audit), it gets crop and zoom tools so it can inspect parts of a photo up close instead of judging the whole frame at once. Meta reports this lifts its image results by more than 10 points. Every tool call goes through the capped client and counts toward the $100.
+Muse Spark image tools: wherever Muse Spark judges photos (curation, clutter detection, the maintenance pass, the honesty audit), it gets crop and zoom tools so it can inspect parts of a photo up close instead of judging the whole frame at once. Meta reports this lifts its image results by more than 10 points. Every tool call goes through the capped client and counts toward the $40 cap.
 
 ## Replan, Thu Oct 29 (two build days lost, Oct 27 and 28)
 
@@ -27,7 +27,7 @@ Erik's home shoot (public sample and baseline timing) must happen by Sun Nov 1.
 
 **Mon Oct 26 (a day early). Unit 1: HDR merge and the spend-capped Meta client.**
 - unit-a's 86 NEFs become one merged photo per bracket set.
-- The single capped Meta function, with the $100 cap proven by tests and one tiny live call.
+- The single capped Meta function, with the hard cap proven by tests ($100 in unit 1, $40 from unit 2) and one tiny live call.
 - The check command and the public-hygiene scan.
 - Erik sees: a review page with each merge beside the darkest and brightest bracket, Lightroom's merge of the same set, and his finished MLS photo of the same shot.
 
@@ -89,7 +89,7 @@ Erik's home shoot (public sample and baseline timing) must happen by Sun Nov 1.
   - memory: the per-unit run record (what was kept, dropped, flagged and why); say plainly if this stays thin
   - connectors: the Meta Model API, and the existing read-only AppFolio connector
   - evaluations: the check command, the reviewer, the Lightroom and MLS benchmarks, the coverage check, the honesty audit
-  - controls: the $100 cap, the model allowlist, protected zones, the git-hook fence
+  - controls: the $40 cap, the model allowlist, protected zones, the git-hook fence
   - records: the spend ledger, saved masks, the maintenance list, the run log
   Every line has to be true of what shipped.
 - **Baseline, measured.** Erik finishes his home set his usual way (Lightroom, plus Gemini where he would normally use it) and records start and stop times, plus the number of windows he masked by hand. The agent runs on the same raw files. The README reports minutes per photo for each, and how each scales with the number of windows.

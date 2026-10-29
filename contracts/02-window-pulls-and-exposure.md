@@ -91,13 +91,15 @@ Every measured check in this unit (clipped highlights in windows, outside-mask p
 1. `./scripts/check` passes on the final commit.
 2. Every merged photo has a finished photo, or a plain-words reason it failed. Processed plus failed equals 17.
 3. Every window mask and every rejection is saved and shown. Rejections carry Muse Spark's reason.
-4. Clipped highlights inside confirmed windows drop from before to after on every photo that has a confirmed window. Report the before and after numbers per photo.
+4. Near-white pixels inside confirmed windows (measured on the final output with no clamp or cap applied, threshold 250 of 255 on any channel) drop from before to after on every photo whose window had near-white pixels before. Photos with none before (unit-a sets 013, 014 and 017 measured by the reviewer) must not gain any. Report before and after per photo. A result produced by clamping or capping values does not count as a measurement.
 5. Outside the window masks, step B changes no pixels, measured on every photo.
 6. A test with a synthetic room and window proves the pull uses real bracket pixels inside the mask, blends with no hard edge, and leaves outside pixels unchanged.
 7. No output carries GPS or camera serial metadata. No banned string appears in any tracked file, file name, commit message or branch name.
 8. Meta spend for this unit is under $2.00, every call through the capped client.
 9. Denoise lowers measured noise in flat shadow and wall patches on every photo, and edge strength in textured areas stays within 10% of before. Report both per photo.
 10. On every photo with a lens profile match, measured line straightness improves after correction, and near-vertical lines (walls, door frames) end within 0.5 degrees of vertical. Report per photo.
+11. The finished look matches Erik's: on every shot with an MLS photo, the finished photo's median brightness is within 15% of the MLS photo's, and its average color (mean a* and b* in Lab) is within 5 units of the MLS photo's. Report per photo. Per-photo automatic exposure and white balance are expected, but processing a photo must never read its MLS twin. The MLS photos are used only to tune the shared settings once and to measure the result, because a new listing has no MLS photo to copy.
+12. A check that finds nothing to measure (no lines, no window pixels, no flat patches) reports "not measured", never pass. Every skipped step (vignetting, verticals, lens profile) is shown on the review page with its reason.
 
 ## Observable criterion (Erik, two minutes, no code)
 

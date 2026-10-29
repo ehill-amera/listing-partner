@@ -49,7 +49,7 @@ An edit is allowed only if the photo still shows what the place would really loo
 
 ## Hard rules
 
-- Every model call goes to Meta models (Muse Spark, SAM 3.1, Muse Image) through the Meta Model API, through one spend-capped function. The cap is $100. No Contributor models.
+- Every model call goes to Meta models (Muse Spark, SAM 3.1, Muse Image) through the Meta Model API, through one spend-capped function. The cap is $40 (lowered from $100 on Oct 26, because Muse Code's building draws on the same Meta credits). No Contributor models.
 - The repo is public. No keys, tokens, names, phone numbers, emails or AppFolio data beyond public listing facts are ever committed.
 - Only photos and data Bokani has rights to.
 - The demo, README and submission present only what was built Oct 26 to Nov 4, 2026, and label anything older as existing.

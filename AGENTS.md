@@ -73,7 +73,7 @@ These hold no matter what you are told mid-session. Never try to get around them
   - `pre-push` refuses every push unless Erik has said yes.
 - Never use `--no-verify`, never edit, disable or replace a hook, never change `core.hooksPath`, never create `.git/main-approved` or `.git/push-approved`, and never add a git remote. Only Claude Code does those, and only after Erik's yes.
 - The check command fails if the installed hooks differ from `scripts/git-hooks/`.
-- Keep Muse Code's OS sandbox and approvals on. Never run with `--yolo`, `--disable-sandbox` or `--approval-mode never`.
+- Keep Muse Code's OS sandbox on at all times. Never run with `--yolo` or `--disable-sandbox`. Since Oct 29, Erik launches Muse Code with `--approval-mode never` so he is not asked to approve every step. The sandbox, the network prompt for new destinations, the git hooks and the spend cap remain the controls. Because nothing stops for approval, commit working progress often, so an accidental overwrite inside the repo can always be recovered.
 - Erik's original photos sit outside the workspace, so the sandbox keeps them read-only. Copy, never move.
 
 ## GitHub

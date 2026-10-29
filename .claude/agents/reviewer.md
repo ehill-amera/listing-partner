@@ -34,7 +34,7 @@ Work through these in order. For each item, say what you actually did to verify 
 ### 3. Hackathon rules
 
 - Every model call goes to Meta models through the Meta Model API, through the single spend-capped function in `listing_partner/meta_client.py`. Search the code for any other path to Meta or any other model provider.
-- The cap: total on disk, refuses at $100, refuses a call that would cross $100, fails closed when the ledger is unreadable or the price is unknown, and the cap cannot be raised by environment, flag or config. Confirm a test proves each refusal.
+- The cap: total on disk, refuses at $40, refuses a call whose worst case would cross $39 (the $1 headroom), fails closed when the ledger is unreadable or the price is unknown, and the cap cannot be raised by environment, flag or config. Confirm a test proves each refusal.
 - Model allowlist contains only first-party Meta models. No Contributor models.
 - Only unit facts and Bokani's photos are sent to Meta. Nothing that could carry tenant, applicant or owner data.
 - Provenance: nothing presents pre-hackathon work as new. The AppFolio connector, wherever mentioned, is labeled as an existing tool.
