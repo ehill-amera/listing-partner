@@ -94,9 +94,7 @@ def build_inputs(
     gray = cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY)
     # Before the correction, not after undistort: the reference frame raw,
     # so the recorded improvement is the undistortion's own work.
-    straight_before = geometry.top_line_length(
-        cv2.cvtColor(decoded[0], cv2.COLOR_RGB2GRAY)
-    )
+    straight_before = geometry.top_line_length(cv2.cvtColor(decoded[0], cv2.COLOR_RGB2GRAY))
     tilt = geometry.dominant_vertical_angle(gray)
     # Keep the undistort validity above: rotations blacken more borders,
     # they never repair undistort's. Resetting here kept ~20px black bands.
