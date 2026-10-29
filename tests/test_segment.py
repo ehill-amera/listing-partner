@@ -1,0 +1,171 @@
+"""Tests for window finding, verification, and pulling. No network, no key."""
+
+import json
+
+import cv2
+import numpy as np
+
+from listing_partner import segment
+
+
+def _lane():
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent / "fixtures" / "sam_window_lane.txt").read_text()
+
+
+def test_parse_live_lane_finds_three_candidates():
+    candidates = segment.parse_lane(_lane(), frame_w=1024, frame_h=684)
+    assert [c["object_id"] for c in candidates] == [0, 1, 2]
+    boxes = [c["box"] for c in candidates]
+    assert boxes[0] == (0, 74, 77, 680), "half-open bounds from the inclusive wire box"
+    for c in candidates:
+        assert c["mask"].shape == (684, 1024), "masks are frame-size"
+        left, top, right, bottom = c["box"]
+        inner = c["mask"][top:bottom, left:right]
+        assert inner.mean() > 0.5, "glass fills its box"
+        outer = c["mask"].copy()
+        outer[top:bottom, left:right] = False
+        assert not outer.any(), "nothing leaks outside the box"
+
+
+def test_find_candidates_goes_through_the_capped_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+
+    def _window_lane(url, headers, body):
+        return {
+            "id": "r-lane",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": _lane()}]}],
+            "usage": {"images_processed": 1},
+        }
+
+    ledger = tmp_path / "ledger.jsonl"
+    tiny = cv2.imencode(".jpg", np.zeros((684, 1024, 3), np.uint8))[1].tobytes()
+    candidates = segment.find_candidates(tiny, "window", transport=_window_lane, ledger_path=ledger)
+    assert len(candidates) == 3
+    lines = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert len(lines) == 2 and lines[1]["status"] == "complete"
+
+
+def test_verify_parses_spark_verdicts(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    replies = iter(
+        [
+            "0: not a window - mirrored closet door, no outdoor view\n"
+            "1: window - clear view of trees and sky\n"
+            "2: window - street view with houses\n"
+        ]
+    )
+
+    def _spark(url, headers, body):
+        return {
+            "id": "r-v",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 40},
+        }
+
+    boxes = [
+        {"object_id": 0, "box": (0, 0, 30, 30)},
+        {"object_id": 1, "box": (30, 30, 60, 60)},
+        {"object_id": 2, "box": (60, 60, 90, 90)},
+    ]
+    verdicts = segment.verify_candidates(
+        np.zeros((100, 100, 3), np.uint8),
+        boxes,
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0] == (False, "mirrored closet door, no outdoor view")
+    assert verdicts[1][0] is True and "trees" in verdicts[1][1]
+    assert verdicts[2][0] is True
+
+
+def test_verify_zooms_to_skipped_candidates(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    replies = iter(["1: window - trees outside\n", "0: not a window - mirror\n"])
+
+    def _spark(url, headers, body):
+        return {
+            "id": "r-z",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    boxes = [
+        {"object_id": 0, "box": (0, 0, 30, 30)},
+        {"object_id": 1, "box": (30, 30, 60, 60)},
+    ]
+    verdicts = segment.verify_candidates(photo, boxes, transport=_spark, ledger_path=ledger)
+    assert verdicts[0] == (False, "mirror")
+    assert verdicts[1][0] is True
+
+
+def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    seen_bodies = []
+    replies = iter(["CROP 10,10,40,40", "0: window - awning outside, confirmed up close\n"])
+
+    def _spark(url, headers, body):
+        seen_bodies.append(json.loads(body.decode("utf-8")))
+        return {
+            "id": "r-c",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    verdicts = segment.verify_candidates(
+        photo,
+        [{"object_id": 0, "box": (10, 10, 50, 50)}],
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0][0] is True
+    assert len(seen_bodies) == 2, "one annotated photo, then the requested crop"
+    assert len(seen_bodies[1]["input"][0]["content"]) == 2, "crop rides as the image"
+
+
+def _synthetic_brackets():
+    """Room 200x200: dark walls, one bright window rect. Dark frame holds a
+    gradient view in the window; bright frame blows it to white."""
+    room = np.full((200, 200, 3), 40, np.uint8)
+    dark = room.copy()
+    bright = np.full((200, 200, 3), 180, np.uint8)
+    view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
+    dark[40:160, 60:140] = view[:, :, None]
+    bright[40:160, 60:140] = 255
+    merge = room.copy()
+    merge[40:160, 60:140] = 255
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    return merge, dark, mask
+
+
+def test_pull_uses_real_dark_pixels_inside_leaves_rest():
+    merge, dark, mask = _synthetic_brackets()
+    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    assert changed_outside == 0, "outside the mask no pixel may change"
+    inside = pulled[mask].astype(int)
+    assert np.abs(inside - dark[mask].astype(int)).mean() < 12, (
+        "the pulled view comes from the real darker frame"
+    )
+
+
+def test_pull_reaches_full_view_inside_without_overshoot():
+    merge, dark, mask = _synthetic_brackets()
+    pulled, _ = segment.pull_window(merge, dark, mask)
+    # Deep interior: pure matched view, no merge bleeding through.
+    interior = mask.copy()
+    interior[40:160, 60:140] = False
+    interior[50:150, 70:130] = True
+    assert np.abs(pulled[interior].astype(int) - dark[interior].astype(int)).mean() < 12
+    # Seam band: a linear blend never leaves the [view, room] interval, so
+    # no bright halo or dark outline can appear.
+    lo = np.minimum(dark.astype(int), merge.astype(int))
+    hi = np.maximum(dark.astype(int), merge.astype(int))
+    band = pulled.astype(int)
+    assert ((band >= lo - 1) & (band <= hi + 1)).all(), "no overshoot past either input"

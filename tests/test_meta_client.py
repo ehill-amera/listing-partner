@@ -493,6 +493,76 @@ def test_settle_failure_is_not_a_refusal(ledger, key, monkeypatch):
     assert lines[0]["status"] == "reserved" and lines[0]["actual_usd"] is None
 
 
+def _transport_image_ok(url, headers, body):
+    request = json.loads(body.decode("utf-8"))
+    assert request["model"] == "sam-3.1"
+    assert request["input"][0]["content"][1]["type"] == "input_image"
+    return {
+        "id": "resp-seg-1",
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "<0f>"}],
+            }
+        ],
+        "usage": {"images_processed": 1},
+    }
+
+
+def test_segment_call_bills_per_image(ledger, key):
+    out = meta_client.call_meta_segment(
+        "sam-3.1",
+        "window",
+        b"fake-jpeg-bytes",
+        transport=_transport_image_ok,
+        ledger_path=ledger,
+    )
+    assert out["text"] == "<0f>"
+    assert out["actual_usd"] == pytest.approx(2.50 / 1000)
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 2
+    assert lines[1]["coverage_ratio"] >= 1.0, "flat-price reservation covers the bill"
+
+
+def test_segment_reservation_is_flat_price_times_multiplier():
+    assert meta_client.reserve_segment_usd() == pytest.approx(
+        meta_client.RESERVATION_MULTIPLIER * 2.50 / 1000
+    )
+
+
+def test_image_reservation_uses_measured_token_bound():
+    without = meta_client.reserve_text_usd(MODEL, "hi", 256)
+    with_image = meta_client.reserve_text_usd(MODEL, "hi", 256, 1)
+    assert with_image - without == pytest.approx(
+        meta_client.RESERVATION_MULTIPLIER * meta_client.IMAGE_INPUT_TOKEN_BOUND * 1.25 / 1e6
+    )
+    assert meta_client.IMAGE_INPUT_TOKEN_BOUND >= 875, (
+        "the bound must cover the measured 875 tokens of a 1024x684 photo"
+    )
+
+
+def test_text_call_with_image_bills_input_tokens(ledger, key):
+    def _image_ok(url, headers, body):
+        request = json.loads(body.decode("utf-8"))
+        assert request["input"][0]["content"][1]["type"] == "input_image"
+        assert request["input"][0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+        return {
+            "id": "r-img",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "yes"}]}],
+            "usage": {"input_tokens": 1500, "output_tokens": 3},
+        }
+
+    out = meta_client.call_meta_text(
+        MODEL,
+        "is this a window?",
+        images=[b"fake-jpeg-bytes"],
+        transport=_image_ok,
+        ledger_path=ledger,
+    )
+    assert out["text"] == "yes"
+    assert out["actual_usd"] == pytest.approx((1500 * 1.25 + 3 * 4.25) / 1e6)
+
+
 def test_key_only_from_env(ledger, monkeypatch):
     monkeypatch.delenv("META_API_KEY", raising=False)
     monkeypatch.setenv("META_MODEL_API_KEY", "wrong-var")

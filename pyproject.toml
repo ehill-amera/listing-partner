@@ -11,6 +11,10 @@ dependencies = [
     "exifread",
     "tifffile",
     "imagecodecs",
+    # Meta's official SAM wire-grammar reader (decodes SAM 3.1's
+    # arithmetic-coded mask payloads). SAM License, see
+    # listing_partner/sam_data/ATTRIBUTION.md.
+    "meta-sam-parser==0.1.0",
 ]
 
 [dependency-groups]

@@ -8,6 +8,7 @@ contracts/01-hdr-merge-and-meta-client.md section B.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import math
@@ -15,6 +16,7 @@ import os
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 # Hard cap on lifetime Meta spend, in USD. This is a plain constant on
@@ -239,64 +241,79 @@ def _default_transport(url: str, headers: dict, body: bytes) -> dict:
 RESERVATION_MULTIPLIER = 2.0
 
 
-def reserve_text_usd(model: str, prompt: str, max_output_tokens: int) -> float:
-    """Worst-case USD this request is allowed to cost, times the multiplier.
+def _text_message(prompt: str, images: list[bytes] | None = None) -> list[dict]:
+    """User message with optional inline JPEG images (base64 data URLs)."""
+    content: list[dict] = [{"type": "input_text", "text": prompt}]
+    for raw in images or []:
+        encoded = base64.b64encode(raw).decode("ascii")
+        content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}"})
+    return [{"type": "message", "role": "user", "content": content}]
 
-    Input side: a byte-level tokenizer emits at most one token per byte, so
-    the prompt's byte length bounds its token count from above, whatever the
-    real tokenizer counts. Output side: the full output limit at the output
-    price (the limit is sent on every call, so the API cannot return more).
-    Refusing on this bound times RESERVATION_MULTIPLIER means the settled
-    total can never pass the cap.
-    """
+
+# Bound on billed input tokens per attached image, from measured calls: a
+# 1024x684 JPEG bills ~875 input tokens (2026-10-29), so 4000 covers our
+# send sizes (at most ~0.7MP, crops smaller) with margin to spare, and the
+# multiplier sits on top.
+IMAGE_INPUT_TOKEN_BOUND = 4000
+
+
+def reserve_text_usd(
+    model: str, prompt: str, max_output_tokens: int, image_count: int = 0
+) -> float:
+    _, _, bound = _text_estimate_parts(model, prompt, max_output_tokens, image_count)
+    return bound
+
+
+def _text_estimate_parts(model, prompt, max_output_tokens, image_count):
     price = PRICES.get(model)
     if price is None or "input_per_mtok" not in price:
         raise UnknownPrice(f"unknown price for model {model!r}")
     if max_output_tokens < 0:
         raise MetaRefused(f"max_output_tokens must be >= 0, got {max_output_tokens}")
-    worst_input = max(1, len(prompt.encode("utf-8")))
-    return RESERVATION_MULTIPLIER * (
+    worst_input = max(1, len(prompt.encode("utf-8"))) + image_count * IMAGE_INPUT_TOKEN_BOUND
+    base = (
         worst_input * price["input_per_mtok"] / 1e6
         + max_output_tokens * price["output_per_mtok"] / 1e6
     )
+    return price, worst_input, RESERVATION_MULTIPLIER * base
 
 
-def call_meta_text(
-    model: str,
-    prompt: str,
-    max_output_tokens: int = 256,
-    *,
-    transport=None,
-    ledger_path: Path | None = None,
-) -> dict:
-    """Make one minimal text-model call through the spend cap.
+def reserve_segment_usd() -> float:
+    """Worst-case USD for one still-image segmentation: flat price times
+    the multiplier (SAM bills per image, not per token)."""
+    return RESERVATION_MULTIPLIER * PRICES["sam-3.1"]["image_usd"]
 
-    Returns the response's text. Refuses (raising a MetaRefused subclass
-    that names the reason) when the key is missing, the model is not
-    allowlisted, its price is unknown, the ledger cannot be read, or the
-    cap is reached / would be crossed. A billed call whose reply cannot be
-    read raises ResponseUnreadable instead (never a refusal: money moved).
-    A reservation sized at the request's
-    worst-case cost is appended to the ledger before the HTTP call and a
-    settlement line is appended after; a crash anywhere in between leaves
-    the reservation counted, never less.
-    """
-    if model not in MODEL_ALLOWLIST:
-        raise ModelNotAllowed(f"model {model!r} is not on the first-party allowlist")
-    if model not in PRICES:
-        raise UnknownPrice(f"unknown price for model {model!r}")
 
-    key = os.environ.get(KEY_ENV_VAR)
-    if not key:
-        raise MissingKey(f"{KEY_ENV_VAR} is not set")
-
+def _open_ledger(ledger_path: Path | None):
     path = Path(ledger_path) if ledger_path is not None else default_ledger_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(path, "a+", encoding="utf-8")  # noqa: PTH123 - intentional low-level open for locking
     except OSError as exc:
         raise LedgerError(f"ledger unreadable: {exc}") from exc
+    return handle
 
+
+def _guarded_post(
+    model: str,
+    estimated: float,
+    body: bytes,
+    reconcile,
+    transport,
+    ledger_path,
+) -> tuple[dict, float, str | None]:
+    """Reserve, POST, and settle one call. Shared by text and segment calls.
+
+    Returns (response, actual_usd, request_id). Refusals raise MetaRefused
+    before money moves; anything after the POST reports billed, never
+    refused.
+    """
+    if not math.isfinite(estimated) or estimated < 0:
+        raise LedgerError(f"refusing to reserve invalid cost: {estimated!r}")
+    key = os.environ.get(KEY_ENV_VAR)
+    if not key:
+        raise MissingKey(f"{KEY_ENV_VAR} is not set")
+    handle = _open_ledger(ledger_path)
     call_id = uuid.uuid4().hex
     with handle:
         try:
@@ -306,9 +323,6 @@ def call_meta_text(
         total = _read_total(handle)
         if total >= SPEND_CAP_USD:
             raise CapReached(f"spend cap reached: ${total:.4f} of ${SPEND_CAP_USD:.2f}")
-        estimated = reserve_text_usd(model, prompt, max_output_tokens)
-        if not math.isfinite(estimated) or estimated < 0:
-            raise LedgerError(f"refusing to reserve invalid cost: {estimated!r}")
         ceiling = SPEND_CAP_USD - RESERVATION_HEADROOM_USD
         if total + estimated > ceiling:
             raise WouldCrossCap(
@@ -336,12 +350,6 @@ def call_meta_text(
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         }
-        # The output limit rides along so the API cannot return (and bill)
-        # more output tokens than the reservation covers.
-        body = json.dumps(
-            {"model": model, "input": prompt, "max_output_tokens": max_output_tokens}
-        ).encode("utf-8")
-
         do_call = transport if transport is not None else _default_transport
         try:
             response = do_call(url, headers, body)
@@ -350,7 +358,7 @@ def call_meta_text(
         except Exception as exc:  # noqa: BLE001 - reservation must survive any transport failure
             raise TransportFailed(f"transport failed; reservation kept: {exc}") from exc
 
-        actual, request_id = _reconcile_text(model, response)
+        actual, request_id = reconcile(response)
         if actual <= 0:
             # The API returned no usable cost or usage: stay conservative
             # and settle at the reserved estimate rather than $0.
@@ -376,6 +384,92 @@ def call_meta_text(
                 request_id=request_id,
             ) from exc
         return {"text": text, "actual_usd": actual, "request_id": request_id}
+
+
+def call_meta_text(
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    *,
+    images: list[bytes] | None = None,
+    transport=None,
+    ledger_path: Path | None = None,
+) -> dict:
+    """Make one text-model call through the spend cap, images optional.
+
+    Returns the response's text. Refuses (raising a MetaRefused subclass
+    that names the reason) when the key is missing, the model is not
+    allowlisted, its price is unknown, the ledger cannot be read, or the
+    cap is reached / would be crossed. A billed call whose reply cannot be
+    read raises ResponseUnreadable instead (never a refusal: money moved).
+    A reservation sized at the request's worst-case cost is appended to
+    the ledger before the HTTP call and a settlement line is appended
+    after; a crash anywhere in between leaves the reservation counted,
+    never less.
+    """
+    if model not in MODEL_ALLOWLIST:
+        raise ModelNotAllowed(f"model {model!r} is not on the first-party allowlist")
+    if model not in PRICES:
+        raise UnknownPrice(f"unknown price for model {model!r}")
+    estimated = reserve_text_usd(model, prompt, max_output_tokens, len(images or []))
+    # The output limit rides along so the API cannot return (and bill)
+    # more output tokens than the reservation covers.
+    body = json.dumps(
+        {
+            "model": model,
+            # Plain string when no images ride along (unit 1's proven form);
+            # a user message with inline data URLs otherwise.
+            "input": prompt if not images else _text_message(prompt, images),
+            "max_output_tokens": max_output_tokens,
+        }
+    ).encode("utf-8")
+    return _guarded_post(
+        model,
+        estimated,
+        body,
+        partial(_reconcile_text, model),
+        transport,
+        ledger_path,
+    )
+
+
+def _reconcile_segment(response: dict) -> tuple[float, str | None]:
+    """Real cost for a segmentation call: flat per-image price.
+
+    SAM bills per image segmented, not per token, so the usage count wins
+    over any token fields present.
+    """
+    if isinstance(response.get("cost_usd"), (int, float)):
+        return float(response["cost_usd"]), response.get("id")
+    usage = response.get("usage") or {}
+    images = usage.get("images_processed", 1)
+    return float(images) * PRICES["sam-3.1"]["image_usd"], response.get("id")
+
+
+def call_meta_segment(
+    model: str,
+    prompt: str,
+    image_jpeg: bytes,
+    *,
+    transport=None,
+    ledger_path: Path | None = None,
+) -> dict:
+    """Segment one still image through the spend cap (SAM 3.1).
+
+    Returns the response's output-text lane (the special-token line);
+    decoding it into masks is the caller's job. Same refusal and ledger
+    rules as text calls: flat per-image reservation, billed settles at the
+    real per-image cost.
+    """
+    if model not in MODEL_ALLOWLIST:
+        raise ModelNotAllowed(f"model {model!r} is not on the first-party allowlist")
+    if model != "sam-3.1":
+        raise ModelNotAllowed(f"segment calls take sam-3.1, not {model!r}")
+    estimated = reserve_segment_usd()
+    body = json.dumps({"model": model, "input": _text_message(prompt, [image_jpeg])}).encode(
+        "utf-8"
+    )
+    return _guarded_post(model, estimated, body, _reconcile_segment, transport, ledger_path)
 
 
 def _reconcile_text(model: str, response: dict) -> tuple[float, str | None]:

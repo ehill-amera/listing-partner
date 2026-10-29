@@ -1,0 +1,236 @@
+"""Windows: SAM finds them, Muse Spark confirms them, brackets fill them.
+
+Local geometry plus capped Meta calls only. Masks cover glass; frames,
+sills and trim stay from the merge. Step B changes nothing outside the
+confirmed window masks.
+"""
+
+from __future__ import annotations
+
+import io
+import re
+from pathlib import Path
+
+import cv2
+import numpy as np
+from meta_sam_parser import (
+    CompletedOutcome,
+    decode_mask_to_raster,
+    image_segmentation_format,
+)
+from PIL import Image, ImageDraw
+
+from listing_partner import meta_client
+
+SAM_MODEL = "sam-3.1"
+SPARK_MODEL = "muse-spark-1.3"
+
+# Extra verify rounds after the first annotated photo. Each round is one
+# capped call; the bound keeps a confused photo from eating the budget.
+MAX_CROP_ROUNDS = 2
+
+
+def parse_lane(text: str, frame_w: int, frame_h: int) -> list[dict]:
+    """SAM output-text lane to candidates with frame-size glass masks."""
+    parser = image_segmentation_format().create_parser()
+    parser.push(text)
+    result = parser.finish(CompletedOutcome()).result
+    boxes = {}
+    masks = {}
+    for record in result.records:
+        name = type(record).__name__
+        if name == "SegmentationBoxRecord":
+            boxes[record.object_id] = record
+        elif name == "SegmentationMaskRecord":
+            masks[record.object_id] = record
+    candidates = []
+    for key in sorted(set(boxes) & set(masks), key=int):
+        object_id = int(key)
+        box = boxes[key]
+        left, top, right, bottom = box.left, box.top, box.right, box.bottom
+        raster = decode_mask_to_raster(masks[key].mask)
+        small = np.frombuffer(raster, dtype=np.uint8).reshape(
+            masks[key].mask.height, masks[key].mask.width
+        )
+        grown = cv2.resize(small, (right - left, bottom - top), interpolation=cv2.INTER_NEAREST)
+        full = np.zeros((frame_h, frame_w), bool)
+        full[top:bottom, left:right] = grown.astype(bool)
+        candidates.append({"object_id": object_id, "box": (left, top, right, bottom), "mask": full})
+    return candidates
+
+
+def find_candidates(
+    image_jpeg: bytes, prompt: str, *, transport=None, ledger_path=None
+) -> list[dict]:
+    """One SAM call per prompt; returns candidates with frame-size masks."""
+    out = meta_client.call_meta_segment(
+        SAM_MODEL, prompt, image_jpeg, transport=transport, ledger_path=ledger_path
+    )
+    with Image.open(io.BytesIO(image_jpeg)) as handle:
+        frame_w, frame_h = handle.size
+    return parse_lane(out["text"], frame_w, frame_h)
+
+
+def jpeg_bytes(photo_rgb: np.ndarray, long_side: int = 1024, quality: int = 88) -> bytes:
+    """Downscale-and-encode a photo for a Meta image call."""
+    h, w = photo_rgb.shape[:2]
+    scale = min(1.0, long_side / max(h, w))
+    if scale < 1.0:
+        photo_rgb = cv2.resize(
+            photo_rgb,
+            (int(round(w * scale)), int(round(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    handle = io.BytesIO()
+    Image.fromarray(photo_rgb).save(handle, format="JPEG", quality=quality)
+    return handle.getvalue()
+
+
+def annotate(photo_rgb: np.ndarray, candidates: list[dict]) -> np.ndarray:
+    """Numbered boxes over a copy, so Spark can verdict by id."""
+    canvas = Image.fromarray(photo_rgb)
+    draw = ImageDraw.Draw(canvas)
+    for candidate in candidates:
+        left, top, right, bottom = candidate["box"]
+        draw.rectangle([left, top, right, bottom], outline=(255, 0, 0), width=3)
+        draw.text((left + 4, top + 4), str(candidate["object_id"]), fill=(255, 0, 0))
+    return np.asarray(canvas)
+
+
+_VERDICT = re.compile(r"^\s*(\d+)\s*:\s*(window|not a window)\s*[-–]\s*(.+?)\s*$")
+_CROP = re.compile(r"^\s*CROP\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$")
+
+
+def _parse_verdicts(text: str) -> dict[int, tuple[bool, str]] | None:
+    verdicts = {}
+    for line in text.strip().splitlines():
+        match = _VERDICT.match(line)
+        if not match:
+            return None
+        object_id = int(match.group(1))
+        verdicts[object_id] = (match.group(2) == "window", match.group(3))
+    return verdicts or None
+
+
+VERIFY_PROMPT = (
+    "Numbered red boxes mark window candidates in this room photo. "
+    "For EACH numbered box reply one line exactly like: "
+    "ID: window - reason OR ID: not a window - reason. "
+    "A real window shows the outdoors (sky, trees, buildings, street). "
+    "Reject mirrors, screens, framed pictures, light fixtures and cabinet "
+    "glass, naming what it actually is. If one box needs a closer look, "
+    "reply only: CROP x,y,w,h in these photo pixels."
+)
+
+
+ZOOM_PROMPT = (
+    "Close-up of candidate box {object_id} from the room photo. Reply one "
+    "line exactly like: {object_id}: window - reason OR {object_id}: not a "
+    "window - reason. A real window shows the outdoors (sky, trees, "
+    "buildings, street). Reject mirrors, screens, pictures, fixtures and "
+    "cabinet glass, naming what it actually is."
+)
+
+
+def _zoom_crop(photo_rgb: np.ndarray, box: tuple) -> np.ndarray:
+    left, top, right, bottom = box
+    h, w = photo_rgb.shape[:2]
+    pad_x = int(round((right - left) * 0.5))
+    pad_y = int(round((bottom - top) * 0.5))
+    x0, y0 = max(0, left - pad_x), max(0, top - pad_y)
+    x1, y1 = min(w, right + pad_x), min(h, bottom + pad_y)
+    return photo_rgb[y0:y1, x0:x1]
+
+
+def verify_candidates(
+    photo_rgb: np.ndarray,
+    candidates: list[dict],
+    *,
+    transport=None,
+    ledger_path=None,
+    max_output_tokens: int = 2048,
+    transcript: list | None = None,
+) -> dict[int, tuple[bool, str]]:
+    """Spark verdicts per candidate id: (is_window, reason).
+
+    One annotated photo first; up to MAX_CROP_ROUNDS follow-ups when Spark
+    asks for a closer crop or skips a box. Every round goes through the
+    capped client. Raw replies append to transcript when given.
+    """
+    wanted = {c["object_id"] for c in candidates}
+    if not wanted:
+        return {}
+    current_jpeg = jpeg_bytes(annotate(photo_rgb, candidates))
+    prompt = VERIFY_PROMPT
+    rounds = 0
+    found: dict[int, tuple[bool, str]] = {}
+    while True:
+        out = meta_client.call_meta_text(
+            SPARK_MODEL,
+            prompt,
+            max_output_tokens,
+            images=[current_jpeg],
+            transport=transport,
+            ledger_path=ledger_path,
+        )
+        if transcript is not None:
+            transcript.append(out["text"])
+        verdicts = _parse_verdicts(out["text"])
+        if verdicts is not None:
+            found.update(verdicts)
+            missing = sorted(wanted - set(found))
+            if not missing:
+                return {k: found[k] for k in wanted}
+            if rounds >= MAX_CROP_ROUNDS:
+                raise ValueError(f"Spark skipped candidates {missing}")
+            need = missing[0]
+            box = next(c["box"] for c in candidates if c["object_id"] == need)
+            prompt = ZOOM_PROMPT.format(object_id=need)
+            current_jpeg = jpeg_bytes(_zoom_crop(photo_rgb, box))
+            rounds += 1
+            continue
+        if rounds >= MAX_CROP_ROUNDS:
+            raise ValueError(f"unreadable verdicts after {rounds + 1} rounds")
+        match = _CROP.match(out["text"].strip().splitlines()[0])
+        if not match:
+            raise ValueError(f"unreadable verdicts: {out['text'][:120]!r}")
+        x, y, w, h = (int(v) for v in match.groups())
+        crop = photo_rgb[y : y + h, x : x + w]
+        if crop.size == 0:
+            raise ValueError(f"empty crop {x},{y},{w},{h}")
+        current_jpeg = jpeg_bytes(crop)
+        prompt = VERIFY_PROMPT
+        rounds += 1
+
+
+def pull_window(
+    merge_rgb: np.ndarray, dark_rgb: np.ndarray, mask: np.ndarray
+) -> tuple[np.ndarray, int]:
+    """Fill the window mask from the real darker frame.
+
+    The dark view is matched to the room's brightness and color, then
+    blended under a feathered edge sized to the image. Returns the pulled
+    photo and the count of changed pixels outside the mask (must be 0).
+    """
+    feather = max(2, int(round(max(mask.shape) * 0.01)))
+    inside = mask.astype(np.float32)
+    dist = cv2.distanceTransform(inside.astype(np.uint8), cv2.DIST_L2, 3)
+    alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
+    room = ~mask
+    matched = dark_rgb.astype(np.float32)
+    for channel in range(3):
+        room_merge = merge_rgb[:, :, channel][room].mean()
+        room_dark = dark_rgb[:, :, channel][room].mean()
+        if room_dark > 1e-6:
+            matched[:, :, channel] *= room_merge / room_dark
+    matched = np.clip(matched, 0, 255)
+    base = merge_rgb.astype(np.float32)
+    pulled = base * (1 - alpha[:, :, None]) + matched * alpha[:, :, None]
+    pulled = np.clip(pulled, 0, 255).astype(np.uint8)
+    changed_outside = int((np.any(pulled != merge_rgb, axis=2) & ~mask).sum())
+    return pulled, changed_outside
+
+
+def save_mask_png(mask: np.ndarray, path: Path) -> None:
+    """Glass-white mask PNG for the review page and the package record."""
+    Image.fromarray((mask.astype(np.uint8)) * 255, mode="L").save(path)
