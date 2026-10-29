@@ -8,6 +8,8 @@ from __future__ import annotations
 
 UNIT_SPEND_BUDGET_USD = 2.00
 EDGE_TOLERANCE = 0.10
+#: Near-white level for the window highlights check. Shared with the
+#: pull-frame choice: the frame is picked on what this check measures.
 CLIP_LEVEL = 250
 
 
@@ -19,8 +21,15 @@ def clipped_fraction(gray) -> float:
 
 
 def check_highlights(clip_before: float, clip_after: float) -> tuple[bool, str]:
-    """Window highlights held: clipped fraction must not grow."""
-    ok = clip_after <= clip_before
+    """Window highlights held, measured on the final output with no clamp.
+
+    Near-white window pixels must drop when the window had any, and a
+    window with none must gain none.
+    """
+    if clip_before > 0:
+        ok = clip_after < clip_before
+    else:
+        ok = clip_after == 0
     return ok, f"clipped {clip_before:.4f} -> {clip_after:.4f} of window pixels"
 
 
@@ -65,6 +74,37 @@ def check_verticals(residual_deg: float | None) -> tuple[bool, str]:
         return False, "not measured: no agreeing near-vertical lines found"
     ok = abs(residual_deg) <= 0.5
     return ok, f"residual tilt {residual_deg:.2f} degrees"
+
+
+LOOK_BRIGHTNESS_TOL = 0.15
+LOOK_COLOR_TOL = 5.0
+
+
+def check_look(
+    fin_median: float,
+    mls_median: float,
+    fin_a: float,
+    mls_a: float,
+    fin_b: float,
+    mls_b: float,
+) -> tuple[bool, str]:
+    """The finished look matches Erik's MLS photo of the same shot.
+
+    Median brightness within 15%, mean Lab a* and b* within 5 units.
+    Measured after the run from the shipped files; processing never
+    reads the twin, so this check can only observe, never steer.
+    """
+    bright_gap = abs(fin_median - mls_median) / max(1.0, mls_median)
+    ok = (
+        bright_gap <= LOOK_BRIGHTNESS_TOL
+        and abs(fin_a - mls_a) <= LOOK_COLOR_TOL
+        and abs(fin_b - mls_b) <= LOOK_COLOR_TOL
+    )
+    return ok, (
+        f"brightness {fin_median:.0f} vs {mls_median:.0f} "
+        f"({bright_gap * 100:.1f}%), a* {fin_a:+.1f} vs {mls_a:+.1f}, "
+        f"b* {fin_b:+.1f} vs {mls_b:+.1f}"
+    )
 
 
 def check_spend(unit_spend_usd: float) -> tuple[bool, str]:

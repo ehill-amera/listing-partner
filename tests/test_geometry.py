@@ -83,6 +83,14 @@ def test_distortion_params_interpolate_between_calibrated_focals():
         assert min(lo, hi) - 1e-9 <= got <= max(lo, hi) + 1e-9
 
 
+def test_vignetting_lookup_reports_missing_data():
+    profile = geometry.load_profile()
+    assert geometry.vignetting_params(profile, 10.0) is None, (
+        "the vendored profile carries no vignetting model, so the step "
+        "must skip with a stated reason instead of pretending"
+    )
+
+
 def test_unknown_lens_has_no_match():
     assert geometry.match_profile({"maker": "Canon", "lens": "nobody"}) is None
     profile = geometry.match_profile(geometry.UNIT_A_LENS)

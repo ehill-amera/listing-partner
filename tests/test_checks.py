@@ -3,10 +3,12 @@
 from listing_partner import checks
 
 
-def test_highlights_must_not_grow():
+def test_highlights_must_drop_or_never_appear():
     assert checks.check_highlights(0.02, 0.01)[0] is True
-    assert checks.check_highlights(0.02, 0.02)[0] is True
+    assert checks.check_highlights(0.02, 0.02)[0] is False
     assert checks.check_highlights(0.01, 0.02)[0] is False
+    assert checks.check_highlights(0.0, 0.0)[0] is True
+    assert checks.check_highlights(0.0, 0.0001)[0] is False
 
 
 def test_outside_unchanged_is_exact():

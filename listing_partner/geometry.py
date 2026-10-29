@@ -288,6 +288,17 @@ def distortion_params(profile: ElementTree.Element, focal: float) -> tuple | Non
     return tuple((1 - t) * float(lo.get(k)) + t * float(hi.get(k)) for k in ("a", "b", "c"))
 
 
+def vignetting_params(profile: ElementTree.Element, focal: float) -> dict | None:
+    """Vignetting model at this focal length, or None when the profile
+    carries none. The vendored 10-20mm node ships distortion and TCA
+    only, so unit-a skips this step and says so on the review page."""
+    rows = profile.find("calibration").findall("vignetting")
+    if not rows:
+        return None
+    found = _bracket([{"focal": r.get("focal"), **r.attrib} for r in rows], focal)
+    return found
+
+
 def tca_params(profile: ElementTree.Element, focal: float) -> dict | None:
     """Interpolated TCA scales at this focal length, or None outside range."""
     rows = [r for r in profile.find("calibration").findall("tca")]

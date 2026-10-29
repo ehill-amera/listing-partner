@@ -103,7 +103,7 @@ def test_choose_frames_prefers_fewest_highlights(tmp_path, monkeypatch):
     assert "highlight" in reason and paths[2].name in reason
 
 
-def test_choose_frames_breaks_clip_ties_by_mls_gap(tmp_path, monkeypatch):
+def test_choose_frames_breaks_clip_ties_by_shared_target(tmp_path, monkeypatch):
     paths = [tmp_path / f"m{i}.jpg" for i in range(3)]
     for p in paths:
         Image.new("RGB", (64, 48), (100, 100, 100)).save(p, format="JPEG")
@@ -122,7 +122,7 @@ def test_choose_frames_breaks_clip_ties_by_mls_gap(tmp_path, monkeypatch):
         drop_brightest=_flat(60),
         drop_both=_flat(100),
     )
-    best, key, reason = hdr.choose_frames(paths, mls_median=140.0)
+    best, key, reason = hdr.choose_frames(paths)
     assert key == "drop_darkest", reason
 
 
@@ -139,12 +139,18 @@ def test_choose_frames_breaks_late_ties_by_noise(tmp_path, monkeypatch):
         (paths[1].name,): "drop_both",
     }
     rng = np.random.default_rng(7)
+    # Zero-mean noise: the noisy options tie on clip AND on target gap,
+    # so only the noise key separates them, which is the claim under test.
     _stub_merges(
         monkeypatch,
         full=_flat(100),
-        drop_darkest=_flat(100) + rng.integers(0, 30, (48, 64, 3)).astype(np.uint8),
+        drop_darkest=np.clip(
+            _flat(100).astype(int) + rng.integers(-15, 16, (48, 64, 3)), 0, 255
+        ).astype(np.uint8),
         drop_brightest=_flat(100),
-        drop_both=_flat(100) + rng.integers(0, 30, (48, 64, 3)).astype(np.uint8),
+        drop_both=np.clip(
+            _flat(100).astype(int) + rng.integers(-15, 16, (48, 64, 3)), 0, 255
+        ).astype(np.uint8),
     )
     best, key, reason = hdr.choose_frames(paths)
     assert key in ("full", "drop_brightest"), reason

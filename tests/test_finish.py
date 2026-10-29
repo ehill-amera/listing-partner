@@ -1,5 +1,6 @@
 """Tests for exposure balance and denoising. No network, no key."""
 
+import cv2
 import numpy as np
 
 from listing_partner import finish
@@ -19,13 +20,13 @@ def _room_cast():
 
 
 def test_white_balance_neutralizes_cast():
-    out, _ = finish.balance_exposure(_room_cast(), mls_median=None)
+    out, _ = finish.balance_exposure(_room_cast())
     gray = out[60:140, 20:80].astype(float)
     assert abs(gray[:, :, 0].mean() - gray[:, :, 2].mean()) < 8, "walls read neutral"
 
 
 def test_shadow_lift_opens_corners_without_haze():
-    out, report = finish.balance_exposure(_room_cast(), mls_median=None)
+    out, report = finish.balance_exposure(_room_cast())
     dark_before = np.sort(_room_cast().reshape(-1, 3).mean(axis=1))[:4000].mean()
     dark_after = np.sort(out.reshape(-1, 3).mean(axis=1))[:4000].mean()
     assert dark_after > dark_before + 5, "dark corners lift"
@@ -35,16 +36,60 @@ def test_shadow_lift_opens_corners_without_haze():
 
 
 def test_highlights_held_and_mls_matched():
-    out, report = finish.balance_exposure(_room_cast(), mls_median=140.0)
+    out, report = finish.balance_exposure(_room_cast())
     assert (out.astype(float).max(axis=2) >= 250).mean() < 0.02, "hot patch held"
-    assert abs(out.astype(float).mean() - 140.0) < 12, "overall brightness near MLS"
+    assert abs(out.astype(float).mean() - finish.INTERIOR_TARGET_MEDIAN) < 25, (
+        "overall brightness near the shared interior target, with no twin read"
+    )
+
+
+def test_balance_takes_no_mls_twin():
+    import inspect
+
+    assert "mls" not in inspect.signature(finish.balance_exposure).parameters, (
+        "processing a photo must never read its MLS twin"
+    )
+
+
+def test_pipeline_takes_no_mls_twin():
+    import inspect
+
+    from listing_partner import hdr, run_finish
+
+    for func in (
+        run_finish.build_inputs,
+        run_finish.process_set,
+        run_finish.replay_set,
+        run_finish.finish_tail,
+        hdr.score_merge,
+        hdr.choose_from_merges,
+        hdr.choose_frames,
+    ):
+        params = inspect.signature(func).parameters
+        assert not [p for p in params if "mls" in p], func.__name__
+
+
+def test_balance_does_not_hide_real_clipping():
+    dark = np.full((200, 200, 3), 60, np.uint8)
+    dark[40:160, 60:140] = 255
+    out, _ = finish.balance_exposure(dark)
+    hot = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)[40:160, 60:140]
+    assert (hot >= 250).mean() > 0.9, "a blown window still reads blown"
+
+
+def test_exterior_class_targets_lower_brightness():
+    assert finish.classify_scene(_room_cast()) == "interior"
+    sky = np.full((200, 200, 3), 150, np.uint8)
+    sky[:120, :, 2] = 220
+    assert finish.classify_scene(sky) == "exterior"
+    assert finish.EXTERIOR_TARGET_MEDIAN < finish.INTERIOR_TARGET_MEDIAN
 
 
 def test_balance_leaves_protected_windows_alone():
     photo = _room_cast()
     mask = np.zeros((200, 200), bool)
     mask[150:190, 110:190] = True
-    out, _ = finish.balance_exposure(photo, mls_median=None, protect=mask)
+    out, _ = finish.balance_exposure(photo, protect=mask)
     assert (out[mask] == photo[mask]).all(), "pulled windows wait for step B"
 
 

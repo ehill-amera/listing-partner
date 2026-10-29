@@ -419,37 +419,43 @@ def darkest_for_windows(frame_paths: list[Path]) -> Path:
     return sorted(frame_paths, key=read_exposure_seconds)[0]
 
 
-def score_merge(img: np.ndarray, mls_median: float | None = None) -> dict:
-    """Measured merge quality: clipped highlights, shadow detail, noise, and
-    distance from the MLS photo's overall brightness when given."""
+def score_merge(img: np.ndarray) -> dict:
+    """Measured merge quality: clipped highlights, shadow detail, noise,
+    and distance from the shared brightness target for the photo's own
+    scene class. Never the MLS twin: the target is the frozen shared
+    look, and the class comes from the merge itself."""
+    from listing_partner import finish
+
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float64)
     clip_frac = float((gray >= 250).mean())
     dark = np.sort(gray.ravel())[: max(1, gray.size // 10)]
     lap = cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F)
+    median = float(np.median(gray))
     score = {
         "clip_frac": clip_frac,
         "shadow_mean": float(dark.mean()),
         "noise": float(lap.std()),
-        "median": float(np.median(gray)),
+        "median": median,
+        "scene": finish.classify_scene(img),
     }
-    score["mls_gap"] = abs(score["median"] - mls_median) / 255.0 if mls_median is not None else 0.0
+    score["target_gap"] = abs(median - finish.target_median(img)) / 255.0
     return score
 
 
 def choose_from_merges(
-    merges: dict[str, np.ndarray], mls_median: float | None = None
+    merges: dict[str, np.ndarray],
 ) -> tuple[str, dict, dict]:
     """Best option key for pre-fused merges, its score, and the full-set
     score for the written reason.
 
     Lexicographic, no tuned weights: fewest clipped highlights wins, then
-    closest to the MLS brightness, then lowest noise.
+    closest to the shared brightness target, then lowest noise.
     """
-    scored = [(key, score_merge(img, mls_median)) for key, img in merges.items()]
+    scored = [(key, score_merge(img)) for key, img in merges.items()]
     scored.sort(
         key=lambda item: (
             round(item[1]["clip_frac"], 4),
-            round(item[1]["mls_gap"], 4),
+            round(item[1]["target_gap"], 4),
             item[1]["noise"],
         )
     )
@@ -458,7 +464,7 @@ def choose_from_merges(
 
 
 def choose_frames(
-    frame_paths: list[Path], mls_median: float | None = None
+    frame_paths: list[Path],
 ) -> tuple[list[Path], str, str]:
     """Best frame subset for the room merge, its option key, and why.
 
@@ -468,12 +474,13 @@ def choose_frames(
     order = {p: i for i, p in enumerate(frame_paths)}
     options = merge_options(frame_paths)
     merges = {key: merge_set(subset) for key, subset in options.items()}
-    key, score, full_score = choose_from_merges(merges, mls_median)
+    key, score, full_score = choose_from_merges(merges)
     best = sorted(options[key], key=lambda p: order[p])
     if key == "full":
         reason = (
             f"full set of {len(best)} frames: fewest clipped highlights "
-            f"({score['clip_frac']:.4f}), closest to MLS, lowest noise"
+            f"({score['clip_frac']:.4f}), closest to the shared "
+            f"{score['scene']} target, lowest noise"
         )
     else:
         dropped = sorted(set(frame_paths) - set(options[key]), key=lambda p: order[p])
