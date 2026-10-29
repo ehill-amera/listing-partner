@@ -26,7 +26,9 @@ if [ -z "$tracked" ]; then
 else
   echo "$tracked" | grep -E '(^|/)\.env($|/)|\.pem$|\.key$' && bad ".env/key files tracked"
   # Key/token/email/phone patterns in every tracked file (binaries skipped).
-  if grep -rInEI -i '(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|LLM_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{16}|xox[bap]-)' \
+  # The sk- branch needs a length: real keys run dozens of characters, and
+  # a bare prefix flags ordinary prose like "mask-decoding".
+  if grep -rInEI -i '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|LLM_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{16}|xox[bap]-)' \
       -- $tracked 2>/dev/null | grep -v '^Binary' ; then
     bad "possible secret pattern in tracked files"
   fi

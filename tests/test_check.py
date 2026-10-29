@@ -126,6 +126,13 @@ def test_banned_scan_passes_clean_tree(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_secret_scan_needs_key_length_not_just_prefix():
+    text = CHECK.read_text()
+    assert "sk-[A-Za-z0-9]{20,}" in text, (
+        "a bare sk- prefix flags prose like mask-decoding; real keys are long"
+    )
+
+
 def test_force_added_file_under_inputs_is_caught(tmp_path):
     root = _scaffold_repo(tmp_path / "repo")
     # The check's algorithm with the flag: every tracked file, patterns only.
