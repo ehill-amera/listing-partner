@@ -25,6 +25,13 @@ Built for Meta's Global AI Developer Hackathon (Indie track, solo), Oct 26 to No
 
 Stretch, only if time allows: brush touch-up, where the photographer paints over anything the automatic tidy missed and Muse Image removes it inside the stroke only, with the same honesty audit.
 
+## Why not just a phone and a general image model
+
+Phones already make good HDR photos, and general image models can clean them up. That is not the whole job, and Listing Partner does not compete on the merge alone.
+- A general image model regenerates the whole photo. It can quietly change fixtures, walls or damage, and nothing proves what it touched. Listing Partner edits only inside saved masks and proves, pixel by pixel, that nothing else changed.
+- A phone gives one processed file per shot. A listing is a set: culled, labeled, ordered, checked for missing rooms, described accurately, and screened for fair housing problems. Listing Partner does the whole listing and checks its own work.
+- Photographers who want to keep editing keep their latitude: a high bit-depth master is saved beside every finished JPEG.
+
 ## What it takes in
 
 Any bracketed set, raw or JPEG. Raw brackets (Nikon NEF, Canon CR3, Sony ARW, DNG) give the best windows and the cleanest shadows. JPEG brackets work too, with a lower ceiling, and the difference is measured, not claimed. Tested on Nikon raw. Other raw formats are read through LibRaw and stay labeled untested until a second camera is actually run.
@@ -35,6 +42,10 @@ Any bracketed set, raw or JPEG. Raw brackets (Nikon NEF, Canon CR3, Sony ARW, DN
 - Commercial listing formats.
 - Hide, remove or soften damage, or change anything structural in a photo.
 - Send tenant, applicant or owner data anywhere. Only public unit facts and Bokani's own photos go to Meta's API.
+
+## The honesty rule, in Erik's words
+
+An edit is allowed only if the photo still shows what the place would really look like after a physical cleanup, plus the weather. Allowed, always inside a saved mask and always listed: clutter a person could carry out in a day, and the sky on exterior shots (labeled "sky replaced"). Never allowed: repairs, damage, stains, permanent fixtures, walls, flooring, or anything that changes the property itself.
 
 ## Hard rules
 

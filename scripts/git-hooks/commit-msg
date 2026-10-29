@@ -1,8 +1,9 @@
 #!/bin/sh
 # listing-partner fence: commit messages may not contain a banned string.
 top=$(git rev-parse --show-toplevel) || exit 1
-list="$top/local/banned-strings.txt"
-[ -s "$list" ] || { echo "FENCE: local/banned-strings.txt is missing or empty. Commit refused." >&2; exit 1; }
+list="$top/../.listing-partner-private/banned-strings.txt"
+[ -s "$list" ] || list="$top/local/banned-strings.txt"
+[ -s "$list" ] || { echo "FENCE: the banned-strings list (../.listing-partner-private/banned-strings.txt) is missing or empty. Commit refused." >&2; exit 1; }
 grep -v '^[[:space:]]*#' "$list" | grep -v '^[[:space:]]*$' | while IFS= read -r p; do
   if grep -v '^#' "$1" | grep -i -F -- "$p" >/dev/null; then echo hit; fi
 done | grep -q hit && { echo "FENCE: commit message contains a banned string (see local/banned-strings.txt)." >&2; exit 1; }

@@ -48,7 +48,7 @@ Across every tracked file on the branch (`git ls-files`) and every commit on the
 - No raw photos, merged outputs, spend ledger, or `.navigator/` files tracked.
 - No committed image carries GPS or camera serial EXIF.
 - `.gitignore` still covers secrets, raw photos, outputs, the ledger, `.navigator/`, `local/` and `.muse/`.
-- No test unit's street address, source path or address-bearing file name appears in any tracked file, file name, commit message or branch name. The banned strings are in `local/banned-strings.txt`; check every one against `git ls-files`, file contents, and `git log` messages since `main`.
+- No test unit's street address, source path or address-bearing file name appears in any tracked file, file name, commit message or branch name. The banned strings are in `../.listing-partner-private/banned-strings.txt` (outside the repo, never quote them); check every one against `git ls-files`, file contents, and `git log` messages since `main`.
 - The installed hooks in `.git/hooks` are identical to `scripts/git-hooks/`, and nothing on the branch weakens them.
 - Commits on the branch use the `ehill-amera` private GitHub email (`git log --format=%ae`). Any remote points only at `ehill-amera/listing-partner`.
 

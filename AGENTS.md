@@ -61,7 +61,7 @@ The check command scans tracked files for these and fails loudly. Before the rep
 
 ## Private test data
 
-Test-set source paths live in `local/test-sets.md` (gitignored). Read them from there. The street address of every test unit stays out of the repo: never write it, the source paths, or any source file name that contains it into a committed file, a file name, a commit message, a branch name, or a report. Test units are known only by their slug (`unit-a`). Banned strings live in `local/banned-strings.txt` (gitignored), and the git hooks and the check command refuse any match.
+Test-set source paths live outside the repo in `../.listing-partner-private/test-sets.md`. Never open that folder unless a contract tells you to copy a new test set. The street address of every test unit stays out of the repo: never write it, the source paths, or any source file name that contains it into a committed file, a file name, a commit message, a branch name, or a report. Test units are known only by their slug (`unit-a`). Banned strings live outside the repo in `../.listing-partner-private/banned-strings.txt`. The git hooks and the check command read them and refuse any match. Never print, copy or quote that file.
 
 ## The fence
 

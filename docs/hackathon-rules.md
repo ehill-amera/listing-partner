@@ -41,4 +41,4 @@ Read from the official Participant Guide on the Cerebral Valley event page (Deta
 - Community Vote, $10K: most votes in the public gallery.
 - Best Agentic Use-Case, $5K.
 - Best Creative Build, $5K (Muse Image or Muse Wonder).
-- Best Build on Meta Open Weight Models, $10K: skipped by Erik on Oct 26.
+- Best Build on Meta Open Weight Models, $10K: back in play Oct 26 through Baseten partner inference (Muse Spark Open), decided by the navigator with Erik's go-ahead.

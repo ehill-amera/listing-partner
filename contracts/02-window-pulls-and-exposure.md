@@ -22,6 +22,14 @@ Erik's goal: a photographer drops raw files in a folder and gets listing photos 
 
 Erik decided on Oct 26 to lower the product's hard spend cap from $100 to $40, because Muse Code's building draws on the same $150 of free credits. Change the constant to $40.00, keep the $1 headroom (calls refused once the worst case would pass $39.00), update every test and the review page footer to match, and update AGENTS.md's spend-cap section to say $40. Nothing (environment, flag, config) can raise it. This is the first commit of the unit, and the check must pass on it before any other work.
 
+### First commit, also: reservations that really cover the bill
+
+In unit 1's last live call the reservation was $0.000077 and the real bill was $0.000082, so the "worst case" reservation came in under the actual cost. The likely cause is tokens Meta bills that the output limit does not cap (reasoning or hidden tokens). Read Meta's pricing and response docs for what is billed, size every reservation from that, and add a safety multiplier until measured calls show the reservation always covers the bill. Record each call's reservation-to-bill ratio in the ledger and report the worst ratio at the end of the unit. The $1 headroom stays as a second layer.
+
+### First commit, also: banned strings moved out of the repo
+
+The banned-strings list and the test-set paths now live outside the repo, in `../.listing-partner-private/`. The git hooks already read from there. Change `./scripts/check` to read `../.listing-partner-private/banned-strings.txt` and fail loudly if it is missing or empty. Never print the file's contents, in the check's output or anywhere else: on a match, report the file and line number and the list entry's number, never the string. Add a test for that.
+
 ### Second commit: read Muse Spark's real reply
 
 Unit 1's second live call settled correctly in the ledger, but the client could not read the reply text: Meta's response had no "output" or "text" keys where the parser looked. Before any Muse Spark call in this unit, read Meta's response reference (dev.meta.ai/docs/api-reference) for the real reply shape, teach the parser that shape, and add a test built from a saved real response with any ids and request details stripped. If the shape still cannot be confirmed from the docs, make one minimal live call (16 output tokens), save its response shape with ids removed, and build the parser from that. The ledger must stay correct whether or not the reply text can be read.
@@ -35,6 +43,10 @@ Unit 1's second live call settled correctly in the ledger, but the client could 
 ### A1. Grouping for longer brackets
 
 Unit 1 starts a new set after a gap of more than 8 seconds between capture times. With longer brackets (7 to 9 frames, the brightest at several seconds of exposure), the gap between one frame's start and the next can pass 8 seconds inside a single set. Measure the gap from the end of each exposure (capture time plus exposure time) instead, and add a test with a synthetic 9-frame set whose brightest frames run 2, 4 and 8 seconds. Re-run unit-a and confirm it still groups into the same 17 sets.
+
+### A2. Choosing which frames to merge
+
+Erik often re-merges a set with fewer frames, for example dropping the darkest frame when it only darkens the room without adding useful window detail. Do the same automatically: for each set, try the full set and sensible subsets (drop the darkest, drop the brightest, drop both), score each merge on the measured checks (window highlights held, shadow detail and noise, overall brightness against Erik's MLS photo of the same shot), keep the best, and record which frames were used and why. The window pull still uses the darkest frame that holds the view, even when that frame is left out of the room merge.
 
 ### A. Find the windows
 
@@ -69,6 +81,10 @@ The automatic version of Erik's linear, radial and luminance masks:
 - `output/unit-a/review-finish.html`, one row per shot: our merge from unit 1, our finished photo, the window mask over the merge, and Erik's MLS photo of the same shot.
 - Top line: photos processed, median shadow-noise before and after denoise, windows found, windows confirmed, candidates rejected, photos with at least one window, clipped highlights inside confirmed windows before and after (as a percentage of window pixels), run time, and Meta spend. All measured from this run.
 - Footer: Meta spend to date and the $40 cap, read from the ledger (or "unknown" if the ledger cannot be read).
+
+## For the unit 7 agent
+
+Every measured check in this unit (clipped highlights in windows, outside-mask pixels unchanged, noise and edge strength, line straightness) is also a pass or fail function with its threshold, so the listing agent can call it, retry a step a different way, and record why.
 
 ## Acceptance criteria
 
