@@ -118,6 +118,31 @@ def test_scale_candidates_to_full_resolution():
     assert scaled[0]["mask"][148:1360, 0:154].mean() > 0.9
 
 
+def test_verify_clarifies_a_bare_crop_ask(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    replies = iter(["CROP", "CROP 10,10,40,40", "0: window - sky and trees\n"])
+    prompts = []
+
+    def _spark(url, headers, body):
+        prompts.append(json.loads(body.decode("utf-8"))["input"])
+        return {
+            "id": "r-b",
+            "text": next(replies),
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    verdicts = segment.verify_candidates(
+        photo,
+        [{"object_id": 0, "box": (10, 10, 50, 50)}],
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0][0] is True
+    assert "CROP x,y,w,h" in json.dumps(prompts[1]), "the follow-up asks for coords"
+
+
 def test_verify_grants_one_crop_round_on_request(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"

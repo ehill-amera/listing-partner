@@ -154,6 +154,8 @@ ZOOM_PROMPT = (
     "cabinet glass, naming what it actually is."
 )
 
+CROP_ASK = "Reply with only the crop rectangle as CROP x,y,w,h in photo pixels, nothing else."
+
 
 def _zoom_crop(photo_rgb: np.ndarray, box: tuple) -> np.ndarray:
     left, top, right, bottom = box
@@ -171,7 +173,7 @@ def verify_candidates(
     *,
     transport=None,
     ledger_path=None,
-    max_output_tokens: int = 2048,
+    max_output_tokens: int = 4096,
     transcript: list | None = None,
 ) -> dict[int, tuple[bool, str]]:
     """Spark verdicts per candidate id: (is_window, reason).
@@ -214,8 +216,13 @@ def verify_candidates(
             continue
         if rounds >= MAX_CROP_ROUNDS:
             raise ValueError(f"unreadable verdicts after {rounds + 1} rounds")
-        match = _CROP.match(out["text"].strip().splitlines()[0])
+        first_line = out["text"].strip().splitlines()[0]
+        match = _CROP.match(first_line)
         if not match:
+            if first_line.strip().upper() == "CROP":
+                prompt = CROP_ASK
+                rounds += 1
+                continue
             raise ValueError(f"unreadable verdicts: {out['text'][:120]!r}")
         x, y, w, h = (int(v) for v in match.groups())
         crop = photo_rgb[y : y + h, x : x + w]

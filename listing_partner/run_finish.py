@@ -293,8 +293,14 @@ rejected {top["windows_rejected"]}, photos with windows {top["photos_with_window
     return page
 
 
-def run_finish(raw_dir: Path, mls_dir: Path, output_dir: Path) -> dict:
-    """Finish one unit's bracket sets. Returns the manifest."""
+def run_finish(
+    raw_dir: Path, mls_dir: Path, output_dir: Path, only: set[int] | None = None
+) -> dict:
+    """Finish one unit's bracket sets. Returns the manifest.
+
+    With only={...}, processes just those set numbers and merges fresh
+    records into the existing manifest instead of starting over.
+    """
     frames = sorted(raw_dir.glob("*.NEF")) + sorted(raw_dir.glob("*.nef"))
     if not frames:
         raise ValueError(f"no bracket frames in {raw_dir}")
@@ -317,6 +323,8 @@ def run_finish(raw_dir: Path, mls_dir: Path, output_dir: Path) -> dict:
     records = []
     started = time.perf_counter()
     for number, members in enumerate(sets, 1):
+        if only is not None and number not in only:
+            continue
         mls_here = [p for p, i in mls_matches.items() if i["set"] == number - 1]
         mls_median = _gray_median(mls_dir / mls_here[0]) if mls_here else None
         record = process_set(members, mls_median, dirs, number)
@@ -347,8 +355,41 @@ def run_finish(raw_dir: Path, mls_dir: Path, output_dir: Path) -> dict:
         "clip_after_pct": 100 * sum(c[1] for c in clips) / max(1, len(clips)),
         "unit_spend_usd": round(spend_end - spend_start, 6),
     }
+    manifest_path = output_dir / "finish_manifest.json"
+    if only is not None and manifest_path.exists():
+        prior_manifest = json.loads(manifest_path.read_text())
+        prior = {r["index"]: r for r in prior_manifest["sets"]}
+        prior_spend = prior_manifest.get("summary", {}).get("unit_spend_usd", 0.0)
+        merged_records = []
+        for number in range(1, len(sets) + 1):
+            fresh = next((r for r in records if r["index"] == number), None)
+            merged_records.append(
+                fresh if fresh is not None else prior.get(number, {"index": number})
+            )
+        records = merged_records
+        finished_records = [r for r in records if not r.get("error")]
+        noises = [
+            (r["noise_before"], r["noise_after"]) for r in finished_records if "noise_before" in r
+        ]
+        clips = [
+            (r["clip_before"], r["clip_after"]) for r in finished_records if "clip_before" in r
+        ]
+        summary = {
+            "photos_finished": len(finished_records),
+            "photos_failed": len(records) - len(finished_records),
+            "run_seconds": elapsed,
+            "noise_before": sum(n[0] for n in noises) / max(1, len(noises)),
+            "noise_after": sum(n[1] for n in noises) / max(1, len(noises)),
+            "windows_found": sum(r.get("candidates_found", 0) for r in finished_records),
+            "windows_confirmed": sum(len(r.get("windows", [])) for r in finished_records),
+            "windows_rejected": sum(len(r.get("rejections", [])) for r in finished_records),
+            "photos_with_windows": sum(1 for r in finished_records if r.get("windows")),
+            "clip_before_pct": 100 * sum(c[0] for c in clips) / max(1, len(clips)),
+            "clip_after_pct": 100 * sum(c[1] for c in clips) / max(1, len(clips)),
+            "unit_spend_usd": round(prior_spend + (spend_end - spend_start), 6),
+        }
     manifest = {"summary": summary, "sets": records}
-    (output_dir / "finish_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     build_finish_review(output_dir, manifest, mls_matches)
     return manifest
 
@@ -357,8 +398,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Finish one unit's bracket sets.")
     parser.add_argument("unit_dir", type=Path, help="e.g. inputs/unit-a")
     parser.add_argument("--output", type=Path, required=True, help="e.g. output/unit-a")
+    parser.add_argument("--only", default=None, help="e.g. 12,13 to retry just those sets")
     args = parser.parse_args()
-    manifest = run_finish(args.unit_dir / "raw", args.unit_dir / "mls", args.output)
+    only = {int(n) for n in args.only.split(",")} if args.only else None
+    manifest = run_finish(args.unit_dir / "raw", args.unit_dir / "mls", args.output, only=only)
     print(json.dumps(manifest["summary"], indent=2))
 
 
