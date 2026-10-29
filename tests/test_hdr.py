@@ -30,6 +30,25 @@ def test_grouping_splits_on_eight_second_gaps(tmp_path):
     assert sorted(flat) == sorted(paths), "every frame in exactly one set"
 
 
+def test_long_brackets_group_by_end_of_exposure(tmp_path, monkeypatch):
+    # Nine frames whose starts are 10 seconds apart at the seam (old code
+    # splits into 8 plus 1) but whose long brightest frames (2, 4, 8s) span
+    # it: the 4s frame ending at t=11 means the t=17 frame starts only 6s
+    # after the previous frame's end, so all nine belong to one set.
+    base = datetime(2026, 10, 12, 10, 0, 0)
+    starts = [0, 1, 2, 3, 4, 5, 6, 7, 17]
+    exposures = [1 / 100] * 6 + [2.0, 4.0, 8.0]
+    paths = []
+    for i, offset in enumerate(starts):
+        p = tmp_path / f"long_{i}.jpg"
+        _stamp_jpeg(p, base + timedelta(seconds=offset))
+        paths.append(p)
+    by_name = {str(p): e for p, e in zip(paths, exposures)}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: by_name[str(p)])
+    sets = hdr.group_frames(paths)
+    assert [len(s) for s in sets] == [9], "end-of-exposure gaps stay within 8s"
+
+
 def test_gap_boundary_stays_in_set(tmp_path):
     base = datetime(2026, 10, 12, 10, 0, 0)
     paths = []
@@ -41,6 +60,118 @@ def test_gap_boundary_stays_in_set(tmp_path):
     p2 = tmp_path / "b_2.jpg"
     _stamp_jpeg(p2, base + timedelta(seconds=17, microseconds=1))
     assert len(hdr.group_frames(paths + [p2])) == 2
+
+
+def _stub_merges(monkeypatch, **by_key):
+    """Canned fused arrays per option key; the selection logic is the claim,
+    the fusion itself is OpenCV's and already covered elsewhere."""
+    monkeypatch.setattr(hdr, "merge_set", lambda subset: by_key[_subset_key(subset)])
+
+
+def _subset_key(subset):
+    return getattr(_subset_key, "map")[tuple(p.name for p in subset)]
+
+
+def _flat(value, white_pixels=0, size=(64, 48)):
+    img = np.full((*size[::-1], 3), value, np.uint8)
+    img[:white_pixels, :1] = 255
+    return img
+
+
+def test_choose_frames_prefers_fewest_highlights(tmp_path, monkeypatch):
+    paths = [tmp_path / f"f{i}.jpg" for i in range(3)]
+    for p in paths:
+        Image.new("RGB", (64, 48), (100, 100, 100)).save(p, format="JPEG")
+    exposures = {str(paths[0]): 1 / 100, str(paths[1]): 1 / 50, str(paths[2]): 1 / 10}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: exposures[str(p)])
+    _subset_key.map = {
+        tuple(p.name for p in paths): "full",
+        (paths[0].name, paths[1].name): "drop_brightest",
+        (paths[1].name, paths[2].name): "drop_darkest",
+        (paths[1].name,): "drop_both",
+    }
+    _stub_merges(
+        monkeypatch,
+        full=_flat(100, white_pixels=20),
+        drop_darkest=_flat(100, white_pixels=10),
+        drop_brightest=_flat(100, white_pixels=2),
+        drop_both=_flat(100, white_pixels=12),
+    )
+    best, key, reason = hdr.choose_frames(paths)
+    assert key == "drop_brightest", reason
+    assert best == [paths[0], paths[1]]
+    assert "highlight" in reason and paths[2].name in reason
+
+
+def test_choose_frames_breaks_clip_ties_by_mls_gap(tmp_path, monkeypatch):
+    paths = [tmp_path / f"m{i}.jpg" for i in range(3)]
+    for p in paths:
+        Image.new("RGB", (64, 48), (100, 100, 100)).save(p, format="JPEG")
+    exposures = {str(paths[0]): 1 / 100, str(paths[1]): 1 / 50, str(paths[2]): 1 / 10}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: exposures[str(p)])
+    _subset_key.map = {
+        tuple(p.name for p in paths): "full",
+        (paths[0].name, paths[1].name): "drop_brightest",
+        (paths[1].name, paths[2].name): "drop_darkest",
+        (paths[1].name,): "drop_both",
+    }
+    _stub_merges(
+        monkeypatch,
+        full=_flat(100),
+        drop_darkest=_flat(140),
+        drop_brightest=_flat(60),
+        drop_both=_flat(100),
+    )
+    best, key, reason = hdr.choose_frames(paths, mls_median=140.0)
+    assert key == "drop_darkest", reason
+
+
+def test_choose_frames_breaks_late_ties_by_noise(tmp_path, monkeypatch):
+    paths = [tmp_path / f"n{i}.jpg" for i in range(3)]
+    for p in paths:
+        Image.new("RGB", (64, 48), (100, 100, 100)).save(p, format="JPEG")
+    exposures = {str(paths[0]): 1 / 100, str(paths[1]): 1 / 50, str(paths[2]): 1 / 10}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: exposures[str(p)])
+    _subset_key.map = {
+        tuple(p.name for p in paths): "full",
+        (paths[0].name, paths[1].name): "drop_brightest",
+        (paths[1].name, paths[2].name): "drop_darkest",
+        (paths[1].name,): "drop_both",
+    }
+    rng = np.random.default_rng(7)
+    _stub_merges(
+        monkeypatch,
+        full=_flat(100),
+        drop_darkest=_flat(100) + rng.integers(0, 30, (48, 64, 3)).astype(np.uint8),
+        drop_brightest=_flat(100),
+        drop_both=_flat(100) + rng.integers(0, 30, (48, 64, 3)).astype(np.uint8),
+    )
+    best, key, reason = hdr.choose_frames(paths)
+    assert key in ("full", "drop_brightest"), reason
+    assert "noise" in reason or key == "full"
+
+
+def test_choose_frames_runs_on_real_merges(tmp_path, monkeypatch):
+    paths = [tmp_path / f"r{i}.jpg" for i in range(3)]
+    for p, v in zip(paths, (40, 110, 190)):
+        Image.new("RGB", (64, 48), (v, v, v)).save(p, format="JPEG")
+    exposures = {str(paths[0]): 1 / 100, str(paths[1]): 1 / 50, str(paths[2]): 1 / 10}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: exposures[str(p)])
+    best, key, reason = hdr.choose_frames(paths)
+    assert key in ("full", "drop_darkest", "drop_brightest", "drop_both")
+    assert reason and set(best) <= set(paths)
+
+
+def test_choose_frames_names_darkest_for_windows(tmp_path, monkeypatch):
+    paths = [tmp_path / f"w{i}.jpg" for i in range(3)]
+    for p, v in zip(paths, (30, 120, 255)):
+        Image.new("RGB", (64, 48), (v, v, v)).save(p, format="JPEG")
+    exposures = {str(paths[0]): 1 / 100, str(paths[1]): 1 / 50, str(paths[2]): 1 / 10}
+    monkeypatch.setattr(hdr, "read_exposure_seconds", lambda p: exposures[str(p)])
+    best, key, reason = hdr.choose_frames(paths)
+    assert hdr.darkest_for_windows(paths) == paths[0], (
+        "the window pull uses the darkest frame even when it leaves the merge"
+    )
 
 
 def test_most_common_size_and_flag():

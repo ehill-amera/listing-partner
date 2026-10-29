@@ -1,14 +1,14 @@
 """HDR merge: each bracket set becomes one natural-looking photo.
 
 Local only: this module never imports the Meta client and makes no network
-calls. Grouping follows capture-time gaps (more than 8 seconds starts a new
-set), never a fixed set size and never exposure bias. Fusion is exposure
+calls. Grouping follows end-of-exposure gaps (more than 8 seconds starts a
+new set), never a fixed set size and never exposure bias. Fusion is exposure
 fusion (Mertens), not tone-mapped HDR.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -96,23 +96,36 @@ def read_exposure_seconds(path: Path) -> float:
     return float(text)
 
 
+def _end_of_exposure(path: Path, stamp: datetime) -> datetime:
+    """When this frame's exposure finished: capture time plus exposure time.
+
+    Falls back to the capture time itself when the exposure cannot be read,
+    so frames without EXIF group exactly as before.
+    """
+    try:
+        return stamp + timedelta(seconds=read_exposure_seconds(path))
+    except (ValueError, TypeError, OSError):
+        return stamp
+
+
 def group_frames(paths: list[Path], gap_seconds: float = SET_GAP_SECONDS) -> list[list[Path]]:
-    """Group frames into bracket sets by capture-time gaps.
+    """Group frames into bracket sets by end-of-exposure gaps.
 
     Frames sorted by capture time; a gap of more than ``gap_seconds``
+    measured from the previous frame's end of exposure (capture time plus
+    exposure time, so long brightest frames cannot split their own set)
     starts a new set. Every frame lands in exactly one set.
     """
     stamped = sorted((read_capture_time(p), p) for p in paths)
     sets: list[list[Path]] = []
-    last_stamp = None
+    last_end = None
     for stamp, path in stamped:
-        if not sets or (
-            last_stamp is not None and (stamp - last_stamp).total_seconds() > gap_seconds
-        ):
+        end = _end_of_exposure(path, stamp)
+        if not sets or (last_end is not None and (stamp - last_end).total_seconds() > gap_seconds):
             sets.append([path])
         else:
             sets[-1].append(path)
-        last_stamp = stamp
+        last_end = end if last_end is None else max(last_end, end)
     return sets
 
 
@@ -387,3 +400,75 @@ def merge_set(frame_paths: list[Path]) -> np.ndarray:
         return fuse_exposures(align_to_first(decoded))
     except Exception as exc:
         raise ValueError(f"could not fuse exposures: {exc}") from exc
+
+
+def merge_options(frame_paths: list[Path]) -> dict[str, list[Path]]:
+    """Full set plus sensible subsets: drop darkest, brightest, or both."""
+    ranked = sorted(frame_paths, key=read_exposure_seconds)
+    options = {"full": list(frame_paths)}
+    if len(ranked) > 2:
+        options["drop_darkest"] = [p for p in frame_paths if p != ranked[0]]
+        options["drop_brightest"] = [p for p in frame_paths if p != ranked[-1]]
+        options["drop_both"] = [p for p in frame_paths if p not in (ranked[0], ranked[-1])]
+    return options
+
+
+def darkest_for_windows(frame_paths: list[Path]) -> Path:
+    """Darkest frame of the set: the window pull reads the view from here,
+    even when that frame is left out of the room merge."""
+    return sorted(frame_paths, key=read_exposure_seconds)[0]
+
+
+def score_merge(img: np.ndarray, mls_median: float | None = None) -> dict:
+    """Measured merge quality: clipped highlights, shadow detail, noise, and
+    distance from the MLS photo's overall brightness when given."""
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float64)
+    clip_frac = float((gray >= 250).mean())
+    dark = np.sort(gray.ravel())[: max(1, gray.size // 10)]
+    lap = cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F)
+    score = {
+        "clip_frac": clip_frac,
+        "shadow_mean": float(dark.mean()),
+        "noise": float(lap.std()),
+        "median": float(np.median(gray)),
+    }
+    score["mls_gap"] = abs(score["median"] - mls_median) / 255.0 if mls_median is not None else 0.0
+    return score
+
+
+def choose_frames(
+    frame_paths: list[Path], mls_median: float | None = None
+) -> tuple[list[Path], str, str]:
+    """Best frame subset for the room merge, its option key, and why.
+
+    Lexicographic, no tuned weights: fewest clipped highlights wins, then
+    closest to the MLS brightness, then lowest noise. Returns paths in the
+    set's own order.
+    """
+    order = {p: i for i, p in enumerate(frame_paths)}
+    scored = []
+    for key, subset in merge_options(frame_paths).items():
+        merged = merge_set(subset)
+        scored.append((key, subset, score_merge(merged, mls_median)))
+    scored.sort(
+        key=lambda item: (
+            round(item[2]["clip_frac"], 4),
+            round(item[2]["mls_gap"], 4),
+            item[2]["noise"],
+        )
+    )
+    key, subset, score = scored[0]
+    best = sorted(subset, key=lambda p: order[p])
+    if key == "full":
+        reason = (
+            f"full set of {len(best)} frames: fewest clipped highlights "
+            f"({score['clip_frac']:.4f}), closest to MLS, lowest noise"
+        )
+    else:
+        dropped = sorted(set(frame_paths) - set(subset), key=lambda p: order[p])
+        names = ", ".join(p.name for p in dropped)
+        reason = (
+            f"{key} (dropped {names}): fewest clipped highlights "
+            f"({score['clip_frac']:.4f} vs {scored[1][2]['clip_frac']:.4f} for full)"
+        )
+    return best, key, reason
