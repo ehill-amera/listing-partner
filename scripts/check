@@ -46,22 +46,11 @@ else
   if printf '%s\n' "$tracked" | grep -E '(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ][0-9]{3}[-. ][0-9]{4}' ; then
     bad "possible phone number in tracked file names"
   fi
-  # Banned strings (street address and friends): fail if the list is missing.
-  if [ ! -s local/banned-strings.txt ]; then
-    bad "local/banned-strings.txt is missing or empty"
-  else
-    banned_hit=0
-    while IFS= read -r pat; do
-      case "$pat" in ''|\#*) continue ;; esac
-      if printf '%s\n' "$tracked" | grep -i -F -q -- "$pat"; then
-        say "banned string in tracked file name: [$pat]"; banned_hit=1
-      fi
-      if grep -rIl -F -i -- "$pat" $tracked 2>/dev/null | grep -q .; then
-        say "banned string in tracked file text: [$pat]"; banned_hit=1
-      fi
-    done < local/banned-strings.txt
-    [ "$banned_hit" = 1 ] && bad "banned strings found"
-  fi
+  # Banned strings (street address and friends) live outside the repo.
+  # The scan fails loudly when the list is missing or empty, and it never
+  # prints the list: hits report the file, line numbers, entry number.
+  scan_out=$(sh scripts/banned_scan.sh "$top" 2>&1) || bad "banned-strings scan failed: $scan_out"
+  say "$scan_out"
   # Every tracked file is attempted as an image: no GPS and no camera
   # serial anywhere, and an image that cannot be read fails loudly.
   if [ -x .venv/bin/python ]; then

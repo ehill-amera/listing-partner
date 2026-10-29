@@ -76,8 +76,8 @@ def test_refuses_at_cap(ledger, key):
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 100.0,
-                "actual_usd": 100.0,
+                "estimated_usd": 40.0,
+                "actual_usd": 40.0,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -90,14 +90,14 @@ def test_refuses_at_cap(ledger, key):
 
 
 def test_refuses_call_that_would_cross_cap(ledger, key, monkeypatch):
-    monkeypatch.setattr(meta_client, "SPEND_CAP_USD", 100.0)
+    monkeypatch.setattr(meta_client, "SPEND_CAP_USD", 40.0)
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 99.9999,
-                "actual_usd": 99.9999,
+                "estimated_usd": 39.9999,
+                "actual_usd": 39.9999,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -185,15 +185,16 @@ def test_output_limit_is_sent_on_every_call(ledger, key):
 
 def test_worst_case_reservation_refuses_where_estimate_fits(ledger, key):
     # 4000-char prompt: naive input guess is ~1000 tokens but the request
-    # allows up to 4000. At 99.9960 the naive estimate fits under $100 while
-    # the worst case crosses it: the call must be refused.
+    # allows up to 4000. At 39.9960 the naive estimate fits under the $39
+    # ceiling while the worst case (times the safety multiplier) crosses it:
+    # the call must be refused.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 99.996,
-                "actual_usd": 99.996,
+                "estimated_usd": 39.996,
+                "actual_usd": 39.996,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -205,20 +206,20 @@ def test_worst_case_reservation_refuses_where_estimate_fits(ledger, key):
         meta_client.call_meta_text(
             MODEL, "x" * 4000, max_output_tokens=256, transport=_transport_ok, ledger_path=ledger
         )
-    assert meta_client.read_spend_total(ledger) == pytest.approx(99.996)
+    assert meta_client.read_spend_total(ledger) == pytest.approx(39.996)
 
 
 def test_actual_above_estimate_never_crosses_cap(ledger, key):
     # The API bills 4000 input tokens (4x the naive len/4 guess) for a
     # 4000-char prompt. Old code reserved the guess, settled the real cost,
-    # and landed past $100. Worst-case reservation must refuse instead.
+    # and landed past the cap. Worst-case reservation must refuse instead.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 99.996,
-                "actual_usd": 99.996,
+                "estimated_usd": 39.996,
+                "actual_usd": 39.996,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -238,22 +239,22 @@ def test_actual_above_estimate_never_crosses_cap(ledger, key):
         meta_client.call_meta_text(
             MODEL, "x" * 4000, max_output_tokens=256, transport=_heavy_usage, ledger_path=ledger
         )
-    assert meta_client.read_spend_total(ledger) <= 100.0
-    assert meta_client.read_spend_total(ledger) == pytest.approx(99.996)
+    assert meta_client.read_spend_total(ledger) <= 40.0
+    assert meta_client.read_spend_total(ledger) == pytest.approx(39.996)
 
 
 def test_headroom_refuses_when_actual_would_break_cap(ledger, key):
-    # Worst-case reservation fits under $100 but not under the $99
-    # headroom. The transport then bills $0.60, far above the $0.0011
-    # reservation. Old code lets it through and settles past $100; the
-    # headroom must refuse instead, so the total never passes $100.
+    # Worst-case reservation fits under $40 but not under the $39
+    # headroom. The transport then bills $0.60, far above the $0.0022
+    # reservation. Old code lets it through and settles past $40; the
+    # headroom must refuse instead, so the total never passes $40.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 99.50,
-                "actual_usd": 99.50,
+                "estimated_usd": 39.50,
+                "actual_usd": 39.50,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -267,20 +268,20 @@ def test_headroom_refuses_when_actual_would_break_cap(ledger, key):
 
     with pytest.raises(WouldCrossCap):
         meta_client.call_meta_text(MODEL, "hi", transport=_overbilled, ledger_path=ledger)
-    assert meta_client.read_spend_total(ledger) <= 100.0
-    assert meta_client.read_spend_total(ledger) == pytest.approx(99.50)
+    assert meta_client.read_spend_total(ledger) <= 40.0
+    assert meta_client.read_spend_total(ledger) == pytest.approx(39.50)
 
 
 def test_actual_above_reservation_settles_under_cap(ledger, key):
     # Same over-billing, but the reservation fits inside the headroom: the
-    # call goes through and the settled total still never passes $100.
+    # call goes through and the settled total still never passes $40.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 98.90,
-                "actual_usd": 98.90,
+                "estimated_usd": 38.90,
+                "actual_usd": 38.90,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -294,19 +295,20 @@ def test_actual_above_reservation_settles_under_cap(ledger, key):
 
     out = meta_client.call_meta_text(MODEL, "hi", transport=_overbilled, ledger_path=ledger)
     assert out["actual_usd"] == pytest.approx(0.5)
-    assert meta_client.read_spend_total(ledger) == pytest.approx(99.40)
+    assert meta_client.read_spend_total(ledger) == pytest.approx(39.40)
 
 
 def test_heavy_but_fitting_call_settles_under_cap(ledger, key):
-    # Same 4x-actual usage, but the worst case still fits inside the $99
-    # headroom: the call goes through and the settled total stays under $100.
+    # Same 4x-actual usage, but the worst case (times the multiplier) still
+    # fits inside the $39 headroom: the call goes through and the settled
+    # total stays under $40.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 98.99,
-                "actual_usd": 98.99,
+                "estimated_usd": 38.98,
+                "actual_usd": 38.98,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",
@@ -326,7 +328,7 @@ def test_heavy_but_fitting_call_settles_under_cap(ledger, key):
         MODEL, "x" * 4000, max_output_tokens=256, transport=_heavy_usage, ledger_path=ledger
     )
     assert out["actual_usd"] > meta_client.estimate_text_usd(MODEL, 1000, 256)
-    assert meta_client.read_spend_total(ledger) <= 100.0
+    assert meta_client.read_spend_total(ledger) <= 40.0
 
 
 def test_ledger_rejects_nan_cost(ledger, key):
@@ -418,8 +420,8 @@ def test_cap_is_a_constant_not_configurable():
     import inspect
 
     source = inspect.getsource(meta_client)
-    assert "SPEND_CAP_USD = 100.0" in source
-    assert "SPEND_CAP" not in source.replace("SPEND_CAP_USD = 100.0", "").replace(
+    assert "SPEND_CAP_USD = 40.0" in source
+    assert "SPEND_CAP" not in source.replace("SPEND_CAP_USD = 40.0", "").replace(
         "SPEND_CAP_USD", ""
     ), "nothing may raise the cap"
     assert ".config/muse" not in source, "never touch Muse Code credentials"
@@ -499,18 +501,64 @@ def test_key_only_from_env(ledger, monkeypatch):
         meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
 
 
+def test_reservation_is_docs_worst_case_times_multiplier():
+    # Docs basis (pricing + Responses schemas, read 2026-10-29): input tokens
+    # can never exceed the prompt's byte length, and max_output_tokens bounds
+    # visible plus reasoning output. The reservation is that worst case times
+    # the safety multiplier, so a bill above the bare worst case still fits.
+    base = 4000 * 1.25 / 1e6 + 256 * 4.25 / 1e6
+    assert meta_client.reserve_text_usd(MODEL, "x" * 4000, 256) == pytest.approx(
+        meta_client.RESERVATION_MULTIPLIER * base
+    )
+    assert meta_client.RESERVATION_MULTIPLIER >= 2.0, (
+        "the multiplier must cover the worst measured bill-to-reservation ratio"
+    )
+
+
+def test_settlement_records_reservation_to_bill_ratio(ledger, key):
+    meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
+    lines = _ledger_lines(ledger)
+    assert len(lines) == 2
+    reservation, settlement = lines
+    assert settlement["status"] == "complete"
+    assert settlement["coverage_ratio"] == pytest.approx(
+        reservation["estimated_usd"] / settlement["actual_usd"]
+    ), "every settled call records reservation divided by bill"
+
+
+def test_reconcile_prices_nested_cached_tokens(ledger, key):
+    # The Responses usage schema nests cached tokens at
+    # input_tokens_details.cached_tokens, as a subset of input_tokens billed
+    # at the cached rate. A reader that looks for a top-level key prices the
+    # cached subset at the full rate instead.
+    def _cached(url, headers, body):
+        return {
+            "id": "r-cached",
+            "text": "ok",
+            "usage": {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 80},
+                "output_tokens": 10,
+            },
+        }
+
+    out = meta_client.call_meta_text(MODEL, "hi", transport=_cached, ledger_path=ledger)
+    expected = (20 * 1.25 + 80 * 0.15 + 10 * 4.25) / 1e6
+    assert out["actual_usd"] == pytest.approx(expected)
+
+
 def test_worst_case_guard_refuses_from_below_ceiling(ledger, key):
-    # The total sits BELOW the $99 reservation ceiling: only this call's
-    # worst-case cost pushes past it (98.996 + 0.0061 > 99). A guard that
+    # The total sits BELOW the $39 reservation ceiling: only this call's
+    # worst-case cost pushes past it (38.996 + 0.0122 > 39). A guard that
     # refuses only when the total is already past the ceiling, or a naive
-    # len/4 estimate (98.996 + 0.0024 < 99, still fits), lets this through.
+    # len/4 estimate (38.996 + 0.0023 < 39, still fits), lets this through.
     ledger.write_text(
         json.dumps(
             {
                 "ts": "2026-10-26T00:00:00+00:00",
                 "model": MODEL,
-                "estimated_usd": 98.996,
-                "actual_usd": 98.996,
+                "estimated_usd": 38.996,
+                "actual_usd": 38.996,
                 "request_id": "r",
                 "call_id": "c",
                 "status": "complete",

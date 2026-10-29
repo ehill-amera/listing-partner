@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 CHECK = Path(__file__).resolve().parent.parent / "scripts" / "check"
+SCAN = Path(__file__).resolve().parent.parent / "scripts" / "banned_scan.sh"
 
 
 def _run(*args, cwd):
@@ -51,6 +52,78 @@ def test_check_scans_file_names_for_phones():
     assert "possible phone number in tracked file names" in text, (
         "the check must grep tracked file names for phones, not just file contents"
     )
+
+
+def test_check_reads_private_banned_list_not_local():
+    text = CHECK.read_text()
+    assert "../.listing-partner-private/banned-strings.txt" in SCAN.read_text()
+    assert "banned_scan.sh" in text, "the check must run the banned-strings scan"
+    assert "local/banned-strings.txt" not in text, (
+        "the old in-repo list path must be gone from the check"
+    )
+
+
+def test_banned_scan_reports_entry_numbers_never_strings():
+    text = SCAN.read_text()
+    assert "entry #" in text, "hits report the list entry's number"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("echo ") or stripped.startswith("say "):
+            assert "pat" not in line, f"a printed line must never carry the pattern: {line!r}"
+    assert "[$pat]" not in text and '"$pat"' not in CHECK.read_text()
+
+
+def _scaffold_scan_repo(root: Path, private_entries: str, files: dict) -> Path:
+    """A throwaway repo plus a fake private list beside it.
+
+    Layout: <root>/repo is the repo, <root>/.listing-partner-private/ holds
+    the fake list, so the scan's fixed ../ path resolves inside tmp.
+    """
+    repo = root / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _run("init", "-q", cwd=repo)
+    _run("config", "user.email", "test@example.com", cwd=repo)
+    _run("config", "user.name", "Test", cwd=repo)
+    for name, content in files.items():
+        path = repo / name
+        path.write_text(content)
+        _run("add", name, cwd=repo)
+    private = root / ".listing-partner-private"
+    private.mkdir(parents=True, exist_ok=True)
+    (private / "banned-strings.txt").write_text(private_entries)
+    return repo
+
+
+def test_banned_scan_reports_entry_number_and_hides_the_string(tmp_path):
+    repo = _scaffold_scan_repo(
+        tmp_path,
+        "# comment line\n\nfakestreet-xyz-1\nfakestreet-xyz-2\n",
+        {"notes.txt": "clean line\nmentions fakestreet-xyz-2 here\n"},
+    )
+    proc = subprocess.run(["sh", str(SCAN), str(repo)], capture_output=True, text=True, check=False)
+    assert proc.returncode == 1, "a hit must fail"
+    assert "entry #2" in proc.stdout, "the second active entry fired"
+    assert "notes.txt" in proc.stdout, "the hit names the file"
+    combined = proc.stdout + proc.stderr
+    assert "fakestreet-xyz-1" not in combined, "a non-matching entry stays secret"
+    assert "fakestreet-xyz-2" not in combined, "even the matching string stays secret"
+
+
+def test_banned_scan_refuses_missing_or_empty_list(tmp_path):
+    repo = _scaffold_scan_repo(tmp_path, "someentry\n", {"notes.txt": "clean\n"})
+    (tmp_path / ".listing-partner-private" / "banned-strings.txt").unlink()
+    proc = subprocess.run(["sh", str(SCAN), str(repo)], capture_output=True, text=True, check=False)
+    assert proc.returncode == 1
+    assert "MISSING OR EMPTY" in (proc.stdout + proc.stderr)
+    (tmp_path / ".listing-partner-private" / "banned-strings.txt").write_text("")
+    proc = subprocess.run(["sh", str(SCAN), str(repo)], capture_output=True, text=True, check=False)
+    assert proc.returncode == 1
+
+
+def test_banned_scan_passes_clean_tree(tmp_path):
+    repo = _scaffold_scan_repo(tmp_path, "fakestreet-xyz-1\n", {"notes.txt": "nothing to see\n"})
+    proc = subprocess.run(["sh", str(SCAN), str(repo)], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_force_added_file_under_inputs_is_caught(tmp_path):

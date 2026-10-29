@@ -20,7 +20,9 @@ from pathlib import Path
 # Hard cap on lifetime Meta spend, in USD. This is a plain constant on
 # purpose: no environment variable, flag, or config file may raise it.
 # Changing the cap means editing this line (and needs Erik's yes).
-SPEND_CAP_USD = 100.0
+# Lowered from $100 to $40 on 2026-10-29 (Erik's call, contract 02):
+# Muse Code's own building draws on the same free credits.
+SPEND_CAP_USD = 40.0
 
 # Base URL of the Meta Model API (dev.meta.ai/docs/authentication, read
 # 2026-10-26): every request carries the key as a Bearer token in the
@@ -100,19 +102,19 @@ class LedgerError(MetaRefused):
 
 
 class CapReached(MetaRefused):
-    """The ledger total has already reached the $100 cap."""
+    """The ledger total has already reached the $40 cap."""
 
 
 # The reservation ceiling sits $1 below the lifetime cap. A settled bill
 # can come in above its reservation (the API reports the real cost), so
-# refusing once total + worst case would pass $99 keeps the settled total
-# from ever passing $100. Like the lifetime figure, this headroom is a
+# refusing once total + worst case would pass $39 keeps the settled total
+# from ever passing $40. Like the lifetime figure, this headroom is a
 # plain constant: nothing outside this file may change it.
 RESERVATION_HEADROOM_USD = 1.0
 
 
 class WouldCrossCap(MetaRefused):
-    """This call's worst-case cost would push the total past the $99 ceiling."""
+    """This call's worst-case cost would push the total past the $39 ceiling."""
 
 
 class TransportFailed(MetaRefused):
@@ -223,14 +225,28 @@ def _default_transport(url: str, headers: dict, body: bytes) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+# Safety multiplier on every reservation. Docs basis (pricing and
+# Responses schemas, read 2026-10-29): text models bill input tokens (which
+# can never exceed the prompt's byte length for a single-iteration call
+# with no tools) plus output tokens (visible plus reasoning, bounded by
+# the max_output_tokens sent on the call), with cached input tokens as a
+# subset at the lower cached rate. But unit 1's live calls settled above
+# the bare worst case (worst bill-to-reservation ratio 1.065 on current
+# code), so the reservation is the docs worst case times this multiplier.
+# The $1 headroom stays as a second layer. Every settlement records its
+# reservation-to-bill ratio; if any ratio drops below 1, raise this.
+RESERVATION_MULTIPLIER = 2.0
+
+
 def reserve_text_usd(model: str, prompt: str, max_output_tokens: int) -> float:
-    """Worst-case USD this request is allowed to cost.
+    """Worst-case USD this request is allowed to cost, times the multiplier.
 
     Input side: a byte-level tokenizer emits at most one token per byte, so
     the prompt's byte length bounds its token count from above, whatever the
     real tokenizer counts. Output side: the full output limit at the output
     price (the limit is sent on every call, so the API cannot return more).
-    Refusing on this bound means the settled total can never pass the cap.
+    Refusing on this bound times RESERVATION_MULTIPLIER means the settled
+    total can never pass the cap.
     """
     price = PRICES.get(model)
     if price is None or "input_per_mtok" not in price:
@@ -238,7 +254,7 @@ def reserve_text_usd(model: str, prompt: str, max_output_tokens: int) -> float:
     if max_output_tokens < 0:
         raise MetaRefused(f"max_output_tokens must be >= 0, got {max_output_tokens}")
     worst_input = max(1, len(prompt.encode("utf-8")))
-    return (
+    return RESERVATION_MULTIPLIER * (
         worst_input * price["input_per_mtok"] / 1e6
         + max_output_tokens * price["output_per_mtok"] / 1e6
     )
@@ -362,14 +378,24 @@ def call_meta_text(
 
 
 def _reconcile_text(model: str, response: dict) -> tuple[float, str | None]:
-    """Real cost for a text call: API-reported cost wins, else usage."""
+    """Real cost for a text call: API-reported cost wins, else usage.
+
+    Cached tokens arrive nested at usage.input_tokens_details.cached_tokens
+    (Responses usage schema) as a subset of input_tokens at the lower cached
+    rate; a top-level cached_input_tokens key is still accepted from older
+    doubles. The cached count is clamped to input_tokens so a surprising
+    report can only overstate, never understate, the bill.
+    """
     if isinstance(response.get("cost_usd"), (int, float)):
         return float(response["cost_usd"]), response.get("id")
     usage = response.get("usage") or {}
     price = PRICES[model]
+    details = usage.get("input_tokens_details") or {}
+    cached = details.get("cached_tokens", usage.get("cached_input_tokens", 0))
+    full_input = max(0.0, float(usage.get("input_tokens", 0)) - float(cached))
     actual = (
-        float(usage.get("input_tokens", 0)) * price["input_per_mtok"] / 1e6
-        + float(usage.get("cached_input_tokens", 0)) * price["cached_input_per_mtok"] / 1e6
+        full_input * price["input_per_mtok"] / 1e6
+        + float(cached) * price["cached_input_per_mtok"] / 1e6
         + float(usage.get("output_tokens", 0)) * price["output_per_mtok"] / 1e6
     )
     return actual, response.get("id")
@@ -408,11 +434,18 @@ def _settle(
         or actual < 0
     ):
         raise LedgerError(f"refusing to settle invalid cost: {actual!r}")
+    est_stored = round(estimated, 6)
+    act_stored = round(float(actual), 6)
     settlement = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "model": model,
-        "estimated_usd": round(estimated, 6),
-        "actual_usd": round(float(actual), 6),
+        "estimated_usd": est_stored,
+        "actual_usd": act_stored,
+        # Reservation-to-bill ratio: reservation divided by bill, from the
+        # stored rounded values. Values at or above 1 mean the reservation
+        # covered the call; anything below 1 means the multiplier needs
+        # raising.
+        "coverage_ratio": round(est_stored / act_stored, 4) if act_stored > 0 else None,
         "request_id": request_id,
         "call_id": call_id,
         "status": "complete",
