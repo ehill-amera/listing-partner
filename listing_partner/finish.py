@@ -21,22 +21,31 @@ import numpy as np
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
 INTERIOR_TARGET_MEDIAN = 187.0
-EXTERIOR_TARGET_MEDIAN = 123.0
 SKY_FRACTION_CUT = 0.001
+#: Exterior target scales with open sky, clipped to the range Erik's own
+#: exterior finishes span: open sunny shots finish brighter, shaded ones
+#: lower. Tuned once; the formula only reads the photo's own sky.
+EXTERIOR_SKY_SLOPE = 240.0
+EXTERIOR_BASE_MEDIAN = 112.0
+EXTERIOR_MIN_MEDIAN = 108.0
+EXTERIOR_MAX_MEDIAN = 144.0
 #: Shadow lift through a blurred luminance mask, plus a gentle gamma for
-#: the low-contrast HDR look. Bounded auto gain toward the class target.
-#: The highlight shoulder compresses but never hides real clipping: a
-#: gain-scaled blown window still reads at or above 250.
-SHADOW_LIFT = 0.6
-LOOK_GAMMA = 1.0
+#: the low-contrast HDR look. The automatic gain runs after the lift so
+#: the class target is the final anchor. The highlight shoulder
+#: compresses but never hides real clipping: a gain-scaled blown window
+#: still reads at or above 250.
+SHADOW_LIFT = 0.4
+LOOK_GAMMA = 0.9
 SHOULDER_SLOPE = 0.07
 AUTO_GAIN_LO = 0.4
 AUTO_GAIN_HI = 3.5
 #: White balance reads the room without its brightest pixels (windows,
-#: lamps), so daylight glass never votes on tungsten walls. Strength 1.0
-#: is full gray-world; lower keeps more of the room's own palette.
+#: lamps), so daylight glass never votes on tungsten walls. Interiors
+#: under artificial light correct hard; daylight exteriors keep their
+#: scene palette with a light touch.
 WB_BRIGHT_PERCENTILE = 90.0
-WB_STRENGTH = 1.0
+WB_INTERIOR_STRENGTH = 0.9
+WB_EXTERIOR_STRENGTH = 0.4
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -60,7 +69,10 @@ def classify_scene(img: np.ndarray) -> str:
 def target_median(img: np.ndarray) -> float:
     """The shared brightness target for this photo's scene class."""
     if classify_scene(img) == "exterior":
-        return EXTERIOR_TARGET_MEDIAN
+        return min(
+            EXTERIOR_MAX_MEDIAN,
+            max(EXTERIOR_MIN_MEDIAN, EXTERIOR_BASE_MEDIAN + EXTERIOR_SKY_SLOPE * sky_fraction(img)),
+        )
     return INTERIOR_TARGET_MEDIAN
 
 
@@ -72,30 +84,36 @@ def balance_exposure(img: np.ndarray, protect: np.ndarray | None = None) -> tupl
     class target (bounded), then a soft highlight shoulder. Pixels under
     protect keep their exact values. No MLS twin is read.
     """
+    scene = classify_scene(img)
     work = img.astype(np.float32)
     gray = _luminance(img)
     ceiling = float(np.percentile(gray, WB_BRIGHT_PERCENTILE))
     room = gray < ceiling
     report: dict = {"white_balanced": False}
     if room.sum() > 1000:
+        strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
         means = np.array([work[:, :, c][room].mean() for c in range(3)])
         target = float(means.mean())
         factors = target / np.maximum(means, 1e-6)
-        factors = 1.0 + WB_STRENGTH * (factors - 1.0)
+        factors = 1.0 + strength * (factors - 1.0)
         work *= factors[None, None, :]
         report["white_balanced"] = True
-    blur = cv2.GaussianBlur(gray, (0, 0), max(img.shape) / 40.0)
+    lifted_gray = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    blur = cv2.GaussianBlur(lifted_gray.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
     shadow_gain = 1.0 + SHADOW_LIFT * darkness
     work *= shadow_gain[:, :, None]
     report["shadow_gain"] = round(float(shadow_gain.mean() - 1.0), 4)
-    target = target_median(img)
-    gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(gray)))))
-    work *= gain
-    report["auto_gain"] = round(gain, 4)
-    report["scene"] = classify_scene(img)
     if LOOK_GAMMA != 1.0:
         work = 255.0 * np.power(np.clip(work / 255.0, 0.0, 1.0), LOOK_GAMMA)
+    # The gain runs after the tone work so the class target is the final
+    # anchor: per-photo automatic exposure, still with no twin read.
+    post = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    target = target_median(img)
+    gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(post)))))
+    work *= gain
+    report["auto_gain"] = round(gain, 4)
+    report["scene"] = scene
     # Highlight shoulder runs last so no earlier gain can re-blow whites.
     over = work > 235.0
     work[over] = 235.0 + (work[over] - 235.0) * SHOULDER_SLOPE

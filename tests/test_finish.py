@@ -82,7 +82,8 @@ def test_exterior_class_targets_lower_brightness():
     sky = np.full((200, 200, 3), 150, np.uint8)
     sky[:120, :, 2] = 220
     assert finish.classify_scene(sky) == "exterior"
-    assert finish.EXTERIOR_TARGET_MEDIAN < finish.INTERIOR_TARGET_MEDIAN
+    assert finish.target_median(sky) < finish.INTERIOR_TARGET_MEDIAN
+    assert 108.0 <= finish.target_median(sky) <= 144.0
 
 
 def test_balance_leaves_protected_windows_alone():
