@@ -1,5 +1,6 @@
 """Tests for lens/geometry correction. No raw files, no network."""
 
+import cv2
 import numpy as np
 import pytest
 
@@ -169,6 +170,22 @@ def test_wooded_lot_has_no_agreeing_verticals():
     assert geometry.dominant_vertical_angle(gray) is None, (
         "leaning trunks must vote unknown, never a fake tilt"
     )
+
+
+def test_crumb_verticals_vote_unknown():
+    """Thirty short blind slats are one object's vote, not the room's.
+
+    Unit-a 005's finished photo holds 30 near-vertical crumbs totalling
+    857 px at review size: they agree with each other yet say nothing
+    about the walls. A vote under one frame-height of edge, with no long
+    architectural segment, is unknown.
+    """
+    img = np.full((600, 1200), 150, np.uint8)
+    for i in range(30):
+        x = 100 + (i * 31) % 1000
+        cv2.line(img, (x, 200), (x + 1, 230), 40, 1)
+    tilt = geometry.dominant_vertical_angle(img)
+    assert tilt is None, f"30 short crumbs must not read as a room tilt, got {tilt}"
 
 
 def test_vertical_correction_roundtrip_on_real_photo():

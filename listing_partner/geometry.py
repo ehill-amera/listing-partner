@@ -392,7 +392,15 @@ VERT_AGREE_WINDOW = 1.0
 #: degree of the median; wooded lots scatter 25-36% across leaning
 #: trunks. Measured on unit-a's merges, 2026-10-30.
 VERT_MIN_AGREE_SHARE = 0.40
-VERT_MIN_TOTAL_FRAC = 0.3
+#: A vote under one frame-height of near-vertical edge is one object's
+#: vote (a blind, a poster), not the room's: unit-a 005's finished photo
+#: holds 30 agreeing crumbs totalling 857 px, while every room with real
+#: verticals holds over 2000. One long architectural edge suffices
+#: instead: a single segment spanning a fifth of the frame is a wall, a
+#: door or a window frame, never a crumb. Below both the photo votes
+#: unknown.
+VERT_MIN_TOTAL_FRAC = 1.0
+VERT_MIN_LONGEST_FRAC = 0.2
 
 
 def _near_vertical_segments(gray: np.ndarray) -> list[tuple[float, float]]:
@@ -455,12 +463,13 @@ def dominant_vertical_angle(gray: np.ndarray) -> float | None:
     found = _near_vertical_segments(gray)
     if not found:
         return None
-    # Segments are measured at review size, so the support bar is too:
-    # a third of the review long side of near-vertical edge in total.
+    # Segments are measured at review size, so the support bar is too.
     h, w = gray.shape
     review_long = min(VERT_REVIEW_WIDTH, float(max(h, w)))
-    if sum(L for _, L in found) < VERT_MIN_TOTAL_FRAC * review_long:
-        return None
+    longest = max(L for _, L in found)
+    if longest < VERT_MIN_LONGEST_FRAC * review_long:
+        if sum(L for _, L in found) < VERT_MIN_TOTAL_FRAC * review_long:
+            return None
     median = weighted_median_angle(found)
     if agreement_share(found, median) < VERT_MIN_AGREE_SHARE:
         return None

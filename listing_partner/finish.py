@@ -47,12 +47,20 @@ SHOULDER_SLOPE = 0.07
 AUTO_GAIN_LO = 0.4
 AUTO_GAIN_HI = 3.5
 #: White balance reads the room without its brightest pixels (windows,
-#: lamps), so daylight glass never votes on tungsten walls. Interiors
-#: under artificial light correct hard; daylight exteriors keep their
-#: scene palette with a light touch.
+#: lamps), so daylight glass never votes on tungsten walls. The vote
+#: comes from the most neutral pixels only: saturated surfaces (wood
+#: floors, grass) cannot set the illuminant, or the correction grays
+#: them. Interiors under artificial light correct hard; daylight
+#: exteriors keep their scene palette with a light touch.
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
+#: The illuminant vote is the least-saturated share of mid-bright room
+#: pixels. Too few neutral pixels (fewer than WB_MIN_VOTE) means no
+#: neutral surface exists to read, and the vote falls back to the whole
+#: room, saying so in the report.
+WB_NEUTRAL_SHARE = 0.05
+WB_MIN_VOTE = 1000
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -83,14 +91,35 @@ def target_median(img: np.ndarray) -> float:
     return INTERIOR_TARGET_MEDIAN
 
 
+def _illuminant_vote(
+    work: np.ndarray, gray: np.ndarray, room: np.ndarray
+) -> tuple[np.ndarray, str]:
+    """The pixels the white-balance illuminant is read from, and why.
+
+    The least-saturated WB_NEUTRAL_SHARE of mid-bright room pixels:
+    neutral surfaces carry the illuminant, saturated ones (wood, grass)
+    carry their own color and must not vote. Dark pixels read noisy
+    chromaticity, so the pool starts at the room's lower quartile.
+    """
+    pool = room & (gray >= float(np.percentile(gray[room], 25.0)))
+    mx = work.max(axis=2)
+    sat = 1.0 - work.min(axis=2) / np.maximum(mx, 1.0)
+    cut = float(np.percentile(sat[pool], 100.0 * WB_NEUTRAL_SHARE))
+    vote = pool & (sat <= cut)
+    if vote.sum() < WB_MIN_VOTE:
+        return room, "all-room fallback: too few neutral pixels to vote on"
+    return vote, f"least-saturated {100 * WB_NEUTRAL_SHARE:.0f}% of mid-bright room"
+
+
 def balance_exposure(
     img: np.ndarray,
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, dict]:
+    return_preshoulder: bool = False,
+) -> tuple[np.ndarray, dict] | tuple[np.ndarray, dict, np.ndarray]:
     """Balance a merged room photo. Returns (photo, report).
 
-    White balance from the room's own below-bright pixels, shadow lift
+    White balance from the room's own most-neutral pixels, shadow lift
     through a blurred luminance mask, automatic gain toward the shared
     class target (bounded), then a soft highlight shoulder. Pixels under
     protect keep their exact values. No MLS twin is read.
@@ -98,6 +127,10 @@ def balance_exposure(
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
     under the target the shipped file is measured against).
+
+    With return_preshoulder, also returns the balanced photo from just
+    before the shoulder: the shoulder parks blown glass under the
+    near-white level, so honest highlight numbers are read there.
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
@@ -109,30 +142,37 @@ def balance_exposure(
     report: dict = {"white_balanced": False}
     if room.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
-        means = np.array([work[:, :, c][room].mean() for c in range(3)])
+        vote, vote_why = _illuminant_vote(work, gray, room)
+        means = np.array([work[:, :, c][vote].mean() for c in range(3)])
         target = float(means.mean())
         factors = target / np.maximum(means, 1e-6)
         factors = 1.0 + strength * (factors - 1.0)
         pre = work.copy()
         work *= factors[None, None, :]
-        # Daylight-spill guard: the vote reads tungsten-lit walls, and its
-        # cooling is right for them, but daylight spilling across floors
-        # near windows is already neutral, so full cooling turns it blue.
-        # Bright low-saturation pixels keep their own chromaticity in
-        # proportion: tungsten walls and ceilings are saturated or dim and
-        # keep the full vote. Anchors are the photo's own percentiles, and
-        # the look targets below do not move.
-        gray_pre = pre.mean(axis=2)
-        mx = pre.max(axis=2)
-        lowsat = 1.0 - (mx - pre.min(axis=2)) / np.maximum(mx, 1.0)
-        room_gray = gray_pre[room]
-        p50 = float(np.median(room_gray))
-        p90 = float(np.percentile(room_gray, 90.0))
-        bright = np.clip((gray_pre - p50) / max(1.0, p90 - p50), 0.0, 1.0)
-        guard = (lowsat * lowsat * bright)[:, :, None].astype(np.float32)
-        work = work * (1.0 - guard) + pre * guard
+        report["wb_vote"] = vote_why
+        # Daylight-spill guard, interiors only: the vote reads
+        # tungsten-lit walls, and its cooling is right for them, but
+        # daylight spilling across floors near windows is already
+        # neutral, so full cooling turns it blue. Bright low-saturation
+        # pixels keep their own chromaticity in proportion: tungsten
+        # walls and ceilings are saturated or dim and keep the full vote.
+        # Exterior daylight needs no tungsten vote, so the guard stays
+        # off there. Anchors are the photo's own percentiles, and the
+        # look targets below do not move.
+        if scene == "interior":
+            gray_pre = pre.mean(axis=2)
+            mx = pre.max(axis=2)
+            lowsat = 1.0 - (mx - pre.min(axis=2)) / np.maximum(mx, 1.0)
+            room_gray = gray_pre[room]
+            p50 = float(np.median(room_gray))
+            p90 = float(np.percentile(room_gray, 90.0))
+            bright = np.clip((gray_pre - p50) / max(1.0, p90 - p50), 0.0, 1.0)
+            guard = (lowsat * lowsat * bright)[:, :, None].astype(np.float32)
+            work = work * (1.0 - guard) + pre * guard
+            report["spill_guard"] = round(float(guard.mean()), 4)
+        else:
+            report["spill_guard"] = 0.0
         report["white_balanced"] = True
-        report["spill_guard"] = round(float(guard.mean()), 4)
     lifted_gray = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(lifted_gray.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
@@ -151,11 +191,19 @@ def balance_exposure(
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
     # Highlight shoulder runs last so no earlier gain can re-blow whites.
+    # It compresses but never hides real clipping from honest numbers:
+    # moderately blown glass parks just under the near-white level, so
+    # the pre-shoulder frame is the one the highlights check reads.
+    preshoulder = np.clip(work, 0, 255).astype(np.uint8)
     over = work > 235.0
     work[over] = 235.0 + (work[over] - 235.0) * SHOULDER_SLOPE
     out = np.clip(work, 0, 255).astype(np.uint8)
     if protect is not None:
         out[protect] = img[protect]
+    if return_preshoulder:
+        if protect is not None:
+            preshoulder[protect] = img[protect]
+        return out, report, preshoulder
     return out, report
 
 

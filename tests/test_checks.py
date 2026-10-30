@@ -77,3 +77,15 @@ def test_spend_and_counts():
     assert checks.check_spend(2.01)[0] is False
     assert checks.check_counts(16, 1)[0] is True
     assert checks.check_counts(15, 1)[0] is False
+
+
+def test_window_rim_holds_trim_color():
+    assert checks.check_window_rim(200.0, 195.0)[0] is True
+    ok, reason = checks.check_window_rim(200.0, 150.0)
+    assert ok is False and "rim" in reason
+
+
+def test_pull_gain_stays_in_bounds():
+    assert checks.check_pull_gain(1.0)[0] is True
+    assert checks.check_pull_gain(0.4)[0] is False
+    assert checks.check_pull_gain(2.5)[0] is False

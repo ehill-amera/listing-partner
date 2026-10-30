@@ -26,17 +26,17 @@ SAM_MODEL = "sam-3.1"
 SPARK_MODEL = "muse-spark-1.3"
 #: View-frame gray below this holds no outdoor detail: the pixel is an
 #: interior surface (frame, trim, blind) and stays from the merge.
-#: The same floor scores detail frames: a frame darker than this across
-#: the window holds murk, not a view.
+#: A frame darker than this across the window holds murk, not a view.
 VIEW_DETAIL_FLOOR = 50
-#: The detail frame must read at least this bright to fill a near-white
-#: merge pixel the pull frame reads dark: unit-a trim reads 60-100 there
-#: (stays), glass bays read 135+ (take the view). Measured both sides.
-MID_DETAIL_FLOOR = 110
 #: Merge pixels at or above this gray with no detail-frame hold are
 #: near-white: the balance shoulder parks blown glass here. Below it the
 #: merge holds its own detail.
 SHOULDER_FLOOR = 240
+#: Merge brighter than the view by more than this is the blowout
+#: signature. Smaller differences are exposure wobble between bracket
+#: frames of the same surface (trim reads near-merge in an
+#: exposure-matched frame), so those pixels keep the merge.
+AGREE_GAP = 25
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -295,138 +295,132 @@ def _visible_note(boxes: dict[int, tuple], crop: tuple) -> str:
     return f" Visible candidate ids in this view: {ids}. Reply one verdict line for each."
 
 
-def choose_pull_frame(
-    frames: list[np.ndarray], mask: np.ndarray, ref: np.ndarray | None = None
-) -> int:
-    """Index of the frame whose window region is best exposed.
+def _ring_gain(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) -> float:
+    """Median light ratio between merge and view on the mask's own ring.
 
-    Fewest near-white pixels on any channel (threshold 250, the same
-    level the highlights check measures) wins. Ties go to the frame
-    closest to the merge: when the merge already holds the view, the
-    pull changes it the least, so clean windows gain nothing. Never the
-    darkest frame by default: an almost-black frame holds no view at
-    all.
+    The ring is the same room surfaces in both frames, so the ratio
+    reads exposure difference, not scene difference. A ratio near one
+    means the view frame's light already matches the room; far from one
+    means inserting it would scar trim either bright or dark.
     """
-    from listing_partner.checks import clipped_fraction
+    ring = cv2.dilate(mask.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+    ring &= ~mask
+    if not ring.any():
+        return 1.0
+    merge_med = float(np.median(cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY)[ring]))
+    view_med = float(np.median(cv2.cvtColor(view_rgb, cv2.COLOR_RGB2GRAY)[ring]))
+    return merge_med / max(1.0, view_med)
 
-    ref_mean = None
-    if ref is not None and mask.any():
-        ref_mean = float(cv2.cvtColor(ref, cv2.COLOR_RGB2GRAY).astype(np.float32)[mask].mean())
 
-    def score(frame: np.ndarray) -> tuple[float, float]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        clip = clipped_fraction(frame[mask]) if mask.any() else 0.0
-        mean = float(gray[mask].mean()) if mask.any() else 0.0
-        tie = abs(mean - ref_mean) if ref_mean is not None else -mean
-        return (clip, tie)
+def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Mask pixels the view frame replaces: blown merge with real detail.
+
+    Only pixels where the merge is near-white, the view holds outdoor
+    detail, the view itself is not near-white on any channel, and the
+    merge reads clearly brighter (the blowout signature) change. Trim,
+    mullions, blinds and sills fail one of these and keep the merge
+    pixel-exact. Inserted pixels therefore never reach near-white, so
+    the after count can only drop against an honest before count.
+    """
+    from listing_partner.checks import CLIP_LEVEL
+
+    merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    view_gray = cv2.cvtColor(view_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    view_max = view_rgb.max(axis=2)
+    return (
+        mask
+        & (merge_rgb.max(axis=2) >= SHOULDER_FLOOR)
+        & (view_gray >= VIEW_DETAIL_FLOOR)
+        & (view_max < CLIP_LEVEL)
+        & ((merge_gray - view_gray) > AGREE_GAP)
+    )
+
+
+def choose_view_frame(
+    frames: list[np.ndarray],
+    mask: np.ndarray,
+    merge_rgb: np.ndarray,
+    union: np.ndarray | None = None,
+) -> tuple[int | None, str]:
+    """The one frame that pulls this window, plus the plain-words reason.
+
+    One continuous source per window: mixing frames per pixel is what
+    made views patchy. Scores each light-matched frame by blown glass it
+    would fix, minus the blown glass it would leave unfixed (murk in the
+    view where the merge blew out). No fix anywhere means a clean window:
+    (None, reason), and the window keeps the merge pixel-exact.
+    """
+    from listing_partner.checks import PULL_GAIN_HI, PULL_GAIN_LO
 
     if not frames:
         raise ValueError("no bracket frames to pull the view from")
-    return min(range(len(frames)), key=lambda i: score(frames[i]))
-
-
-def detail_frame(frames: list[np.ndarray], mask: np.ndarray, ref: np.ndarray | None = None) -> int:
-    """Index of the frame that holds the window view best.
-
-    Fewest clipped highlights first, then most midtone detail: a frame
-    darker than VIEW_DETAIL_FLOOR across the window holds murk, not a
-    view. Ties go to the frame closest to the merge. The darkest frame
-    that holds the view wins; pure murk never does.
-    """
-    from listing_partner.checks import clipped_fraction
-
-    ref_mean = None
-    if ref is not None and mask.any():
-        ref_mean = float(cv2.cvtColor(ref, cv2.COLOR_RGB2GRAY).astype(np.float32)[mask].mean())
-
-    def score(frame: np.ndarray) -> tuple[float, float]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        clip = clipped_fraction(frame[mask]) if mask.any() else 0.0
-        dark = float((gray[mask] < VIEW_DETAIL_FLOOR).mean()) if mask.any() else 0.0
-        mean = float(gray[mask].mean()) if mask.any() else 0.0
-        tie = abs(mean - ref_mean) if ref_mean is not None else 0.0
-        return (clip + 0.5 * dark, tie)
-
-    return min(range(len(frames)), key=lambda i: score(frames[i]))
+    if union is None:
+        union = mask
+    merge_max = merge_rgb.max(axis=2)
+    best, best_score, best_fixed = None, 0.0, 0
+    matched_any = False
+    for i, frame in enumerate(frames):
+        gain = _ring_gain(merge_rgb, frame, union)
+        if not PULL_GAIN_LO <= gain <= PULL_GAIN_HI:
+            continue
+        matched_any = True
+        take = _take_mask(merge_rgb, frame, mask)
+        fixed = float(take.sum())
+        if fixed <= 0:
+            continue
+        view_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        murk = float(((merge_max >= SHOULDER_FLOOR) & (view_gray < VIEW_DETAIL_FLOOR)).sum())
+        score = fixed - 0.5 * murk
+        if best is None or score > best_score:
+            best, best_score, best_fixed = i, score, int(take.sum())
+    if best is None:
+        if not matched_any:
+            return None, "no bracket frame matches the room light here"
+        return None, "nothing blown to fix: the merge already holds the glass"
+    return best, f"fixes {best_fixed} blown pixels"
 
 
 def pull_window(
     merge_rgb: np.ndarray,
-    dark_rgb: np.ndarray,
+    view_rgb: np.ndarray,
     mask: np.ndarray,
-    mid_rgb: np.ndarray | None = None,
-) -> tuple[np.ndarray, int]:
-    """Fill blown glass from real bracket frames, glass only.
+    union: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Fill blown glass from one real view frame, glass only.
 
-    A mask pixel takes the darkest pull frame only when that frame holds
-    outdoor detail there (at or above VIEW_DETAIL_FLOOR): frames,
-    mullions, blinds, sills and trim read dark in the pull frame, so
-    they stay from the merge pixel-exact. A mask pixel the merge blows
-    out fully is glass the dark frame underexposes: it takes the detail
-    frame's real pixels, never diffusion fill. A mask pixel parked just
-    under near-white by the balance shoulder is only filled when the
-    detail frame holds more there than the merge does: brighter than the
-    unit-a trim band (MID_DETAIL_FLOOR, trim reads 60-100) and carrying
-    more local texture than the merge's flat shoulder. Sunlit trim reads
-    room-bright and flat in both frames, so it stays. The feather ramps
-    up inside the replaced glass, so
-    the blend never reaches the frame: no dark outline, no smear. Gains
-    can only darken: no view is ever pushed brighter than its own frame,
-    no clamp, no cap. Returns the pulled photo and the count of changed
-    pixels outside the mask (must be 0).
+    The view lands at its native gain: no rescale ever shifts its hue,
+    and inserted pixels never reach near-white (see _take_mask), so no
+    clamp or cap shapes the measurement. The feather ramps up inside the
+    replaced glass and is exactly zero outside it, so the blend never
+    reaches the frame: no dark outline, no smear, nothing changes
+    outside the mask. When the view light does not match the room the
+    pull refuses and reports why instead of scarring trim.
+    Returns the pulled photo and info (take_px, rim_gain, refused).
     """
-    from listing_partner.checks import CLIP_LEVEL
+    from listing_partner.checks import PULL_GAIN_HI, PULL_GAIN_LO
 
-    view_gray = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY)
-    merge_max = merge_rgb.max(axis=2)
-    replaced = mask & (view_gray >= VIEW_DETAIL_FLOOR)
-    specks = mask & ~replaced & (merge_max >= CLIP_LEVEL)
-    if mid_rgb is not None:
-        mid_gray = cv2.cvtColor(mid_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        # Local texture (5x5 variance) in each frame: the detail frame
-        # holds the view where it carries more texture than the merge.
-        mid_mean = cv2.blur(mid_gray, (5, 5))
-        mid_var = np.clip(cv2.blur(mid_gray * mid_gray, (5, 5)) - mid_mean * mid_mean, 0, None)
-        merge_mean = cv2.blur(merge_gray, (5, 5))
-        merge_var = np.clip(
-            cv2.blur(merge_gray * merge_gray, (5, 5)) - merge_mean * merge_mean, 0, None
+    if union is None:
+        union = mask
+    rim_gain = _ring_gain(merge_rgb, view_rgb, union)
+    info = {"take_px": 0, "rim_gain": round(rim_gain, 3), "refused": None}
+    if not PULL_GAIN_LO <= rim_gain <= PULL_GAIN_HI:
+        info["refused"] = (
+            f"view light does not match the room (ratio {rim_gain:.2f}); "
+            "matching the trim would blow the glass"
         )
-        holds_view = mid_var > np.maximum(merge_var * 1.5, 1.0)
-        near = (
-            mask
-            & ~replaced
-            & (merge_max >= SHOULDER_FLOOR)
-            & (merge_max < CLIP_LEVEL)
-            & (mid_gray >= MID_DETAIL_FLOOR)
-            & holds_view
-        )
-        specks |= near
-    if not replaced.any() and not specks.any():
-        return merge_rgb.copy(), 0
-    room = ~mask
-    matched = dark_rgb.astype(np.float32)
-    if room.any():
-        merge_lum = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
-        view_lum = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
-        gain = min(1.0, float(merge_lum) / max(1e-6, float(view_lum)))
-        matched *= gain
-    if mid_rgb is not None and specks.any():
-        mid_matched = mid_rgb.astype(np.float32)
-        if room.any():
-            mid_lum = cv2.cvtColor(mid_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
-            mid_gain = min(1.0, float(merge_lum) / max(1e-6, float(mid_lum)))
-            mid_matched *= mid_gain
-        matched[specks] = mid_matched[specks]
-        replaced |= specks
+        return merge_rgb.copy(), info
+    take = _take_mask(merge_rgb, view_rgb, mask)
+    info["take_px"] = int(take.sum())
+    if not take.any():
+        return merge_rgb.copy(), info
     feather = max(2, int(round(max(mask.shape) * 0.002)))
-    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
+    dist = cv2.distanceTransform(take.astype(np.uint8), cv2.DIST_L2, 3)
     alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
-    base = merge_rgb.astype(np.float32)
-    pulled = base * (1 - alpha[:, :, None]) + matched * alpha[:, :, None]
-    pulled = np.clip(pulled, 0, 255).astype(np.uint8)
-    changed_outside = int((np.any(pulled != merge_rgb, axis=2) & ~mask).sum())
-    return pulled, changed_outside
+    pulled = (
+        merge_rgb.astype(np.float32) * (1 - alpha[:, :, None])
+        + view_rgb.astype(np.float32) * alpha[:, :, None]
+    )
+    return np.clip(pulled, 0, 255).astype(np.uint8), info
 
 
 def save_mask_png(mask: np.ndarray, path: Path) -> None:

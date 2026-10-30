@@ -349,8 +349,8 @@ def _synthetic_brackets():
 
 def test_pull_uses_real_dark_pixels_inside_leaves_rest():
     merge, dark, mask = _synthetic_brackets()
-    pulled, changed_outside = segment.pull_window(merge, dark, mask)
-    assert changed_outside == 0, "outside the mask no pixel may change"
+    pulled, _ = segment.pull_window(merge, dark, mask)
+    assert (pulled[~mask] == merge[~mask]).all(), "outside the mask no pixel may change"
     inside = pulled[mask].astype(int)
     assert np.abs(inside - dark[mask].astype(int)).mean() < 12, (
         "the pulled view comes from the real darker frame"
@@ -374,54 +374,12 @@ def _three_frames():
     return merge, [black, mid, blown], mask
 
 
-def test_choose_pull_frame_skips_blown_and_empty_views():
-    merge, frames, mask = _three_frames()
-    assert segment.choose_pull_frame(frames, mask) == 1, (
-        "the view comes from the best-exposed frame, not the darkest"
-    )
-
-
-def test_choose_pull_frame_sees_single_channel_blowout():
-    room = np.full((100, 100, 3), 40, np.uint8)
-    blue_blown = room.copy()
-    blue_blown[20:80, 20:80] = (150, 150, 255)  # gray 162, blue blown
-    clean = room.copy()
-    clean[20:80, 20:80] = 120
-    merge = room.copy()
-    merge[20:80, 20:80] = 160  # closer to the blowout than to clean
-    mask = np.zeros((100, 100), bool)
-    mask[20:80, 20:80] = True
-    assert segment.choose_pull_frame([blue_blown, clean], mask, ref=merge) == 1, (
-        "near-white on any channel at 250 counts as clipped, even when gray stays dark"
-    )
-
-
-def test_choose_pull_frame_changes_clean_windows_least():
-    room = np.full((100, 100, 3), 40, np.uint8)
-    dim = room.copy()
-    dim[20:80, 20:80] = 100
-    bright = room.copy()
-    bright[20:80, 20:80] = 180
-    merge = room.copy()
-    merge[20:80, 20:80] = 110
-    mask = np.zeros((100, 100), bool)
-    mask[20:80, 20:80] = True
-    assert segment.choose_pull_frame([dim, bright], mask, ref=merge) == 0, (
-        "with no clipping anywhere, the frame closest to the merge wins, "
-        "so a clean window gains nothing"
-    )
-    merge[20:80, 20:80] = 255
-    assert segment.choose_pull_frame([dim, bright], mask, ref=merge) == 1, (
-        "against a blown merge, the brighter clean frame still holds the view"
-    )
-
-
 def _bright_room_brackets():
-    """Bright-room merge (150), dark-room view frame (40): the old room
-    match scaled the view up 3.75x and blew it out; the view must stay."""
+    """Exposure-matched rooms: the view lands at its native gain, never
+    rescaled past its own frame, so no hue shifts and no new clipping."""
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255
-    dark = np.full((200, 200, 3), 40, np.uint8)
+    dark = np.full((200, 200, 3), 150, np.uint8)
     view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
     dark[40:160, 60:140] = view[:, :, None]
     mask = np.zeros((200, 200), bool)
@@ -432,13 +390,12 @@ def _bright_room_brackets():
 def test_pull_never_pushes_view_brighter_than_its_frame():
     merge, dark, mask = _bright_room_brackets()
     pulled, _ = segment.pull_window(merge, dark, mask)
-    # Deep interior, past the feather band: the seam band blends toward
-    # the room by design, but where the view is in control it keeps its
-    # own brightness or darker, never brighter than its frame.
+    # Deep interior, past the feather band: where the view is in control
+    # it keeps its own native pixels, never brighter than its frame.
     interior = np.zeros_like(mask)
     interior[55:145, 75:125] = True
     assert (pulled[interior].astype(int) <= dark[interior].astype(int) + 1).all(), (
-        "room matching may only darken the view, never brighten it past its frame"
+        "the view lands at native gain, never brightened past its frame"
     )
 
 
@@ -464,7 +421,7 @@ def _trimmed_window():
     merge[36:164, 56:60] = 242
     merge[36:164, 140:144] = 242
     merge[70:90, 60:140] = 180  # blind band across the glass, holds detail
-    dark = np.full((200, 200, 3), 50, np.uint8)
+    dark = np.full((200, 200, 3), 150, np.uint8)
     view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
     dark[40:160, 60:140] = view[:, :, None]
     dark[36:40, 56:144] = 45  # trim reads dark in the dark frame
@@ -479,8 +436,8 @@ def _trimmed_window():
 
 def test_pull_keeps_trim_and_blinds_from_the_merge():
     merge, dark, mask = _trimmed_window()
-    pulled, changed_outside = segment.pull_window(merge, dark, mask)
-    assert changed_outside == 0
+    pulled, _ = segment.pull_window(merge, dark, mask)
+    assert (pulled[~mask] == merge[~mask]).all()
     trim = np.zeros_like(mask)
     trim[36:40, 56:144] = True
     assert (pulled[trim] == merge[trim]).all(), "white trim keeps its real color"
@@ -494,102 +451,163 @@ def test_pull_keeps_trim_and_blinds_from_the_merge():
     )
 
 
-def test_pull_replaces_shoulder_compressed_glass_but_not_trim():
-    # The balance shoulder compresses blown glass to just under 250,
-    # exactly where white trim sits: merge brightness cannot tell them
-    # apart, so the view frame decides. Glass the view holds is replaced;
-    # trim the view reads dark stays pixel-exact.
+def test_pull_replaces_only_blown_glass_view_holds():
+    """One source, native gain: blown glass takes the view, lit trim and
+    detailed bars keep the merge pixel-exact.
+
+    The view frame reads the trim bright (230, near the merge's 242), the
+    way a same-exposure frame does. Per-pixel source mixing used to take
+    that trim dark; the single native source must leave it alone.
+    """
     merge = np.full((200, 200, 3), 150, np.uint8)
-    merge[40:160, 60:140] = 240  # blown, but under the near-white level
-    merge[36:40, 56:144] = 242  # white trim, same brightness as the glass
-    dark = np.full((200, 200, 3), 50, np.uint8)
-    view = np.tile(np.linspace(90, 190, 80, dtype=np.uint8), (120, 1))
-    dark[40:160, 60:140] = view[:, :, None]
-    dark[36:40, 56:144] = 45
+    merge[40:160, 60:140] = 255  # blown glass
+    merge[36:40, 56:144] = 242  # lit trim, same brightness as glass
+    merge[90:110, 40:160] = 120  # dark mullion bar holding merge detail
+    view = np.full((200, 200, 3), 150, np.uint8)
+    glass = np.tile(np.linspace(100, 200, 80, dtype=np.uint8), (120, 1))
+    view[40:160, 60:140] = glass[:, :, None]
+    view[36:40, 56:144] = 230  # trim reads near-merge in the view frame
+    view[90:110, 40:160] = 110
     mask = np.zeros((200, 200), bool)
     mask[36:164, 56:144] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask)
-    assert changed_outside == 0
+    pulled, info = segment.pull_window(merge, view, mask)
+    assert info["refused"] is None
+    assert (pulled[~mask] == merge[~mask]).all(), "outside the mask nothing changes"
     trim = np.zeros_like(mask)
-    trim[36:40, 56:144] = True
-    assert (pulled[trim] == merge[trim]).all(), "white trim keeps its real color"
-    glass = np.zeros_like(mask)
-    glass[100:150, 70:130] = True
-    assert np.abs(pulled[glass].astype(int) - dark[glass].astype(int)).mean() < 15, (
-        "glass the view holds takes the view even under the clip level"
-    )
+    trim[36:40, 70:130] = True
+    assert (pulled[trim] == merge[trim]).all(), "lit trim keeps its merged color"
+    bar = np.zeros_like(mask)
+    bar[94:106, 70:130] = True
+    assert (pulled[bar] == merge[bar]).all(), "detailed bars keep the merge"
+    inner = np.zeros_like(mask)
+    inner[120:150, 70:130] = True
+    assert (pulled[inner] == view[inner]).all(), "blown glass takes native view pixels"
 
 
-def test_detail_frame_prefers_detail_over_murk():
-    room = np.full((100, 100, 3), 40, np.uint8)
-    murk = room.copy()
-    murk[20:80, 20:80] = 30  # darkest: no clip, no detail
-    mid = room.copy()
-    mid[20:80, 20:80] = 110  # a touch of clip, real midtone view
-    mid[20:30, 20:80] = 255
-    blown = room.copy()
-    blown[20:80, 20:80] = 230  # brighter but a third clipped
-    blown[20:40, 20:80] = 255
-    mask = np.zeros((100, 100), bool)
-    mask[20:80, 20:80] = True
-    assert segment.detail_frame([murk, mid, blown], mask) == 1, (
-        "the darkest frame that holds the view wins over pure murk"
-    )
+def test_pull_inserts_view_at_native_gain():
+    """The pull never rescales the view: no hue shift, no new clipping.
 
-
-def test_pull_fills_specks_from_detail_frame():
-    # A blown merge speck the dark pull frame reads dark is sky the dark
-    # frame underexposes: it takes the detail frame's real pixels. A
-    # dark bar at the mask border is a real frame and stays from the
-    # merge.
+    View and merge rooms read different exposures here, the way brackets
+    do. A room-matched rescale would darken the whole insert; the native
+    insert keeps the view's own color instead.
+    """
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255
-    merge[150:160, 60:140] = 120  # the bar holds detail in the merge
-    dark = np.full((200, 200, 3), 150, np.uint8)
-    dark[40:160, 60:140] = 150
-    dark[95:100, 90:110] = 20  # enclosed dark speck in bright view
-    dark[150:160, 60:140] = 25  # dark bar at the mask border: a frame
-    mid = np.full((200, 200, 3), 150, np.uint8)
-    mid[95:100, 90:110] = 160  # the detail frame holds the sky there
+    view = np.full((200, 200, 3), 200, np.uint8)
+    glass = np.tile(np.linspace(100, 200, 80, dtype=np.uint8), (120, 1))
+    view[40:160, 60:140] = glass[:, :, None]
+    view[40:160, 60:140, 0] = np.clip(glass + 30, 0, 249)  # warm view tint
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
-    assert changed_outside == 0
-    hole = np.zeros_like(mask)
-    hole[95:100, 90:110] = True
-    assert abs(pulled[hole].astype(int).mean() - 160) < 30, (
-        "blown specks take the detail frame's real pixels, not blown merge"
+    pulled, _ = segment.pull_window(merge, view, mask)
+    inner = np.zeros_like(mask)
+    inner[60:140, 80:120] = True
+    assert (pulled[inner] == view[inner]).all(), "the view lands unscaled, hue intact"
+
+
+def test_pull_refuses_a_light_mismatched_view():
+    """A view three stops darker than the room would scar the trim.
+
+    The whole view frame sits a uniform 3x under the merge here, trim
+    included. Matching the trim would need 3x and blow the glass; the
+    pull refuses and the window keeps the merge.
+    """
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255
+    merge[36:40, 56:144] = 242
+    view = np.full((200, 200, 3), 50, np.uint8)
+    view[40:160, 60:140] = 140
+    view[36:40, 56:144] = 80
+    mask = np.zeros((200, 200), bool)
+    mask[36:164, 56:144] = True
+    pulled, info = segment.pull_window(merge, view, mask)
+    assert info["refused"] is not None, "light mismatch must refuse, not scar"
+    assert (pulled == merge).all(), "a refused pull changes nothing"
+
+
+def test_pull_keeps_sun_glints_honest():
+    """A glint blown in every frame keeps the merge: no clamp may fake it."""
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255
+    view = np.full((200, 200, 3), 150, np.uint8)
+    view[40:160, 60:140] = 140
+    view[95:100, 90:110] = 255  # sun glint, blown in the view too
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    pulled, _ = segment.pull_window(merge, view, mask)
+    glint = np.zeros_like(mask)
+    glint[95:100, 90:110] = True
+    assert (pulled[glint] == merge[glint]).all(), "glints keep the merge, never a cap"
+    inner = np.zeros_like(mask)
+    inner[120:150, 70:130] = True
+    assert (pulled[inner] == view[inner]).all(), "real glass beside it still fills"
+
+
+def test_pull_keeps_single_channel_blowout_out():
+    """A view pixel blown on one channel only never lands in the photo."""
+    merge = np.full((100, 100, 3), 150, np.uint8)
+    merge[20:80, 20:80] = 255
+    view = np.full((100, 100, 3), 150, np.uint8)
+    view[20:80, 20:80] = 140
+    view[40:60, 40:60] = (140, 140, 255)  # blue blown, gray calm
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    pulled, _ = segment.pull_window(merge, view, mask)
+    spot = np.zeros_like(mask)
+    spot[40:60, 40:60] = True
+    assert (pulled[spot] == merge[spot]).all(), "single-channel blowout stays out"
+
+
+def test_choose_view_frame_skips_murk_picks_fix():
+    room = np.full((100, 100, 3), 40, np.uint8)
+    merge = room.copy()
+    merge[20:80, 20:80] = 255
+    murk = room.copy()
+    murk[20:80, 20:80] = 30  # darkest: no clip, no detail
+    fix = room.copy()
+    fix[20:80, 20:80] = 150  # real midtone view, nothing clipped
+    blown = room.copy()
+    blown[20:80, 20:80] = 255
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    idx, reason = segment.choose_view_frame([murk, fix, blown], mask, merge)
+    assert idx == 1, (
+        f"the frame that fixes blown glass wins over murk and white ({reason})"
     )
-    assert (pulled[~mask] == merge[~mask]).all()
-    bar = np.zeros_like(mask)
-    bar[152:158, 80:120] = True
-    assert (pulled[bar] == merge[bar]).all(), "border-touching frames stay"
 
 
-def test_pull_fills_wide_blown_bay_from_detail_frame():
-    # A wide blown bay the dark pull frame reads dark takes the detail
-    # frame everywhere, border or not. Trim and slats hold merge detail
-    # and stay pixel-exact.
+def test_choose_view_frame_returns_none_when_nothing_to_fix():
+    room = np.full((100, 100, 3), 150, np.uint8)
+    merge = room.copy()
+    merge[20:80, 20:80] = 180  # clean detailed glass, nothing blown
+    view = room.copy()
+    view[20:80, 20:80] = 120
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    idx, reason = segment.choose_view_frame([view], mask, merge)
+    assert idx is None, (
+        f"a clean window keeps the merge pixel-exact instead of gaining churn ({reason})"
+    )
+
+
+def test_pull_fills_wide_blown_bay_from_single_view():
+    # A wide blown bay takes the one view frame everywhere, border or
+    # not. Trim agrees with the merge and stays pixel-exact; the slat
+    # holds merge detail and stays.
     merge = np.full((400, 400, 3), 150, np.uint8)
     merge[40:360, 60:340] = 255  # blown glass bay to the border
     merge[40:46, 60:340] = 242  # white trim along the top
     merge[190:200, 60:340] = 180  # thin blind slat across the pane
-    dark = np.full((400, 400, 3), 150, np.uint8)
-    dark[40:360, 60:340] = 150
-    dark[40:46, 60:340] = 40
-    dark[190:200, 60:340] = 35
-    dark[100:300, 100:340] = 20  # dark view over the border-touching bay
-    mid = np.full((400, 400, 3), 150, np.uint8)
-    mid[100:300, 100:340] = 140  # the detail frame holds the bay view
+    view = np.full((400, 400, 3), 150, np.uint8)
+    view[40:360, 60:340] = 140  # the view frame holds the bay
+    view[40:46, 60:340] = 230  # trim reads near-merge in the view
+    view[190:200, 60:340] = 175
     mask = np.zeros((400, 400), bool)
     mask[40:360, 60:340] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
-    assert changed_outside == 0
+    pulled, _ = segment.pull_window(merge, view, mask)
     bay = np.zeros_like(mask)
     bay[110:180, 150:250] = True
-    assert abs(pulled[bay].astype(int).mean() - 140) < 30, (
-        "blown bays take the detail frame, wherever they touch"
-    )
+    assert (pulled[bay] == 140).all(), "blown bays take the view, wherever they touch"
     trim = np.zeros_like(mask)
     trim[42:45, 100:300] = True
     assert (pulled[trim] == merge[trim]).all(), "trim stays"
@@ -598,54 +616,44 @@ def test_pull_fills_wide_blown_bay_from_detail_frame():
     assert (pulled[slat] == merge[slat]).all(), "thin slats stay"
 
 
-def test_pull_fills_shoulder_glass_but_not_lit_trim():
+def test_pull_fills_shoulder_glass_but_not_shadowed_trim():
     # Blown glass the shoulder parks just under near-white takes the
-    # detail frame when it holds texture there; lit trim at the same
-    # merge brightness stays because the detail frame reads it dim and
-    # flat. Samples stay clear of the hard test seam by the texture
-    # window radius; real seams hold dark frame pixels either way.
+    # view when it holds detail there; trim the view reads dark stays
+    # because no view pixel there holds a scene.
     rng = np.random.default_rng(7)
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 240  # shoulder-parked blown glass
-    merge[150:160, 60:140] = 242  # lit trim, same brightness
-    dark = np.full((200, 200, 3), 150, np.uint8)
-    dark[40:160, 60:140] = 45  # pull frame reads both dark
-    dark[150:160, 60:140] = 40
-    mid = np.full((200, 200, 3), 150, np.uint8)
+    merge[150:160, 60:140] = 242  # trim, same brightness
+    view = np.full((200, 200, 3), 150, np.uint8)
     grain = rng.normal(0, 12, (110, 80, 1))
-    mid[40:150, 60:140] = np.clip(140 + grain, 0, 255).astype(np.uint8)
-    mid[150:160, 60:140] = 80  # trim: dim and flat in the detail frame
+    view[40:150, 60:140] = np.clip(140 + grain, 0, 255).astype(np.uint8)
+    view[150:160, 60:140] = 40  # trim: dark in the view frame
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
-    assert changed_outside == 0
+    pulled, _ = segment.pull_window(merge, view, mask)
     glass = np.zeros_like(mask)
     glass[60:140, 70:130] = True
     assert abs(pulled[glass].astype(int).mean() - 140) < 30, (
-        "shoulder glass takes the detail frame that holds texture"
+        "shoulder glass takes the view that holds detail"
     )
     trim = np.zeros_like(mask)
     trim[154:158, 70:130] = True
-    assert (pulled[trim] == merge[trim]).all(), "lit trim stays"
+    assert (pulled[trim] == merge[trim]).all(), "dark-reading trim stays"
 
 
 def test_pull_keeps_room_bright_flat_trim_next_to_blown_core():
-    # Sunlit trim reads room-bright and flat in both frames while the
-    # blown core beside it takes the detail frame. The trim's own
-    # pixels hold no more texture in the detail frame than in the merge,
-    # so the shoulder rule leaves every trim pixel alone.
+    # Sunlit trim reads room-bright in the merge and dark in the view
+    # frame while the blown core beside it takes the view. The trim's
+    # own view pixels hold no scene, so every trim pixel stays.
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255  # blown core
     merge[40:46, 60:140] = 242  # sunlit trim strip against the core
-    dark = np.full((200, 200, 3), 150, np.uint8)
-    dark[40:46, 60:140] = 40
-    dark[46:160, 60:140] = 42
-    mid = np.full((200, 200, 3), 150, np.uint8)
-    mid[46:160, 60:140] = 140  # detail holds the core's view
+    view = np.full((200, 200, 3), 150, np.uint8)
+    view[40:46, 60:140] = 40
+    view[46:160, 60:140] = 140  # view holds the core's scene
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
-    assert changed_outside == 0
+    pulled, _ = segment.pull_window(merge, view, mask)
     trim = np.zeros_like(mask)
     trim[40:46, 70:130] = True
     assert (pulled[trim] == merge[trim]).all(), "sunlit trim stays"

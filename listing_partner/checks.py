@@ -131,6 +131,30 @@ def check_look(
     )
 
 
+#: Ship-gate bounds for one window pull (contract 02 section B). The rim
+#: is the mask's own border band, mostly trim: the pull may correct its
+#: light by up to RIM_TOL gray levels, but a whole frame going dark is
+#: damage, never a correction. The pull inserts native view pixels, so
+#: its light ratio against the room must already read near one: outside
+#: PULL_GAIN_LO..PULL_GAIN_HI the view light does not match the room.
+RIM_TOL = 25.0
+PULL_GAIN_LO = 0.5
+PULL_GAIN_HI = 2.0
+
+
+def check_window_rim(rim_before: float, rim_after: float) -> tuple[bool, str]:
+    """The window rim keeps its merged light within tolerance."""
+    gap = abs(rim_after - rim_before)
+    ok = gap <= RIM_TOL
+    return ok, f"rim light {rim_before:.1f} -> {rim_after:.1f} (tolerance {RIM_TOL:.0f})"
+
+
+def check_pull_gain(gain: float) -> tuple[bool, str]:
+    """The view light matches the room light well enough to insert."""
+    ok = PULL_GAIN_LO <= gain <= PULL_GAIN_HI
+    return ok, f"view-to-room light ratio {gain:.2f} (bounds {PULL_GAIN_LO}-{PULL_GAIN_HI})"
+
+
 def check_spend(unit_spend_usd: float) -> tuple[bool, str]:
     """Unit spend stays under budget."""
     ok = unit_spend_usd < UNIT_SPEND_BUDGET_USD

@@ -37,6 +37,54 @@ def test_daylight_spill_keeps_neutral_color():
     )
 
 
+def _warm_room_big_wood_floor():
+    """Warm-cast walls plus a wood floor that dominates the room pixels.
+
+    Unit-a 006's floor voted itself gray: the all-room vote let saturated
+    wood set the illuminant and the correction lavendered the floor. The
+    bright lamp band holds the vote ceiling above walls and floor alike,
+    the way bright fixtures do in real rooms. Walls read brighter than
+    the floor, the way lit walls do.
+    """
+    img = np.full((200, 200, 3), (200, 160, 115), np.uint8)  # warm-cast neutral walls
+    img[60:, :] = (190, 130, 80)  # saturated wood floor, most room pixels
+    img[:20, :] = (230, 230, 230)  # bright lamp band, above the vote
+    return img
+
+
+def test_white_balance_votes_gray_not_wood():
+    before = _warm_room_big_wood_floor().astype(float)
+    wall_gap_before = before[25:55, 20:180, 0].mean() - before[25:55, 20:180, 2].mean()
+    out, _ = finish.balance_exposure(_warm_room_big_wood_floor())
+    walls = out[25:55, 20:180].astype(float)
+    wall_gap = walls[:, :, 0].mean() - walls[:, :, 2].mean()
+    assert 0 < wall_gap < wall_gap_before, (
+        f"walls cool toward neutral without flipping blue, got R-B {wall_gap:.1f}"
+    )
+    floor = out[100:180, 20:180].astype(float)
+    gap = floor[:, :, 0].mean() - floor[:, :, 2].mean()
+    assert gap > 45, f"wood keeps its warm R-B spread instead of going gray, got {gap:.1f}"
+
+
+def _exterior_room():
+    img = np.full((200, 200, 3), (150, 150, 220), np.uint8)  # blue sky up top
+    img[120:, :] = (172, 150, 120)  # warm ground-floor band below
+    img[150:190, 60:140] = (205, 205, 205)  # bright neutral patch
+    return img
+
+
+def test_spill_guard_skips_exteriors():
+    assert finish.classify_scene(_exterior_room()) == "exterior"
+    spill = np.full((200, 200, 3), (150, 100, 60), np.uint8)
+    spill[120:180, 60:140] = (205, 205, 205)
+    _, interior_report = finish.balance_exposure(spill)
+    assert interior_report.get("spill_guard", 0.0) > 0, "interiors keep the guard"
+    _, exterior_report = finish.balance_exposure(_exterior_room())
+    assert exterior_report.get("spill_guard", 0.0) == 0.0, (
+        "exteriors skip the guard: unit-a 013's daylight needs no tungsten vote"
+    )
+
+
 def test_shadow_lift_opens_corners_without_haze():
     out, report = finish.balance_exposure(_room_cast())
     dark_before = np.sort(_room_cast().reshape(-1, 3).mean(axis=1))[:4000].mean()
