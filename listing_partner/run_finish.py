@@ -199,9 +199,14 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
         view = state["aligned"][pull_idx]
         record["pull_frame"] = state["members"][pull_idx].name
         record["pull_frame_index"] = pull_idx
-        pulled, changed_outside = segment.pull_window(balanced, view, union)
+        mid_idx = segment.detail_frame(state["aligned"], union, ref=balanced)
+        record["mid_frame"] = state["members"][mid_idx].name
+        pulled, changed_outside = segment.pull_window(
+            balanced, view, union, state["aligned"][mid_idx]
+        )
     else:
         record["pull_frame"] = None
+        record["mid_frame"] = None
 
     # Same patches both sides: the patch set is picked on the pulled
     # photo, so the drop is the denoiser's work on the same pixels, not
@@ -430,7 +435,8 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f"<section><h2>Shot {name}</h2>"
             f"<p>{', '.join(entry.get('frames_used', []))}</p>"
             f"<p>merge: {entry.get('frames_reason', '')}</p>"
-            f"<p>window view from: {entry.get('pull_frame', 'no windows')}</p>"
+            f"<p>window view from: {entry.get('pull_frame', 'no windows')}"
+            f" (detail: {entry.get('mid_frame', 'same')})</p>"
             f"<p>lens strength {entry.get('distortion_strength', '')}, "
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')}</p>"

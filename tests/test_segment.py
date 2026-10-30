@@ -520,25 +520,45 @@ def test_pull_replaces_shoulder_compressed_glass_but_not_trim():
     )
 
 
-def test_pull_inpaints_enclosed_sky_holes():
-    # A dark speck of the view frame fully enclosed in replaced glass is
-    # a sky hole the dark frame renders near-black: leaving it keeps a
-    # blown merge speck. It takes neighboring real view pixels instead.
-    # A dark bar touching the mask border is a real frame and stays.
+def test_detail_frame_prefers_detail_over_murk():
+    room = np.full((100, 100, 3), 40, np.uint8)
+    murk = room.copy()
+    murk[20:80, 20:80] = 30  # darkest: no clip, no detail
+    mid = room.copy()
+    mid[20:80, 20:80] = 110  # a touch of clip, real midtone view
+    mid[20:30, 20:80] = 255
+    blown = room.copy()
+    blown[20:80, 20:80] = 230  # brighter but a third clipped
+    blown[20:40, 20:80] = 255
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    assert segment.detail_frame([murk, mid, blown], mask) == 1, (
+        "the darkest frame that holds the view wins over pure murk"
+    )
+
+
+def test_pull_fills_specks_from_detail_frame():
+    # A blown merge speck the dark pull frame reads dark is sky the dark
+    # frame underexposes: it takes the detail frame's real pixels. A
+    # dark bar at the mask border is a real frame and stays from the
+    # merge.
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255
+    merge[150:160, 60:140] = 120  # the bar holds detail in the merge
     dark = np.full((200, 200, 3), 150, np.uint8)
     dark[40:160, 60:140] = 150
     dark[95:100, 90:110] = 20  # enclosed dark speck in bright view
     dark[150:160, 60:140] = 25  # dark bar at the mask border: a frame
+    mid = np.full((200, 200, 3), 150, np.uint8)
+    mid[95:100, 90:110] = 160  # the detail frame holds the sky there
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
     assert changed_outside == 0
     hole = np.zeros_like(mask)
     hole[95:100, 90:110] = True
-    assert abs(pulled[hole].astype(int).mean() - 150) < 30, (
-        "enclosed sky holes take neighboring real view pixels, not blown merge"
+    assert abs(pulled[hole].astype(int).mean() - 160) < 30, (
+        "blown specks take the detail frame's real pixels, not blown merge"
     )
     assert (pulled[~mask] == merge[~mask]).all()
     bar = np.zeros_like(mask)
@@ -546,31 +566,33 @@ def test_pull_inpaints_enclosed_sky_holes():
     assert (pulled[bar] == merge[bar]).all(), "border-touching frames stay"
 
 
-def test_pull_inpaints_deep_blown_glass_but_not_trim_or_slats():
-    # A wide blown bay reaching the mask border is glass, not trim: deep
-    # and thick, it inpaints from the view. The shallow trim ring and a
-    # thin blind slat spanning the pane stay pixel-exact.
+def test_pull_fills_wide_blown_bay_from_detail_frame():
+    # A wide blown bay the dark pull frame reads dark takes the detail
+    # frame everywhere, border or not. Trim and slats hold merge detail
+    # and stay pixel-exact.
     merge = np.full((400, 400, 3), 150, np.uint8)
     merge[40:360, 60:340] = 255  # blown glass bay to the border
-    merge[40:46, 60:340] = 242  # shallow white trim along the top
+    merge[40:46, 60:340] = 242  # white trim along the top
     merge[190:200, 60:340] = 180  # thin blind slat across the pane
     dark = np.full((400, 400, 3), 150, np.uint8)
     dark[40:360, 60:340] = 150
     dark[40:46, 60:340] = 40
     dark[190:200, 60:340] = 35
-    dark[100:300, 100:300] = 20  # dark view over the deep bay
+    dark[100:300, 100:340] = 20  # dark view over the border-touching bay
+    mid = np.full((400, 400, 3), 150, np.uint8)
+    mid[100:300, 100:340] = 140  # the detail frame holds the bay view
     mask = np.zeros((400, 400), bool)
     mask[40:360, 60:340] = True
-    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
     assert changed_outside == 0
     bay = np.zeros_like(mask)
-    bay[105:145, 150:250] = True  # clear of the slat: filled from glass around
-    assert abs(pulled[bay].astype(int).mean() - 150) < 40, (
-        "deep blown glass takes neighboring view, not white merge"
+    bay[110:180, 150:250] = True
+    assert abs(pulled[bay].astype(int).mean() - 140) < 30, (
+        "blown bays take the detail frame, wherever they touch"
     )
     trim = np.zeros_like(mask)
     trim[42:45, 100:300] = True
-    assert (pulled[trim] == merge[trim]).all(), "shallow trim stays"
+    assert (pulled[trim] == merge[trim]).all(), "trim stays"
     slat = np.zeros_like(mask)
     slat[192:198, 100:300] = True
     assert (pulled[slat] == merge[slat]).all(), "thin slats stay"
