@@ -127,6 +127,13 @@ def test_denoise_compared_on_shared_patches():
     )
 
 
+def test_flat_patches_cover_a_uniform_image():
+    uniform = np.full((100, 100, 3), 150, np.uint8)
+    patches = finish.flat_patch_mask(uniform)
+    assert patches.sum() == 100 * 100, "a flat image is all patch"
+    assert finish.flat_noise(uniform, patches) == 0.0
+
+
 def test_denoise_drops_noise_keeps_edges():
     noisy, clean = _noisy_edge()
     before_n = finish.flat_noise(noisy)

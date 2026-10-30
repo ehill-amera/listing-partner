@@ -43,8 +43,8 @@ def test_build_inputs_keeps_undistort_invalid_out(monkeypatch):
 
 def _tail_state(n=100):
     balanced = np.full((n, n, 3), 150, np.uint8)
+    balanced[20:80, 20:80] = 255  # the merge holds a blown window to replace
     blown = balanced.copy()
-    blown[20:80, 20:80] = 255
     clean = balanced.copy()
     view = np.tile(np.linspace(60, 200, 60, dtype=np.uint8), (60, 1))
     clean[20:80, 20:80] = view[:, :, None]

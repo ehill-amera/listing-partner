@@ -414,6 +414,57 @@ def test_pull_reports_real_clip_when_every_frame_is_blown():
     )
 
 
+def _trimmed_window():
+    """White trim ring plus a dark blind band inside the mask, blown glass
+    between them. The mask covers trim, blinds and glass, the way SAM
+    draws it: the pull must change glass only."""
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255  # blown glass
+    merge[36:40, 56:144] = 242  # white trim, bright but not blown
+    merge[160:164, 56:144] = 242
+    merge[36:164, 56:60] = 242
+    merge[36:164, 140:144] = 242
+    merge[70:90, 60:140] = 180  # blind band across the glass, holds detail
+    dark = np.full((200, 200, 3), 50, np.uint8)
+    view = np.tile(np.linspace(60, 200, 80, dtype=np.uint8), (120, 1))
+    dark[40:160, 60:140] = view[:, :, None]
+    dark[36:40, 56:144] = 45  # trim reads dark in the dark frame
+    dark[160:164, 56:144] = 45
+    dark[36:164, 56:60] = 45
+    dark[36:164, 140:144] = 45
+    dark[70:90, 60:140] = 40  # blinds read dark in the dark frame
+    mask = np.zeros((200, 200), bool)
+    mask[36:164, 56:144] = True
+    return merge, dark, mask
+
+
+def test_pull_keeps_trim_and_blinds_from_the_merge():
+    merge, dark, mask = _trimmed_window()
+    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    assert changed_outside == 0
+    trim = np.zeros_like(mask)
+    trim[36:40, 56:144] = True
+    assert (pulled[trim] == merge[trim]).all(), "white trim keeps its real color"
+    blinds = np.zeros_like(mask)
+    blinds[74:86, 70:130] = True  # band middle, past the feather
+    assert (pulled[blinds] == merge[blinds]).all(), "blinds stay from the merge"
+    glass = np.zeros_like(mask)
+    glass[100:150, 70:130] = True
+    assert np.abs(pulled[glass].astype(int) - dark[glass].astype(int)).mean() < 12, (
+        "blown glass still takes the real view"
+    )
+
+
+def test_pull_keeps_dark_mullion_bar_from_the_merge():
+    merge, dark, mask = _synthetic_brackets()
+    merge[90:110, 40:160] = 120  # dark mullion bar across the blown glass
+    dark[90:110, 40:160] = 30
+    pulled, _ = segment.pull_window(merge, dark, mask)
+    bar = np.zeros_like(mask)
+    bar[94:106, 70:130] = True
+    assert (pulled[bar] == merge[bar]).all(), "the frame bar keeps its color"
+
+
 def test_pull_reaches_full_view_inside_without_overshoot():
     merge, dark, mask = _synthetic_brackets()
     pulled, _ = segment.pull_window(merge, dark, mask)

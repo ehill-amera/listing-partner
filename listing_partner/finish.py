@@ -146,6 +146,10 @@ def flat_patch_mask(img: np.ndarray) -> np.ndarray:
     flat = dark & (cv2.GaussianBlur(np.abs(lap), (0, 0), 2) < 3.0)
     if flat.sum() < 100:
         flat = dark
+    if flat.sum() == 0:
+        # Uniform image: no pixel is below the percentile, and the noise
+        # is zero everywhere, so every pixel is a fair patch.
+        flat = np.ones(gray.shape, bool)
     return flat
 
 

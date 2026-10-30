@@ -311,18 +311,26 @@ def choose_pull_frame(
 def pull_window(
     merge_rgb: np.ndarray, dark_rgb: np.ndarray, mask: np.ndarray
 ) -> tuple[np.ndarray, int]:
-    """Fill the window mask from the best-exposed real bracket frame.
+    """Fill blown glass from the best-exposed real bracket frame.
 
+    Only near-white merge pixels (any channel at CLIP_LEVEL, the level
+    the highlights check measures) take the view: frames, mullions,
+    blinds, sills and trim already hold detail, so they stay from the
+    merge pixel-exact. The feather ramps up inside the replaced glass,
+    so the blend never reaches the frame: no dark outline, no smear.
     The view is matched to the room with a single uniform gain that can
     only darken: it is never pushed brighter than its own frame, so a
-    held view stays held. Blended under a feathered edge sized to the
-    image. No clamp, no cap: what the view holds is what gets measured.
-    Returns the pulled photo and the count of changed pixels outside the
-    mask (must be 0).
+    held view stays held. No clamp, no cap: what the view holds is what
+    gets measured. Returns the pulled photo and the count of changed
+    pixels outside the mask (must be 0).
     """
-    feather = max(2, int(round(max(mask.shape) * 0.01)))
-    inside = mask.astype(np.float32)
-    dist = cv2.distanceTransform(inside.astype(np.uint8), cv2.DIST_L2, 3)
+    from listing_partner.checks import CLIP_LEVEL
+
+    replaced = mask & (merge_rgb.max(axis=2) >= CLIP_LEVEL)
+    if not replaced.any():
+        return merge_rgb.copy(), 0
+    feather = max(2, int(round(max(mask.shape) * 0.002)))
+    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
     alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
     room = ~mask
     matched = dark_rgb.astype(np.float32)
