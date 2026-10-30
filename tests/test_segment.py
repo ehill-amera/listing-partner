@@ -351,8 +351,11 @@ def test_pull_uses_real_dark_pixels_inside_leaves_rest():
     merge, dark, mask = _synthetic_brackets()
     pulled, _ = segment.pull_window(merge, dark, mask)
     assert (pulled[~mask] == merge[~mask]).all(), "outside the mask no pixel may change"
-    inside = pulled[mask].astype(int)
-    assert np.abs(inside - dark[mask].astype(int)).mean() < 12, (
+    # Deep interior, past erosion and feather: the take edge keeps the
+    # merge by design, so only the middle testifies for the view.
+    inside = np.zeros_like(mask)
+    inside[60:140, 80:120] = True
+    assert np.abs(pulled[inside].astype(int) - dark[inside].astype(int)).mean() < 12, (
         "the pulled view comes from the real darker frame"
     )
 
@@ -484,8 +487,9 @@ def test_pull_replaces_only_blown_glass_view_holds():
     bar = np.zeros_like(mask)
     bar[94:106, 70:130] = True
     assert (pulled[bar] == merge[bar]).all(), "detailed bars keep the merge"
+    # Deep interior past erosion and feather, where alpha is exactly one.
     inner = np.zeros_like(mask)
-    inner[120:150, 70:130] = True
+    inner[125:145, 75:125] = True
     assert (pulled[inner] == view[inner]).all(), "blown glass takes native view pixels"
 
 
@@ -551,8 +555,9 @@ def test_pull_keeps_sun_glints_honest():
     glint = np.zeros_like(mask)
     glint[95:100, 90:110] = True
     assert (pulled[glint] == merge[glint]).all(), "glints keep the merge, never a cap"
+    # Deep interior past erosion and feather, where alpha is exactly one.
     inner = np.zeros_like(mask)
-    inner[120:150, 70:130] = True
+    inner[125:145, 75:125] = True
     assert (pulled[inner] == view[inner]).all(), "real glass beside it still fills"
 
 
@@ -578,7 +583,10 @@ def test_choose_view_frame_skips_murk_picks_fix():
     murk = room.copy()
     murk[20:80, 20:80] = 30  # darkest: no clip, no detail
     fix = room.copy()
-    fix[20:80, 20:80] = 150  # real midtone view, nothing clipped
+    # Textured midtone view: a flat 150 reads as paint, not a view, and
+    # the frame would rightly lose to nobody. Grain it like foliage.
+    rng = np.random.default_rng(18)
+    fix[20:80, 20:80] = np.clip(150 + rng.normal(0, 12, (60, 60, 1)), 0, 249).astype(np.uint8)
     blown = room.copy()
     blown[20:80, 20:80] = 255
     mask = np.zeros((100, 100), bool)
@@ -739,6 +747,21 @@ def test_pull_leaves_flat_sunlit_trim_takes_textured_glass():
     assert np.abs(pulled[glass].astype(int) - view[glass].astype(int)).mean() < 14, (
         "textured blown glass still takes the real view"
     )
+
+
+def test_take_mask_erodes_past_the_edge_straddle():
+    """The texture window testifies for glass up to half its width past
+    every glass/trim edge, which used to outline each mullion in dark
+    trim paint. The take gives back that band: edge-adjacent rows stay
+    from the merge, deep glass still fills."""
+    merge, view, mask = _sunlit_flat_trim_textured_glass()
+    take = segment._take_mask(merge, view, mask)
+    band = np.zeros_like(mask)
+    band[33:42, 70:130] = True  # trim-side straddle rows at the glass edge
+    assert not take[band].any(), "edge bands leave the take"
+    deep = np.zeros_like(mask)
+    deep[90:110, 70:130] = True
+    assert take[deep].all(), "deep glass still takes"
 
 
 def test_take_mask_closes_bright_dither_holes():

@@ -46,12 +46,22 @@ AGREE_GAP = 25
 #: gradient holds detail), narrow enough that flat paint stays flat.
 VIEW_TEXTURE_K = 15
 VIEW_TEXTURE_MIN = 6.0
-#: A take hole whose view pixels read at least this bright is a foliage
-#: gap onto bright sky, white in every frame: filling it changes nothing
-#: visible and keeps the shipped view one continuous region. Darker holes
+#: A take hole bright in BOTH frames on any channel is a foliage gap
+#: onto sky, white whichever frame draws it: filling it with the view's
+#: own white changes nothing visible and keeps the shipped view one
+#: continuous region instead of solarized speckle. Blue sky reads dark in
+#: gray (~170) so the test runs on channel max, not gray. Darker holes
 #: are the merge's own detail (a leaf silhouette, a mullion shadow) and
 #: stay exactly as the merge drew them.
-VIEW_BRIGHT_HOLE = 200
+HOLE_BRIGHT = 240
+#: Take erosion in pixels: the texture window straddles every glass/trim
+#: edge, so a band this wide around each boundary passes texture on the
+#: glass's testimony and would drag dark trim paint into white rooms as
+#: outlines on every mullion. Eroding past the straddle radius keeps the
+#: insert on glass the window's own texture vouches for; narrow mullions
+#: vanish whole, wide glass barely notices. The seam lands on white trim
+#: beside white glass, where no line shows.
+TAKE_ERODE_PX = 9
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -348,11 +358,14 @@ def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) ->
     carries texture (flat paint holds no scene), and the merge reads
     clearly brighter (the blowout signature) change. Trim, mullions,
     blinds and sills fail one of these and keep the merge pixel-exact.
-    Bright holes fully inside the take (foliage gaps onto white sky) fill
-    so the shipped view is one continuous region; darker holes are the
-    merge's own detail and stay. Speckle dots too small to be a pane drop.
-    Inserted pixels therefore never reach near-white, so the after count
-    can only drop against an honest before count.
+    Bright holes fully inside the take (foliage gaps onto sky, bright in
+    both frames) fill so the shipped view is one continuous region;
+    darker holes are the merge's own detail and stay. The take then
+    erodes past the texture straddle radius so edge bands and narrow
+    mullions never insert, and speckle dots too small to be a pane drop.
+    Glass pixels taken never reach near-white (filled holes match the
+    merge's own white), so the after count can only drop against an
+    honest before count.
     """
     from listing_partner.checks import CLIP_LEVEL
 
@@ -378,8 +391,20 @@ def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) ->
     if dry[0].size:
         flooded = inv.copy()
         cv2.floodFill(flooded, None, (int(dry[1][0]), int(dry[0][0])), 128)
-        holes = (flooded == 255) & mask & (view_gray >= VIEW_BRIGHT_HOLE)
+        holes = (
+            (flooded == 255)
+            & mask
+            & (view_rgb.max(axis=2) >= HOLE_BRIGHT)
+            & (merge_rgb.max(axis=2) >= HOLE_BRIGHT)
+        )
         take = raw | holes
+    # Past the straddle: edge bands and narrow mullions leave the take.
+    erode_d = 2 * TAKE_ERODE_PX + 1
+    take = cv2.erode(
+        take.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_d, erode_d))
+    ).astype(bool)
+    if not take.any():
+        return take
     # Speckle dots: connected take smaller than a thousandth of the mask
     # cannot be a pane; they would ship as isolated view dots in white.
     n, labels, stats, _ = cv2.connectedComponentsWithStats(take.astype(np.uint8), 8)
