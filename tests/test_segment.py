@@ -546,6 +546,36 @@ def test_pull_inpaints_enclosed_sky_holes():
     assert (pulled[bar] == merge[bar]).all(), "border-touching frames stay"
 
 
+def test_pull_inpaints_deep_blown_glass_but_not_trim_or_slats():
+    # A wide blown bay reaching the mask border is glass, not trim: deep
+    # and thick, it inpaints from the view. The shallow trim ring and a
+    # thin blind slat spanning the pane stay pixel-exact.
+    merge = np.full((400, 400, 3), 150, np.uint8)
+    merge[40:360, 60:340] = 255  # blown glass bay to the border
+    merge[40:46, 60:340] = 242  # shallow white trim along the top
+    merge[190:200, 60:340] = 180  # thin blind slat across the pane
+    dark = np.full((400, 400, 3), 150, np.uint8)
+    dark[40:360, 60:340] = 150
+    dark[40:46, 60:340] = 40
+    dark[190:200, 60:340] = 35
+    dark[100:300, 100:300] = 20  # dark view over the deep bay
+    mask = np.zeros((400, 400), bool)
+    mask[40:360, 60:340] = True
+    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    assert changed_outside == 0
+    bay = np.zeros_like(mask)
+    bay[105:145, 150:250] = True  # clear of the slat: filled from glass around
+    assert abs(pulled[bay].astype(int).mean() - 150) < 40, (
+        "deep blown glass takes neighboring view, not white merge"
+    )
+    trim = np.zeros_like(mask)
+    trim[42:45, 100:300] = True
+    assert (pulled[trim] == merge[trim]).all(), "shallow trim stays"
+    slat = np.zeros_like(mask)
+    slat[192:198, 100:300] = True
+    assert (pulled[slat] == merge[slat]).all(), "thin slats stay"
+
+
 def test_pull_keeps_dark_mullion_bar_from_the_merge():
     merge, dark, mask = _synthetic_brackets()
     merge[90:110, 40:160] = 120  # dark mullion bar across the blown glass

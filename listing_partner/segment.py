@@ -27,10 +27,16 @@ SPARK_MODEL = "muse-spark-1.3"
 #: View-frame gray below this holds no outdoor detail: the pixel is an
 #: interior surface (frame, trim, blind) and stays from the merge.
 VIEW_DETAIL_FLOOR = 50
-#: A kept component fully enclosed in replaced glass is inpainted from
-#: neighboring view pixels only when its merge pixels read blown at or
-#: above this gray: darker kept regions the merge already holds stay.
+#: A kept pixel inpaints from neighboring view pixels only when its
+#: merge pixel reads blown at or above this gray: darker kept regions
+#: the merge already holds stay from the merge.
 HOLE_MERGE_FLOOR = 200
+#: Inpainting reach, as fractions of the long side: trim hugs the mask
+#: edge within ~1% of the frame, blind slats and mullion bars are thinner
+#: than ~0.25%, while glass runs hundreds of pixels deep. Minima keep
+#: small test images honest.
+HOLE_DEPTH_FRAC = 0.007
+HOLE_THICK_FRAC = 0.0025
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -327,9 +333,12 @@ def pull_window(
     A mask pixel takes the view only when the view frame holds outdoor
     detail there (at or above VIEW_DETAIL_FLOOR): frames, mullions,
     blinds, sills and trim read dark in the pull frame, so they stay
-    from the merge pixel-exact. The feather ramps up inside the replaced
-    glass, so the blend never reaches the frame: no dark outline, no
-    smear.
+    from the merge pixel-exact. Kept glass the merge blows out but the
+    view reads dark is sky the dark frame underexposes: enclosed specks
+    and deep thick regions inpaint from neighboring real view pixels,
+    while edge-hugging trim, thin slats and bars, and dark held regions
+    stay. The feather ramps up inside the replaced glass, so the blend
+    never reaches the frame: no dark outline, no smear.
     The view is matched to the room with a single uniform gain that can
     only darken: it is never pushed brighter than its own frame, so a
     held view stays held. No clamp, no cap: what the view holds is what
@@ -356,16 +365,27 @@ def pull_window(
     keep = mask & ~replaced
     hole_mask = np.zeros_like(mask)
     if keep.any():
+        # Glass the merge blows out but the view reads dark inpaints from
+        # neighboring real view pixels when it is sky: enclosed specks, or
+        # deep thick regions far from any frame. Trim hugs the mask edge
+        # (shallow), blind slats and mullions are thin bars, and dark
+        # woodwork reads below the merge floor: all of those stay.
+        longside = max(mask.shape)
+        depth = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
+        thick = cv2.distanceTransform(keep.astype(np.uint8), cv2.DIST_L2, 3)
+        deep = depth >= max(8.0, longside * HOLE_DEPTH_FRAC)
+        stout = thick >= max(3.0, longside * HOLE_THICK_FRAC)
+        blown = merge_gray >= HOLE_MERGE_FLOOR
         count, labels, _, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), 8)
-        kernel = np.ones((3, 3), np.uint8)
-        for label in range(1, count):
-            comp = labels == label
-            touches_outside = (cv2.dilate(comp.astype(np.uint8), kernel).astype(bool) & ~mask).any()
-            if touches_outside:
-                continue
-            if float(np.median(merge_gray[comp].astype(float))) < HOLE_MERGE_FLOOR:
-                continue
-            hole_mask |= comp
+        touching = np.zeros_like(mask)
+        touching[1:, :] |= keep[1:, :] & ~mask[:-1, :]
+        touching[:-1, :] |= keep[:-1, :] & ~mask[1:, :]
+        touching[:, 1:] |= keep[:, 1:] & ~mask[:, :-1]
+        touching[:, :-1] |= keep[:, :-1] & ~mask[:, 1:]
+        touched_labels = set(np.unique(labels[touching]).tolist()) - {0}
+        all_labels = set(np.unique(labels[keep]).tolist()) - {0}
+        enclosed = np.isin(labels, list(all_labels - touched_labels))
+        hole_mask = keep & blown & (enclosed | (deep & stout))
     if not replaced.any() and not hole_mask.any():
         return merge_rgb.copy(), 0
     room = ~mask
@@ -376,14 +396,17 @@ def pull_window(
         gain = min(1.0, float(merge_lum) / max(1e-6, float(view_lum)))
         matched *= gain
     if hole_mask.any():
+        # Blown keep conduits join the inpaint region so brightness from
+        # replaced glass reaches the holes past the dark keep band; only
+        # hole pixels are taken, conduits (trim included) stay from the
+        # merge.
         paint = np.clip(matched, 0, 255).astype(np.uint8)
-        matched = cv2.inpaint(paint, hole_mask.astype(np.uint8), 3, cv2.INPAINT_TELEA).astype(
+        region = hole_mask | (keep & blown)
+        filled = cv2.inpaint(paint, region.astype(np.uint8), 3, cv2.INPAINT_TELEA).astype(
             np.float32
         )
+        matched[hole_mask] = filled[hole_mask]
         replaced |= hole_mask
-    feather = max(2, int(round(max(mask.shape) * 0.002)))
-    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
-    alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
     feather = max(2, int(round(max(mask.shape) * 0.002)))
     dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
     alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
