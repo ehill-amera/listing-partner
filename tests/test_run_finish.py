@@ -86,6 +86,32 @@ def test_finish_tail_pulls_from_best_frame_not_darkest(tmp_path):
     assert record["checks"]["highlights"][0] is True
 
 
+def test_finish_tail_with_no_mask_reports_not_measured(tmp_path):
+    from listing_partner import run_finish as rf
+
+    state, _ = _tail_state()
+    dirs = {
+        "finished": tmp_path / "finished",
+        "review": tmp_path / "review",
+        "masks": tmp_path / "masks",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True)
+    record = {
+        "index": 2,
+        "name": "002",
+        "straight_before": 360.0,
+        "straight_after": 360.0,
+        "distortion_applied": False,
+        "vertical_residual": None,
+    }
+    rf.finish_tail(record, state, dirs, np.zeros((100, 100), bool))
+    assert record["pull_frame"] is None
+    for label in ("highlights", "outside", "straightness", "verticals"):
+        ok, reason = record["checks"][label]
+        assert ok is False and "not measured" in reason, label
+
+
 def test_summarize_uses_median_noise_and_pooled_clip():
     from listing_partner import run_finish as rf
 

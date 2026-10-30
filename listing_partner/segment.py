@@ -167,7 +167,10 @@ VERIFY_PROMPT = (
     "Numbered red boxes mark window candidates in this room photo. "
     "For EACH numbered box reply one line exactly like: "
     "ID: window - reason OR ID: not a window - reason. "
-    "A real window shows the outdoors (sky, trees, buildings, street). "
+    "A real window is seen from INSIDE the room and shows the outdoors "
+    "(sky, trees, buildings, street). Glass photographed from OUTSIDE "
+    "(a house facade, a neighbor's windows, a garage or shed window) is "
+    "not a view to the outdoors: reject it, naming what it actually is. "
     "Reject mirrors, screens, framed pictures, light fixtures and cabinet "
     "glass, naming what it actually is. If one box needs a closer look, "
     "reply only: CROP x,y,w,h in these photo pixels."
@@ -284,13 +287,14 @@ def choose_pull_frame(
 ) -> int:
     """Index of the frame whose window region is best exposed.
 
-    Fewest near-white pixels (threshold 250, the same level the
-    highlights check measures) wins. Ties go to the frame closest to
-    the merge: when the merge already holds the view, the pull changes
-    it the least, so clean windows gain nothing. Never the darkest
-    frame by default: an almost-black frame holds no view at all.
+    Fewest near-white pixels on any channel (threshold 250, the same
+    level the highlights check measures) wins. Ties go to the frame
+    closest to the merge: when the merge already holds the view, the
+    pull changes it the least, so clean windows gain nothing. Never the
+    darkest frame by default: an almost-black frame holds no view at
+    all.
     """
-    from listing_partner.checks import CLIP_LEVEL
+    from listing_partner.checks import clipped_fraction
 
     ref_mean = None
     if ref is not None and mask.any():
@@ -298,7 +302,7 @@ def choose_pull_frame(
 
     def score(frame: np.ndarray) -> tuple[float, float]:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        clip = float((gray[mask] >= CLIP_LEVEL).mean()) if mask.any() else 0.0
+        clip = clipped_fraction(frame[mask]) if mask.any() else 0.0
         mean = float(gray[mask].mean()) if mask.any() else 0.0
         tie = abs(mean - ref_mean) if ref_mean is not None else -mean
         return (clip, tie)

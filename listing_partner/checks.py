@@ -13,19 +13,29 @@ EDGE_TOLERANCE = 0.10
 CLIP_LEVEL = 250
 
 
-def clipped_fraction(gray) -> float:
-    """Fraction of pixels at or above the clipped level."""
+def clipped_fraction(rgb) -> float:
+    """Fraction of pixels near-white on any channel at the clipped level.
+
+    Takes an RGB array: a pixel counts when its brightest channel reaches
+    CLIP_LEVEL, exactly what criterion 4 measures. Grayscale understates
+    blowout (a blown blue sky reads gray 160), so gray must never come in.
+    """
     import numpy as np
 
-    return float((np.asarray(gray) >= CLIP_LEVEL).mean())
+    return float((np.asarray(rgb).max(axis=-1) >= CLIP_LEVEL).mean())
 
 
-def check_highlights(clip_before: float, clip_after: float) -> tuple[bool, str]:
+def check_highlights(
+    clip_before: float, clip_after: float, window_pixels: int | None = None
+) -> tuple[bool, str]:
     """Window highlights held, measured on the final output with no clamp.
 
     Near-white window pixels must drop when the window had any, and a
-    window with none must gain none.
+    window with none must gain none. With no window pixels at all there
+    is nothing to measure: never a pass.
     """
+    if window_pixels == 0:
+        return False, "not measured: no confirmed window pixels"
     if clip_before > 0:
         ok = clip_after < clip_before
     else:
@@ -33,8 +43,16 @@ def check_highlights(clip_before: float, clip_after: float) -> tuple[bool, str]:
     return ok, f"clipped {clip_before:.4f} -> {clip_after:.4f} of window pixels"
 
 
-def check_outside_unchanged(changed_outside: int) -> tuple[bool, str]:
-    """Step B changes nothing outside the window masks."""
+def check_outside_unchanged(
+    changed_outside: int, window_pixels: int | None = None
+) -> tuple[bool, str]:
+    """Step B changes nothing outside the window masks.
+
+    With no mask the step had nothing to change: not measured, never
+    a pass.
+    """
+    if window_pixels == 0:
+        return False, "not measured: no window mask, step B had nothing to change"
     ok = changed_outside == 0
     return ok, f"{changed_outside} pixels changed outside masks"
 
@@ -55,9 +73,15 @@ def check_edges(edge_before: float, edge_after: float) -> tuple[bool, str]:
 
 
 def check_straightness(
-    topmean_before: float | None, topmean_after: float | None
+    topmean_before: float | None, topmean_after: float | None, corrected: bool = True
 ) -> tuple[bool, str]:
-    """Line straightness improves after correction."""
+    """Line straightness improves after correction.
+
+    corrected=False means no correction ran, so before and after are the
+    same image: not measured, never a pass.
+    """
+    if not corrected:
+        return False, "not measured: no lens correction applied, same image both sides"
     if topmean_before is None or topmean_after is None:
         return False, "not measured: too few line segments to compare"
     ok = topmean_after >= topmean_before

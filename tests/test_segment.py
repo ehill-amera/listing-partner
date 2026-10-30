@@ -81,6 +81,30 @@ def test_verify_parses_spark_verdicts(tmp_path, monkeypatch):
     assert verdicts[2][0] is True
 
 
+def test_verify_prompt_sends_the_facade_rule(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
+    ledger = tmp_path / "ledger.jsonl"
+    seen = []
+
+    def _spark(url, headers, body):
+        seen.append(body)
+        return {
+            "id": "r-f",
+            "text": "0: not a window - facade glass seen from outside\n",
+            "usage": {"input_tokens": 900, "output_tokens": 20},
+        }
+
+    photo = np.zeros((100, 100, 3), np.uint8)
+    verdicts = segment.verify_candidates(
+        photo,
+        [{"object_id": 0, "box": (10, 10, 50, 50)}],
+        transport=_spark,
+        ledger_path=ledger,
+    )
+    assert verdicts[0] == (False, "facade glass seen from outside")
+    assert "facade" in seen[0].decode("utf-8"), "Spark must get the facade rule"
+
+
 def test_verify_zooms_to_skipped_candidates(tmp_path, monkeypatch):
     monkeypatch.setenv("META_API_KEY", "test-key-never-a-real-secret")
     ledger = tmp_path / "ledger.jsonl"
@@ -354,6 +378,21 @@ def test_choose_pull_frame_skips_blown_and_empty_views():
     merge, frames, mask = _three_frames()
     assert segment.choose_pull_frame(frames, mask) == 1, (
         "the view comes from the best-exposed frame, not the darkest"
+    )
+
+
+def test_choose_pull_frame_sees_single_channel_blowout():
+    room = np.full((100, 100, 3), 40, np.uint8)
+    blue_blown = room.copy()
+    blue_blown[20:80, 20:80] = (150, 150, 255)  # gray 162, blue blown
+    clean = room.copy()
+    clean[20:80, 20:80] = 120
+    merge = room.copy()
+    merge[20:80, 20:80] = 160  # closer to the blowout than to clean
+    mask = np.zeros((100, 100), bool)
+    mask[20:80, 20:80] = True
+    assert segment.choose_pull_frame([blue_blown, clean], mask, ref=merge) == 1, (
+        "near-white on any channel at 250 counts as clipped, even when gray stays dark"
     )
 
 

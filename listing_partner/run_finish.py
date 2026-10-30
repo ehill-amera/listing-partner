@@ -201,8 +201,9 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     balanced_cropped = geometry.crop_valid(balanced, valid)
     window_pixels = int(union.sum())
     if window_pixels:
-        gray_before = cv2.cvtColor(balanced_cropped, cv2.COLOR_RGB2GRAY)
-        clip_before_n = int(((gray_before >= CLIP_LEVEL) & union).sum())
+        # Any channel at 250, as the contract says: grayscale understates
+        # blowout, and a result shaped by clamping would not count.
+        clip_before_n = int(((balanced_cropped.max(axis=2) >= CLIP_LEVEL) & union).sum())
     else:
         clip_before_n = 0
     record["window_pixels"] = window_pixels
@@ -217,8 +218,7 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     reread = cv2.imread(str(finished_path))
     reread_rgb = cv2.cvtColor(reread, cv2.COLOR_BGR2RGB)
     if window_pixels:
-        gray_after = cv2.cvtColor(reread_rgb, cv2.COLOR_RGB2GRAY)
-        clip_after_n = int(((gray_after >= CLIP_LEVEL) & union).sum())
+        clip_after_n = int(((reread_rgb.max(axis=2) >= CLIP_LEVEL) & union).sum())
     else:
         clip_after_n = 0
     record["clip_after_n"] = clip_after_n
@@ -226,12 +226,14 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     record["clip_after"] = round(clip_after_raw, 4)
 
     record["checks"] = {
-        "highlights": checks.check_highlights(clip_before_raw, clip_after_raw),
-        "outside": checks.check_outside_unchanged(changed_outside),
+        "highlights": checks.check_highlights(clip_before_raw, clip_after_raw, window_pixels),
+        "outside": checks.check_outside_unchanged(changed_outside, window_pixels),
         "noise": checks.check_noise(noise_before, record["noise_after"]),
         "edges": checks.check_edges(edge_before, record["edge_after"]),
         "straightness": checks.check_straightness(
-            record["straight_before"], record["straight_after"]
+            record["straight_before"],
+            record["straight_after"],
+            record.get("distortion_applied", True),
         ),
         "verticals": checks.check_verticals(record["vertical_residual"]),
     }
