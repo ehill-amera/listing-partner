@@ -127,6 +127,22 @@ def test_denoise_compared_on_shared_patches():
     )
 
 
+def test_shared_look_constants_stay_frozen():
+    assert finish.INTERIOR_TARGET_MEDIAN == 194.0
+    assert finish.SKY_FRACTION_CUT == 0.001
+    assert finish.EXTERIOR_SKY_SLOPE == 240.0
+    assert finish.EXTERIOR_BASE_MEDIAN == 111.0
+    assert finish.EXTERIOR_MIN_MEDIAN == 108.0
+    assert finish.EXTERIOR_MAX_MEDIAN == 144.0
+    assert finish.SHADOW_LIFT == 0.4
+    assert finish.LOOK_GAMMA == 0.9
+    assert finish.SHOULDER_SLOPE == 0.07
+    assert (finish.AUTO_GAIN_LO, finish.AUTO_GAIN_HI) == (0.4, 3.5)
+    assert finish.WB_BRIGHT_PERCENTILE == 90.0
+    assert finish.WB_INTERIOR_STRENGTH == 0.95
+    assert finish.WB_EXTERIOR_STRENGTH == 0.4
+
+
 def test_flat_patches_cover_a_uniform_image():
     uniform = np.full((100, 100, 3), 150, np.uint8)
     patches = finish.flat_patch_mask(uniform)

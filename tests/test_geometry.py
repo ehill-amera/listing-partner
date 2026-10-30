@@ -115,6 +115,21 @@ def test_correct_verticals_uprights_tilted_bar():
     assert abs(geometry.dominant_vertical_angle(fixed)) < 0.5
 
 
+def test_weighted_median_follows_length_not_mode():
+    found = [(-2.0, 100.0), (-2.0, 100.0), (0.0, 100.0), (2.0, 100.0), (2.0, 100.0)]
+    assert geometry.weighted_median_angle(found) == 0.0, (
+        "the middle of the length sits at zero even though the longest "
+        "leaning pile would win a squared vote"
+    )
+    assert geometry.agreement_share(found, 0.0) < geometry.VERT_MIN_AGREE_SHARE
+
+
+def test_scattered_segments_vote_unknown():
+    found = [(float(a), 50.0) for a in range(-9, 10)]
+    median = geometry.weighted_median_angle(found)
+    assert geometry.agreement_share(found, median) < geometry.VERT_MIN_AGREE_SHARE
+
+
 def test_no_vertical_lines_means_unknown_not_level():
     assert geometry.dominant_vertical_angle(np.zeros((200, 200), np.uint8)) is None
     img, rotation = geometry.correct_verticals(np.zeros((200, 200), np.uint8))

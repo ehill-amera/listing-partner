@@ -112,6 +112,102 @@ def test_finish_tail_with_no_mask_reports_not_measured(tmp_path):
         assert ok is False and "not measured" in reason, label
 
 
+def test_build_inputs_measures_straightness_on_the_same_frame(monkeypatch):
+    """Lens straightness compares the middle frame raw vs corrected.
+
+    Only the pixel decode is stubbed (the far side); EXIF, the real lens
+    profile, the real displacement math and the real merge run. Strength
+    is fixed so the corrected side is deterministic.
+    """
+    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
+    assert len(members) == 5
+    fake = _synthetic_frame()
+    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.5)
+
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    run_finish.build_inputs(members, record)
+
+    assert record["straight_before"] == geometry.line_measure(fake)
+    profile = geometry.load_profile()
+    mid_focal = geometry.read_focal(members[len(members) // 2]) or 10.0
+    expected_after, _ = geometry.correct_distortion(fake, profile, mid_focal, strength=0.5)
+    assert record["straight_after"] == geometry.line_measure(expected_after)
+    assert record["distortion_applied"] is True
+
+
+def test_build_inputs_names_uncorrected_frames_not_measured(monkeypatch):
+    from listing_partner import checks
+
+    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
+    fake = _synthetic_frame()
+    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.0)
+    monkeypatch.setattr(geometry, "tca_params", lambda profile, focal: None)
+
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    run_finish.build_inputs(members, record)
+
+    assert record["distortion_applied"] is False
+    assert record["straight_after"] is None
+    ok, reason = checks.check_straightness(
+        record["straight_before"], record["straight_after"], record["distortion_applied"]
+    )
+    assert ok is False and "not measured" in reason
+
+
+def test_unit_spend_counts_actuals_and_open_reservations(tmp_path):
+    import json
+
+    from listing_partner import run_finish as rf
+
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-10-29T10:00:00+00:00",
+                        "model": "muse-spark-1.3",
+                        "estimated_usd": 1.0,
+                        "actual_usd": None,
+                        "request_id": None,
+                        "call_id": "a",
+                        "status": "reserved",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-10-29T10:00:01+00:00",
+                        "model": "muse-spark-1.3",
+                        "estimated_usd": 1.0,
+                        "actual_usd": 0.8,
+                        "coverage_ratio": 1.25,
+                        "request_id": "r-a",
+                        "call_id": "a",
+                        "status": "complete",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-10-29T10:00:02+00:00",
+                        "model": "muse-spark-1.3",
+                        "estimated_usd": 0.3,
+                        "actual_usd": None,
+                        "request_id": None,
+                        "call_id": "b",
+                        "status": "reserved",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    baseline, unit = rf._unit_spend_usd(None, ledger)
+    assert baseline == rf.UNIT2_SPEND_BASELINE_USD
+    assert unit == round(0.8 + 0.3 - baseline, 6)
+
+
 def test_summarize_uses_median_noise_and_pooled_clip():
     from listing_partner import run_finish as rf
 
@@ -204,3 +300,6 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
     assert "window outline over the finished photo" in html
     assert "NOT MEASURED" in html
     assert "skipped: x" in html
+    assert "fitted on these same 16 photos" in html, (
+        "the page must say plainly the shared look was fitted on these photos"
+    )

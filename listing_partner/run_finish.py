@@ -92,27 +92,47 @@ def build_inputs(
     record["frames_reason"] = f"{best_key}: {best_score}"
     record["darkest_available"] = hdr.darkest_for_windows(members).name
 
+    # Lens straightness on the same frame before and after: the middle
+    # frame raw from the decoder, then that frame lens-corrected. When
+    # the correction left the frame untouched the two are the same image
+    # and the check reports not measured instead of a hollow pass.
+    mid = len(decoded) // 2
+    straight_before = geometry.line_measure(decoded[mid])
+    if np.array_equal(decoded[mid], corrected[mid]):
+        record["distortion_applied"] = False
+        straight_after = None
+    else:
+        record["distortion_applied"] = True
+        straight_after = geometry.line_measure(corrected[mid])
+    record["straight_before"] = straight_before
+    record["straight_after"] = straight_after
+
     gray = cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY)
-    # Before and after on the same image: the merged room photo going
-    # into vertical correction, so the improvement is that step's own.
-    straight_before = geometry.line_measure(gray)
+    # Verticals before and after on the merged room photo going into and
+    # out of rotation, by the length-weighted median of near-vertical
+    # segments. Rotation repeats until the residual is within half a
+    # degree; perspective correction is out of scope for this unit.
     tilt = geometry.dominant_vertical_angle(gray)
+    record["vertical_before"] = tilt
     # Keep the undistort validity above: rotations blacken more borders,
     # they never repair undistort's. Resetting here kept ~20px black bands.
     if geometry.needs_rotation(tilt):
         merged, applied = geometry.correct_verticals(merged)
         valid &= geometry.rotation_valid_mask(*gray.shape, applied)
-        record["verticals"] = f"rotated {applied:.2f} deg to upright"
+        residual = geometry.dominant_vertical_angle(cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY))
+        record["verticals"] = (
+            f"rotated {applied:.2f} deg to upright "
+            f"(tilt {tilt:.2f} -> {residual if residual is None else f'{residual:.2f}'} deg)"
+        )
     elif tilt is not None:
         applied = 0.0
+        residual = tilt
         record["verticals"] = f"level already (tilt {tilt:.2f} deg from verticals)"
     else:
         applied = 0.0
+        residual = None
         record["verticals"] = "no agreeing verticals found (not measured)"
-    residual = geometry.dominant_vertical_angle(cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY))
     record["vertical_residual"] = residual
-    record["straight_before"] = straight_before
-    record["straight_after"] = geometry.line_measure(cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY))
 
     # The gain anchors on the exact pixels the final crop keeps: the
     # centered crop can cut valid-but-dark edges past the validity mask,
@@ -448,6 +468,9 @@ rejected {top["windows_rejected"]}, photos with windows {top["photos_with_window
 of {top["window_pixels"]} window pixels
 ({top["clip_before_pct"]:.2f}% -&gt; {top["clip_after_pct"]:.2f}%).</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
+<p>The shared look settings behind these photos were fitted on these same 16 photos
+against their MLS twins. They are frozen from this round on: unit 5 measures the
+same settings, unchanged, on a held-out set.</p>
 {"".join(rows)}
 <footer><p>{spend_line}</p></footer>
 </body></html>"""
@@ -463,6 +486,32 @@ def _median(values: list[float]) -> float:
         return 0.0
     mid = n // 2
     return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+#: Ledger total before this unit's first Meta call: unit 1's 3 live calls
+#: of Oct 26 ($0.000988; every later line is this unit's). Measured from
+#: the ledger, 2026-10-30, not estimated.
+UNIT2_SPEND_BASELINE_USD = 0.000988
+
+
+def _unit_spend_usd(prior: dict | None, ledger_path=None) -> tuple[float, float]:
+    """(baseline, unit_spend) from the ledger.
+
+    The unit spent what the ledger holds now minus what it held before
+    the unit's first call. The live total counts settled calls at actual
+    cost and open reservations at estimate, so two unsettled lines can
+    never understate the spend. When the ledger cannot be read, the
+    prior number stands instead of a fresh zero.
+    """
+    baseline = (prior or {}).get("spend_baseline_usd", UNIT2_SPEND_BASELINE_USD)
+    fallback = (prior or {}).get("summary", {}).get("unit_spend_usd", 0.0)
+    try:
+        total = read_spend_total(ledger_path)
+    except MetaRefused:
+        return baseline, fallback
+    if total < baseline:
+        return baseline, fallback
+    return baseline, round(total - baseline, 6)
 
 
 def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> dict:
@@ -553,7 +602,6 @@ def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, d
     manifest_path = output_dir / "finish_manifest.json"
     prior_manifest = json.loads(manifest_path.read_text())
     prior = {r["index"]: r for r in prior_manifest["sets"]}
-    prior_spend = prior_manifest.get("summary", {}).get("unit_spend_usd", 0.0)
     records = []
     started = time.perf_counter()
     for number, members in enumerate(sets, 1):
@@ -573,8 +621,9 @@ def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, d
         records.append(record)
     elapsed = time.perf_counter() - started
     attach_look(records, mls_matches, mls_dir, output_dir)
-    summary = _summarize(records, elapsed, prior_spend)
-    manifest = {"summary": summary, "sets": records}
+    baseline, unit_spend = _unit_spend_usd(prior_manifest)
+    summary = _summarize(records, elapsed, unit_spend)
+    manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     ensure_merge_thumbs(output_dir, manifest)
     build_finish_review(output_dir, manifest, mls_matches)
@@ -609,15 +658,15 @@ def run_finish(
     for photo in mls_dir.glob("*.jpg"):
         with Image.open(photo) as img:
             save_clean_jpeg(np.asarray(img.convert("RGB")), review_dir / f"mls_{photo.name}")
-    try:
-        spend_start = read_spend_total()
-    except MetaRefused:
-        spend_start = 0.0
     dirs = {"finished": finished_dir, "masks": masks_dir, "review": review_dir}
     if replay:
         if only is not None:
             raise ValueError("--replay processes every set, it cannot combine with --only")
         return run_replay(sets, mls_matches, mls_dir, output_dir, dirs)
+    prior_manifest = None
+    manifest_path = output_dir / "finish_manifest.json"
+    if only is not None and manifest_path.exists():
+        prior_manifest = json.loads(manifest_path.read_text())
     records = []
     started = time.perf_counter()
     for number, members in enumerate(sets, 1):
@@ -628,16 +677,8 @@ def run_finish(
         status = f"FAILED {record['error']}" if record.get("error") else "finished"
         print(f"set {number}/{len(sets)}: {status}", flush=True)
     elapsed = time.perf_counter() - started
-    try:
-        spend_end = read_spend_total()
-    except MetaRefused:
-        spend_end = spend_start
-    summary = _summarize(records, elapsed, round(spend_end - spend_start, 6))
-    manifest_path = output_dir / "finish_manifest.json"
-    if only is not None and manifest_path.exists():
-        prior_manifest = json.loads(manifest_path.read_text())
+    if prior_manifest is not None:
         prior = {r["index"]: r for r in prior_manifest["sets"]}
-        prior_spend = prior_manifest.get("summary", {}).get("unit_spend_usd", 0.0)
         merged_records = []
         for number in range(1, len(sets) + 1):
             fresh = next((r for r in records if r["index"] == number), None)
@@ -645,9 +686,10 @@ def run_finish(
                 fresh if fresh is not None else prior.get(number, {"index": number})
             )
         records = merged_records
-        summary = _summarize(records, elapsed, round(prior_spend + (spend_end - spend_start), 6))
+    baseline, unit_spend = _unit_spend_usd(prior_manifest)
+    summary = _summarize(records, elapsed, unit_spend)
     attach_look(records, mls_matches, mls_dir, output_dir)
-    manifest = {"summary": summary, "sets": records}
+    manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     ensure_merge_thumbs(output_dir, manifest)
     build_finish_review(output_dir, manifest, mls_matches)

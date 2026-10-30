@@ -381,23 +381,27 @@ def rotate_image(img: np.ndarray, angle_deg: float) -> tuple[np.ndarray, float]:
 
 
 #: Detection runs at this width: full-res interiors carry long structural
-#: lines, but the old full-res minimum (a fifth of the long side) missed
-#: every door frame in unit-a. Review size keeps them whole.
+#: lines. Review size keeps them whole.
 VERT_REVIEW_WIDTH = 1200
-#: Near-vertical window, histogram bin, minimum peak share and minimum
-#: total near-vertical length (as a fraction of the long side). Below any
-#: of them the photo votes unknown, never level.
+#: Near-vertical window, agreement window, minimum agreement share and
+#: minimum total near-vertical length (as a fraction of the long side).
+#: Below any of them the photo votes unknown, never level.
 VERT_ANGLE_WINDOW = 10.0
-VERT_BIN_DEG = 0.5
-#: A real plurality of the length-squared evidence agrees on the peak:
-#: unit-a interiors put 32-100% there (runner-up half that or less),
-#: wooded lots scatter 19-25% across leaning trunks.
-VERT_MIN_PEAK_SHARE = 0.30
+VERT_AGREE_WINDOW = 1.0
+#: Unit-a interiors put 49-85% of their near-vertical length within a
+#: degree of the median; wooded lots scatter 25-36% across leaning
+#: trunks. Measured on unit-a's merges, 2026-10-30.
+VERT_MIN_AGREE_SHARE = 0.40
 VERT_MIN_TOTAL_FRAC = 0.3
 
 
 def _near_vertical_segments(gray: np.ndarray) -> list[tuple[float, float]]:
-    """(angle_deg, length) of near-vertical segments at review size."""
+    """(angle_deg, length) of near-vertical segments at review size.
+
+    LSD segments (subpixel endpoints): HoughLinesP snaps near-vertical
+    pixel runs to exactly 0 degrees, which drags any median toward zero
+    no matter what the walls do.
+    """
     h, w = gray.shape
     scale = VERT_REVIEW_WIDTH / max(h, w)
     if scale < 1.0:
@@ -408,15 +412,7 @@ def _near_vertical_segments(gray: np.ndarray) -> list[tuple[float, float]]:
         )
     else:
         small = gray
-    edges = cv2.Canny(small, 50, 150)
-    segs = cv2.HoughLinesP(
-        edges,
-        1,
-        np.pi / 180,
-        30,
-        minLineLength=0.05 * max(small.shape),
-        maxLineGap=10,
-    )
+    segs = cv2.createLineSegmentDetector().detect(small)[0]
     found = []
     if segs is None:
         return found
@@ -428,12 +424,32 @@ def _near_vertical_segments(gray: np.ndarray) -> list[tuple[float, float]]:
     return found
 
 
+def weighted_median_angle(found: list[tuple[float, float]]) -> float:
+    """Length-weighted median of segment angles."""
+    ordered = sorted(found)
+    total = sum(length for _, length in ordered)
+    acc = 0.0
+    for angle, length in ordered:
+        acc += length
+        if acc >= total / 2.0:
+            return float(angle)
+    return float(ordered[-1][0])
+
+
+def agreement_share(found: list[tuple[float, float]], median: float) -> float:
+    """Share of near-vertical length within one degree of the median."""
+    total = sum(length for _, length in found)
+    near = sum(length for angle, length in found if abs(angle - median) <= VERT_AGREE_WINDOW)
+    return near / total if total > 0 else 0.0
+
+
 def dominant_vertical_angle(gray: np.ndarray) -> float | None:
     """Tilt of near-vertical lines in degrees (positive tips right).
 
-    Length-squared voting over a histogram peak, so one long door frame
-    outvotes scattered short edges (and leaning trees lose to agreeing
-    walls). None when too little agrees: not level, unknown.
+    The length-weighted median angle of near-vertical segments: long
+    wall and door-frame edges outvote scattered short edges by their
+    length. None when too little agrees (wooded lots, blank walls):
+    not level, unknown.
     """
     gray = gray if gray.ndim == 2 else cv2.cvtColor(gray, cv2.COLOR_RGB2GRAY)
     found = _near_vertical_segments(gray)
@@ -445,17 +461,10 @@ def dominant_vertical_angle(gray: np.ndarray) -> float | None:
     review_long = min(VERT_REVIEW_WIDTH, float(max(h, w)))
     if sum(L for _, L in found) < VERT_MIN_TOTAL_FRAC * review_long:
         return None
-    bins: dict[float, float] = {}
-    for angle, length in found:
-        center = round(angle / VERT_BIN_DEG) * VERT_BIN_DEG
-        bins[center] = bins.get(center, 0.0) + length * length
-    total = sum(bins.values())
-    peak = max(bins, key=lambda c: bins[c])
-    if bins[peak] / total < VERT_MIN_PEAK_SHARE:
+    median = weighted_median_angle(found)
+    if agreement_share(found, median) < VERT_MIN_AGREE_SHARE:
         return None
-    near = [a for a, _ in found if abs(a - peak) <= 1.5 * VERT_BIN_DEG]
-    weights = [L * L for a, L in found if abs(a - peak) <= 1.5 * VERT_BIN_DEG]
-    return float(sum(a * w for a, w in zip(near, weights)) / sum(weights))
+    return median
 
 
 def line_measure(gray: np.ndarray, width: int = 1500) -> float | None:
@@ -486,14 +495,29 @@ def needs_rotation(tilt: float | None) -> bool:
 
 def correct_verticals(img: np.ndarray) -> tuple[np.ndarray, float | None]:
     """Rotate so near-vertical lines come out vertical. Returns the image
-    and the applied rotation in degrees (None, image untouched, when no
-    near-vertical lines exist to read)."""
+    and the total applied rotation in degrees (None, image untouched,
+    when no near-vertical lines exist to read).
+
+    Rotates until the re-measured tilt is within half a degree (three
+    tries at most): one rotation lands a clean reading almost exactly,
+    and the loop only matters when the first estimate was rough.
+    """
     gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     tilt = dominant_vertical_angle(gray)
     if tilt is None:
         return img, None
-    fixed, _ = rotate_image(img, -tilt)
-    return fixed, -tilt
+    applied = 0.0
+    fixed = img
+    for _ in range(3):
+        fixed, _ = rotate_image(fixed, -tilt)
+        applied += -tilt
+        residual = dominant_vertical_angle(
+            fixed if fixed.ndim == 2 else cv2.cvtColor(fixed, cv2.COLOR_RGB2GRAY)
+        )
+        if residual is None or abs(residual) <= 0.5:
+            break
+        tilt = residual
+    return fixed, applied
 
 
 def crop_valid_rect(valid: np.ndarray) -> tuple[int, int, int, int]:

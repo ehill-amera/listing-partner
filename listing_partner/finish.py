@@ -12,11 +12,14 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-#: The one shared look, tuned once against Erik's MLS photos (see the unit
-#: 02 report for the tuning), then frozen. Every photo gets the same
-#: constants; per-photo automatic exposure and white balance adapt to the
-#: photo's own pixels only. Processing never reads the photo's MLS twin:
-#: a new listing has no MLS photo to copy.
+#: The one shared look. These constants were fitted on these same 16
+#: unit-a photos against their MLS twins, and the report says so
+#: plainly: they are frozen from this round on, and unit 5 measures the
+#: same settings, unchanged, on Erik's home set as the honest held-out
+#: test. Every photo gets the same constants; per-photo automatic
+#: exposure and white balance adapt to the photo's own pixels only.
+#: Processing never reads the photo's MLS twin: a new listing has no
+#: MLS photo to copy.
 #: Interior rooms finish bright and airy; exterior shots finish at their
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
