@@ -554,6 +554,44 @@ def _settle(
     os.fsync(handle.fileno())
 
 
+def reserve_ratio_stats(ledger_path: Path | None = None) -> dict:
+    """Reservation-to-bill stats over settled ledger lines.
+
+    worst is the largest estimated/actual ratio: reservations must cover
+    the bill, so anything under 1 is counted in under_one. Open
+    reservations never join a ratio. A missing file means no call was
+    ever recorded (zeros); anything unreadable or corrupt raises
+    LedgerError instead of reading as clean.
+    """
+    path = Path(ledger_path) if ledger_path is not None else default_ledger_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"worst": 0.0, "under_one": 0, "settled": 0}
+    except OSError as exc:
+        raise LedgerError(f"ledger unreadable: {exc}") from exc
+    worst, under_one, settled = 0.0, 0, 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+            estimated, actual = float(entry["estimated_usd"]), entry["actual_usd"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise LedgerError(f"ledger corrupt: {exc}") from exc
+        if actual is None:
+            continue
+        actual = float(actual)
+        if actual <= 0:
+            raise LedgerError("ledger holds a non-positive settled cost")
+        settled += 1
+        ratio = estimated / actual
+        worst = max(worst, ratio)
+        if ratio < 1:
+            under_one += 1
+    return {"worst": worst, "under_one": under_one, "settled": settled}
+
+
 def read_spend_total(ledger_path: Path | None = None) -> float:
     """Current total (actuals where settled, estimates where reserved).
 

@@ -43,41 +43,77 @@ def build_inputs(
     identity = geometry.read_lens_identity(members[len(members) // 2])
     profile = geometry.match_profile(identity)
     record["focal"] = sorted({f for f in focals if f})
-    if profile is None:
-        raise ValueError("no lens profile matches this lens, geometry skipped")
-    record["lens"] = "Nikon AF-P DX 10-20mm (vendored lensfun profile)"
-    mid_focal = focals[len(focals) // 2] or 10.0
-    if geometry.vignetting_params(profile, mid_focal) is None:
-        record["vignetting"] = (
-            "skipped: the vendored lensfun profile carries no vignetting model for this lens"
-        )
-    else:
-        record["vignetting"] = "applied from the lens profile"
-
     decoded = [hdr.decode_frame(p) for p in members]
-    strengths: dict[float, float] = {}
-    corrected = []
-    for frame, path, frame_focal in zip(decoded, members, focals):
-        frame_focal = frame_focal or 10.0
-        if frame_focal not in strengths:
-            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-            strengths[frame_focal] = geometry.fit_strength(gray, profile, frame_focal)
-        fixed, applied_strength = geometry.correct_distortion(
-            frame, profile, frame_focal, strength=strengths[frame_focal]
+    if profile is None:
+        # Contract A0: with no profile the step is skipped for this photo
+        # and the page says so. Frames go through uncorrected; every later
+        # step still runs, so one odd lens never fails a photo.
+        record["lens"] = "skipped: no lens profile matches this lens"
+        record["vignetting"] = "skipped: no lens profile to correct from"
+        record["tca"] = "skipped: no lens profile"
+        record["distortion_strength"] = {}
+        corrected = [frame.copy() for frame in decoded]
+        record["distortion_applied"] = False
+        record["straight_before"] = geometry.line_measure(decoded[len(decoded) // 2])
+        record["straight_after"] = None
+        record["ghosting"] = round(geometry.ghosting_score(corrected), 4)
+        h0, w0 = corrected[0].shape[:2]
+        valid = np.ones((h0, w0), bool)
+    else:
+        record["lens"] = "Nikon AF-P DX 10-20mm (vendored lensfun profile)"
+        mid_focal = focals[len(focals) // 2] or 10.0
+        if geometry.vignetting_params(profile, mid_focal) is None:
+            record["vignetting"] = (
+                "skipped: the vendored lensfun profile carries no vignetting model for this lens"
+            )
+        else:
+            record["vignetting"] = "applied from the lens profile"
+
+        strengths: dict[float, float] = {}
+        corrected = []
+        tca_ran = False
+        for frame, path, frame_focal in zip(decoded, members, focals):
+            frame_focal = frame_focal or 10.0
+            if frame_focal not in strengths:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                strengths[frame_focal] = geometry.fit_strength(gray, profile, frame_focal)
+            fixed, applied_strength = geometry.correct_distortion(
+                frame, profile, frame_focal, strength=strengths[frame_focal]
+            )
+            strengths[frame_focal] = applied_strength
+            tca = geometry.tca_params(profile, frame_focal)
+            if tca is not None:
+                fixed = geometry.correct_tca(fixed, tca)
+                tca_ran = True
+            corrected.append(fixed)
+        record["distortion_strength"] = strengths
+        record["tca"] = (
+            "applied lateral-CA channel rescale"
+            if tca_ran
+            else "skipped: the profile carries no TCA row at these focals"
         )
-        strengths[frame_focal] = applied_strength
-        tca = geometry.tca_params(profile, frame_focal)
-        if tca is not None:
-            fixed = geometry.correct_tca(fixed, tca)
-        corrected.append(fixed)
-    record["distortion_strength"] = strengths
-    record["ghosting"] = round(geometry.ghosting_score(corrected), 4)
-    h0, w0 = corrected[0].shape[:2]
-    valid = np.ones((h0, w0), bool)
-    for frame_focal, strength in strengths.items():
-        if strength > 0:
-            dx, dy = geometry._displacement_field(profile, frame_focal, w0, h0)
-            valid &= geometry.undistort_valid_mask(h0, w0, strength * dx, strength * dy)
+        record["ghosting"] = round(geometry.ghosting_score(corrected), 4)
+        h0, w0 = corrected[0].shape[:2]
+        valid = np.ones((h0, w0), bool)
+        for frame_focal, strength in strengths.items():
+            if strength > 0:
+                dx, dy = geometry._displacement_field(profile, frame_focal, w0, h0)
+                valid &= geometry.undistort_valid_mask(h0, w0, strength * dx, strength * dy)
+
+        # Lens straightness on the same frame before and after: the middle
+        # frame raw from the decoder, then that frame lens-corrected. When
+        # the correction left the frame untouched the two are the same image
+        # and the check reports not measured instead of a hollow pass.
+        mid = len(decoded) // 2
+        straight_before = geometry.line_measure(decoded[mid])
+        if np.array_equal(decoded[mid], corrected[mid]):
+            record["distortion_applied"] = False
+            straight_after = None
+        else:
+            record["distortion_applied"] = True
+            straight_after = geometry.line_measure(corrected[mid])
+        record["straight_before"] = straight_before
+        record["straight_after"] = straight_after
 
     aligned = hdr.align_to_first(corrected)
     options = hdr.merge_options(members)
@@ -91,21 +127,6 @@ def build_inputs(
     record["frames_used"] = [p.name for p in sorted(options[best_key], key=lambda p: order[p])]
     record["frames_reason"] = f"{best_key}: {best_score}"
     record["darkest_available"] = hdr.darkest_for_windows(members).name
-
-    # Lens straightness on the same frame before and after: the middle
-    # frame raw from the decoder, then that frame lens-corrected. When
-    # the correction left the frame untouched the two are the same image
-    # and the check reports not measured instead of a hollow pass.
-    mid = len(decoded) // 2
-    straight_before = geometry.line_measure(decoded[mid])
-    if np.array_equal(decoded[mid], corrected[mid]):
-        record["distortion_applied"] = False
-        straight_after = None
-    else:
-        record["distortion_applied"] = True
-        straight_after = geometry.line_measure(corrected[mid])
-    record["straight_before"] = straight_before
-    record["straight_after"] = straight_after
 
     gray = cv2.cvtColor(merged, cv2.COLOR_RGB2GRAY)
     # Verticals before and after on the merged room photo going into and
@@ -140,7 +161,9 @@ def build_inputs(
     y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
     anchor = np.zeros_like(valid)
     anchor[y0:y1, x0:x1] = True
-    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=anchor)
+    balanced, balance_report, preshoulder = finish.balance_exposure(
+        merged, anchor_mask=anchor, return_preshoulder=True
+    )
     record["balance"] = balance_report
 
     h, w = balanced.shape[:2]
@@ -154,6 +177,7 @@ def build_inputs(
     sent_h, sent_w = small.shape[:2]
     return {
         "balanced": balanced,
+        "preshoulder": preshoulder,
         "aligned": aligned,
         "members": list(members),
         "order": order,
@@ -167,68 +191,155 @@ def build_inputs(
     }
 
 
-def tint_overlay(finished: np.ndarray, union: np.ndarray) -> np.ndarray:
-    """The finished photo with confirmed window glass tinted red.
+def tint_overlay(base: np.ndarray, union: np.ndarray) -> np.ndarray:
+    """The base photo with confirmed window glass tinted red.
 
-    Tint touches masked pixels only: overlay equals finished everywhere
-    outside the union, which is what proves the outline sits over the
-    finished photo and not some other image.
+    Tint touches masked pixels only: overlay equals base everywhere
+    outside the union, which is what proves the outline sits over that
+    photo and not some other image.
     """
-    overlay = finished.copy()
+    overlay = base.copy()
     if union.any():
         overlay[union] = (overlay[union] * 0.5 + np.array([255, 0, 0]) * 0.5).astype(np.uint8)
     return overlay
 
 
-def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> None:
+def _floor_zone_frac(union: np.ndarray, h: int, w: int) -> tuple | None:
+    """Fractional (y0, y1, x0, x1) floor band under the window bbox.
+
+    A quarter frame tall under the lowest window glass, slightly wider
+    than the glass: the floor the windows light. None with no union.
+    """
+    if not union.any():
+        return None
+    ys, xs = np.nonzero(union)
+    y1 = min(h, int(ys.max()) + h // 4)
+    return (
+        float(ys.max()) / h,
+        float(y1) / h,
+        max(0.0, (float(xs.min()) - w * 0.05) / w),
+        min(1.0, (float(xs.max()) + w * 0.05) / w),
+    )
+
+
+def _gate_window(
+    balanced: np.ndarray,
+    preshoulder: np.ndarray,
+    view_rgb: np.ndarray,
+    mask: np.ndarray,
+    union: np.ndarray,
+) -> tuple[np.ndarray, bool, str]:
+    """Ship gate for one window (contract 02 section B), automatic.
+
+    Pulls the window from its one view frame, then verifies: the pull
+    was not refused (view light matches the room), near-white on glass
+    drops against the honest pre-shoulder before count, and the unblown
+    rim keeps its merged light. Returns (pixels, kept, reason): kept
+    windows go back untouched and the page names them.
+    """
+    from listing_partner.checks import CLIP_LEVEL
+
+    candidate, info = segment.pull_window(balanced, view_rgb, mask, union)
+    if info["refused"] is not None:
+        return balanced, False, info["refused"]
+    gain_ok, gain_reason = checks.check_pull_gain(info["rim_gain"])
+    if not gain_ok:
+        return balanced, False, gain_reason
+    wpx = int(mask.sum())
+    clip_before = float((preshoulder.max(axis=2) >= CLIP_LEVEL)[mask].mean())
+    clip_after = float((candidate.max(axis=2) >= CLIP_LEVEL)[mask].mean())
+    clip_ok, clip_reason = checks.check_highlights(clip_before, clip_after, wpx)
+    if not clip_ok:
+        return balanced, False, f"near-white not lower: {clip_reason}"
+    rim = mask & ~cv2.erode(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    rim_keep = rim & (balanced.max(axis=2) < CLIP_LEVEL)
+    if rim_keep.any():
+        rim_before = float(cv2.cvtColor(balanced, cv2.COLOR_RGB2GRAY)[rim_keep].mean())
+        rim_after = float(cv2.cvtColor(candidate, cv2.COLOR_RGB2GRAY)[rim_keep].mean())
+        rim_ok, rim_reason = checks.check_window_rim(rim_before, rim_after)
+        if not rim_ok:
+            return balanced, False, rim_reason
+    return candidate, True, f"near-white {clip_before:.4f} -> {clip_after:.4f} of window pixels"
+
+
+def finish_tail(
+    record: dict, state: dict, dirs: dict, masks: dict[int, np.ndarray], union: np.ndarray
+) -> None:
     """Local tail after verdicts: pull, denoise, crop, checks, saves.
 
     No Meta calls, no MLS twin. Fills the measured fields of record in
-    place. Clip numbers are fractions of window pixels; the after number
-    is read back from the saved JPEG file, the actual final output.
+    place. Each window pulls alone through the section-B ship gate;
+    windows that fail keep the merge's pixels untouched. Clip numbers
+    are fractions of window pixels: before is read pre-shoulder (the
+    shoulder parks blown glass under the level, so post-shoulder would
+    hide it), after is read back from the saved JPEG file, the actual
+    final output.
     """
     from listing_partner.checks import CLIP_LEVEL
 
     name = record["name"]
     balanced = state["balanced"]
+    preshoulder = state["preshoulder"]
     valid = state["valid"]
-    pulled = balanced
-    changed_outside = 0
-    if union.any():
-        pull_idx = segment.choose_pull_frame(state["aligned"], union, ref=balanced)
-        view = state["aligned"][pull_idx]
-        record["pull_frame"] = state["members"][pull_idx].name
-        record["pull_frame_index"] = pull_idx
-        mid_idx = segment.detail_frame(state["aligned"], union, ref=balanced)
-        record["mid_frame"] = state["members"][mid_idx].name
-        pulled, changed_outside = segment.pull_window(
-            balanced, view, union, state["aligned"][mid_idx]
-        )
-    else:
-        record["pull_frame"] = None
-        record["mid_frame"] = None
+    # One shared crop for pull, measurement and file: before and after
+    # count the same window pixels, and the file holds exactly those.
+    y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
+
+    def _crop(arr: np.ndarray) -> np.ndarray:
+        return arr[y0:y1, x0:x1]
+
+    balanced_c = _crop(balanced)
+    preshoulder_c = _crop(preshoulder)
+    union_c = _crop(union)
+    masks_c = {wid: _crop(m) for wid, m in masks.items()}
+    aligned_c = [_crop(f) for f in state["aligned"]]
+    composed = balanced_c.copy()
+    pulled_frames: list[str] = []
+    for window in record.get("windows", []):
+        wid = window["id"]
+        wmask = masks_c[wid]
+        idx, note = segment.choose_view_frame(aligned_c, wmask, balanced_c, union_c)
+        if idx is None:
+            window["pull"] = "kept from merge"
+            window["pull_reason"] = note
+            continue
+        view = aligned_c[idx]
+        gated, kept, reason = _gate_window(balanced_c, preshoulder_c, view, wmask, union_c)
+        if kept:
+            composed[wmask] = gated[wmask]
+            pulled_frames.append(state["members"][idx].name)
+            window["pull"] = "pulled"
+            window["pull_frame"] = state["members"][idx].name
+            window["pull_reason"] = f"from {state['members'][idx].name}: {note}; {reason}"
+        else:
+            window["pull"] = "kept from merge"
+            window["pull_reason"] = f"view from {state['members'][idx].name} refused: {reason}"
+    record["pull_frame"] = pulled_frames[0] if pulled_frames else None
+    record["pull_frames"] = sorted(set(pulled_frames))
+    pulled = [w for w in record.get("windows", []) if w.get("pull") == "pulled"]
+    kept = [w for w in record.get("windows", []) if w.get("pull") == "kept from merge"]
+    record["windows_pulled"] = len(pulled)
+    record["windows_kept"] = len(kept)
+    changed_outside = int((np.any(composed != balanced_c, axis=2) & ~union_c).sum())
 
     # Same patches both sides: the patch set is picked on the pulled
     # photo, so the drop is the denoiser's work on the same pixels, not
     # two different populations.
-    patches = finish.flat_patch_mask(pulled)
-    noise_before = finish.flat_noise(pulled, patches)
-    edge_before = finish.edge_strength(pulled)
-    finished = finish.denoise(pulled)
+    patches = finish.flat_patch_mask(composed)
+    noise_before = finish.flat_noise(composed, patches)
+    edge_before = finish.edge_strength(composed)
+    finished = finish.denoise(composed)
     record["noise_before"] = round(noise_before, 2)
     record["noise_after"] = round(finish.flat_noise(finished, patches), 2)
     record["edge_before"] = round(edge_before, 1)
     record["edge_after"] = round(finish.edge_strength(finished), 1)
-    # One shared crop for every measurement: before and after count the
-    # same window pixels, and the file holds exactly those pixels.
-    finished = geometry.crop_valid(finished, valid)
-    union = geometry.crop_valid(union, valid)
-    balanced_cropped = geometry.crop_valid(balanced, valid)
-    window_pixels = int(union.sum())
+    window_pixels = int(union_c.sum())
     if window_pixels:
         # Any channel at 250, as the contract says: grayscale understates
-        # blowout, and a result shaped by clamping would not count.
-        clip_before_n = int(((balanced_cropped.max(axis=2) >= CLIP_LEVEL) & union).sum())
+        # blowout, and a result shaped by clamping would not count. The
+        # before side reads pre-shoulder float (real blowout reads in the
+        # hundreds); post-shoulder would hide it under the level.
+        clip_before_n = int(((preshoulder_c.max(axis=2) >= CLIP_LEVEL) & union_c).sum())
     else:
         clip_before_n = 0
     record["window_pixels"] = window_pixels
@@ -243,15 +354,26 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     reread = cv2.imread(str(finished_path))
     reread_rgb = cv2.cvtColor(reread, cv2.COLOR_BGR2RGB)
     if window_pixels:
-        clip_after_n = int(((reread_rgb.max(axis=2) >= CLIP_LEVEL) & union).sum())
+        clip_after_n = int(((reread_rgb.max(axis=2) >= CLIP_LEVEL) & union_c).sum())
     else:
         clip_after_n = 0
     record["clip_after_n"] = clip_after_n
     clip_after_raw = clip_after_n / max(1, window_pixels)
     record["clip_after"] = round(clip_after_raw, 4)
+    # Verticals on the finished file itself: the merge-time residual
+    # below is the before story, this is what shipped.
+    vertical_final = geometry.dominant_vertical_angle(cv2.cvtColor(reread_rgb, cv2.COLOR_RGB2GRAY))
+    record["vertical_final"] = vertical_final
 
+    if window_pixels and record["windows_pulled"] == 0:
+        highlights: tuple[bool, str] = (
+            False,
+            "not measured: every window kept from merge, step B changed nothing",
+        )
+    else:
+        highlights = checks.check_highlights(clip_before_raw, clip_after_raw, window_pixels)
     record["checks"] = {
-        "highlights": checks.check_highlights(clip_before_raw, clip_after_raw, window_pixels),
+        "highlights": highlights,
         "outside": checks.check_outside_unchanged(changed_outside, window_pixels),
         "noise": checks.check_noise(noise_before, record["noise_after"]),
         "edges": checks.check_edges(edge_before, record["edge_after"]),
@@ -260,9 +382,14 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
             record["straight_after"],
             record.get("distortion_applied", True),
         ),
-        "verticals": checks.check_verticals(record["vertical_residual"]),
+        "verticals": checks.check_verticals(vertical_final),
     }
-    # NOTE: finished and union stay cropped from here on (overlay below).
+    # Floor zone near the windows, as fractions of the shipped frame, so
+    # the post-hoc measure maps it onto the MLS twin too: the band under
+    # the window bbox, a quarter frame tall. No union, no zone.
+    record["floor_zone"] = _floor_zone_frac(union_c, *finished.shape[:2])
+    # The third image is the window mask over the merge (tinted balance
+    # output, pre-pull), not over the finished photo.
     thumb = cv2.resize(
         finished,
         (1024, int(round(finished.shape[0] * 1024 / finished.shape[1]))),
@@ -270,7 +397,7 @@ def finish_tail(record: dict, state: dict, dirs: dict, union: np.ndarray) -> Non
     )
     save_clean_jpeg(thumb, dirs["review"] / f"finished_{name}.jpg")
     overlay_thumb = cv2.resize(
-        tint_overlay(finished, union),
+        tint_overlay(balanced_c, union_c),
         (1024, int(round(finished.shape[0] * 1024 / finished.shape[1]))),
         interpolation=cv2.INTER_AREA,
     )
@@ -287,9 +414,14 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
         "index": prior["index"],
         "name": prior["name"],
         "notes": list(prior.get("notes", [])),
+        "windows": [
+            {"id": w["id"], "box": w.get("box"), "reason": w.get("reason", "")}
+            for w in prior.get("windows", [])
+        ],
     }
     state = build_inputs(members, record)
     union = np.zeros((state["h"], state["w"]), bool)
+    masks: dict[int, np.ndarray] = {}
     for window in prior.get("windows", []):
         path = dirs["masks"] / f"{record['name']}_window{window['id']}.png"
         mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
@@ -299,8 +431,17 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
             raise ValueError(
                 f"saved mask {path.name} is {mask.shape}, expected {(state['h'], state['w'])}"
             )
-        union |= mask > 127
-    finish_tail(record, state, dirs, union)
+        masks[window["id"]] = mask > 127
+        union |= masks[window["id"]]
+    finish_tail(record, state, dirs, masks, union)
+    # The saved verdicts stand; the pull statuses are this run's: carry
+    # them onto the prior window rows by id.
+    pulled = {w["id"]: w for w in record.get("windows", [])}
+    for window in prior.get("windows", []):
+        fresh = pulled.get(window["id"], {})
+        for key in ("pull", "pull_reason", "pull_frame"):
+            if key in fresh:
+                window[key] = fresh[key]
     for key in ("candidates_found", "transcript", "windows", "rejections"):
         record[key] = prior[key]
     # Collapse exact duplicate rejection rows: both text prompts can return
@@ -364,13 +505,15 @@ def process_set(
             if c["object_id"] in verdicts and not verdicts[c["object_id"]][0]
         ]
         union = np.zeros((h, w), bool)
+        masks: dict[int, np.ndarray] = {}
         for c in confirmed:
             union |= c["mask"]
+            masks[c["object_id"]] = c["mask"]
             segment.save_mask_png(
                 c["mask"],
                 dirs["masks"] / f"{name}_window{c['object_id']}.png",
             )
-        finish_tail(record, state, dirs, union)
+        finish_tail(record, state, dirs, masks, union)
         record["error"] = None
     except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
         record["transcript"] = transcript
@@ -392,34 +535,80 @@ def _check_line(label: str, result) -> str:
 
 
 def _lens_note(entry: dict) -> str:
-    """Plain reason when lens correction had nothing to correct.
+    """Plain reason when the distortion fit voted the step down.
 
-    A fitted strength of 0 on every focal length means the profile
-    match found no distortion, so straightness is not expected to
-    improve on that photo. Anything else (including a missing strength
-    record) carries no note.
+    A fitted strength of 0 on every focal length means the line sweep
+    on a center crop did not improve, so no distortion correction ran
+    on that photo. Anything else (including a missing strength record)
+    carries no note.
     """
     strengths = entry.get("distortion_strength")
     if not isinstance(strengths, dict) or not strengths:
         return ""
     try:
         if all(float(value) == 0.0 for value in strengths.values()):
-            return (
-                " (fitted strength 0: no distortion to correct,"
-                " straightness not expected to improve)"
+            note = (
+                " (fitted strength 0: the line sweep on a center crop"
+                " did not improve, so no distortion correction ran"
             )
+            if entry.get("tca", "").startswith("applied"):
+                note += (
+                    "; any small straightness change is TCA resampling,"
+                    " the only other step that touches the frame"
+                )
+            return note + ")"
     except (TypeError, ValueError):
         return ""
     return ""
+
+
+def _window_lines(windows: list[dict]) -> str:
+    """One page line per confirmed window, pulled or kept from merge."""
+    lines = []
+    for w in windows:
+        if w.get("pull") == "pulled":
+            lines.append(
+                f"<p>window {w['id']}: {w.get('reason', '')} — "
+                f"pulled ({w.get('pull_reason', '')})</p>"
+            )
+        elif w.get("pull") == "kept from merge":
+            lines.append(
+                f"<p>window {w['id']}: {w.get('reason', '')} — "
+                f"window kept from merge: {w.get('pull_reason', '')}</p>"
+            )
+        else:
+            lines.append(f"<p>window {w['id']}: {w.get('reason', '')}</p>")
+    return "".join(lines)
+
+
+def _look_cell(look: dict | None) -> str:
+    """Look numbers with their verdict: every row shows pass or fail."""
+    if not look:
+        return "<p>look: no MLS photo</p>"
+    verdict = "PASS" if look.get("look_ok") else "FAIL"
+    return f"<p>{verdict} look: {look.get('look_reason', '')}</p>"
+
+
+def _floor_cell(floor: dict | None) -> str:
+    """Floor-cast numbers with their verdict, or why there is none."""
+    if not floor:
+        return "<p>floor near windows: not measured</p>"
+    if floor.get("floor_ok"):
+        verdict = "PASS"
+    elif "not measured" in floor.get("floor_reason", ""):
+        verdict = "NOT MEASURED"
+    else:
+        verdict = "FAIL"
+    return f"<p>{verdict} {floor.get('floor_reason', '')}</p>"
 
 
 def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> Path:
     """review-finish.html: one row per shot plus the measured top line.
 
     One row per shot: our unit 1 merge, our finished photo, the window
-    outline over the finished photo, and Erik's MLS photo. Every skipped
-    step shows with its reason; every check with nothing to measure shows
-    NOT MEASURED.
+    mask over the merge, and Erik's MLS photo. Every skipped step shows
+    with its reason; every check with nothing to measure shows NOT
+    MEASURED; every look row shows PASS or FAIL.
     """
     rows = []
     for entry in manifest["sets"]:
@@ -429,7 +618,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             continue
         windows = entry.get("windows", [])
         if windows:
-            win_cell = "".join(f"<p>window {w['id']}: {w['reason']}</p>" for w in windows)
+            win_cell = _window_lines(windows)
         else:
             win_cell = "<p>no windows confirmed</p>"
         rejected = entry.get("rejections", [])
@@ -446,30 +635,32 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             )
             or "<p>not published</p>"
         )
-        look = entry.get("look")
-        look_cell = f"<p>look: {look['look_reason']}</p>" if look else "<p>look: no MLS photo</p>"
+        look_cell = _look_cell(entry.get("look"))
+        floor_cell = _floor_cell(entry.get("floor"))
         clip_cell = (
             f"<p>window clip {entry.get('clip_before', 0.0):.4f} -&gt; "
             f"{entry.get('clip_after', 0.0):.4f} of window pixels "
-            f"({entry.get('window_pixels', 0)} px, after read from the file)</p>"
+            f"({entry.get('window_pixels', 0)} px, before read pre-shoulder, "
+            "after read from the file)</p>"
         )
+        pull_from = entry.get("pull_frame") or "no pulled windows"
         rows.append(
             f"<section><h2>Shot {name}</h2>"
             f"<p>{', '.join(entry.get('frames_used', []))}</p>"
             f"<p>merge: {entry.get('frames_reason', '')}</p>"
-            f"<p>window view from: {entry.get('pull_frame', 'no windows')}"
-            f" (detail: {entry.get('mid_frame', 'same')})</p>"
-            f"<p>lens strength {entry.get('distortion_strength', '')}, "
+            f"<p>window view from: {pull_from}</p>"
+            f"<p>{entry.get('lens', '')}, "
+            f"strength {entry.get('distortion_strength', '')}, "
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')}{_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}"
+            f"{clip_cell}{look_cell}{floor_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
             f'<div><img src="review/finished_{name}.jpg" loading="lazy">'
             f"<p>finished</p></div>"
             f'<div><img src="review/overlay_{name}.jpg" loading="lazy">'
-            f"<p>window outline over the finished photo</p>{win_cell}{rej_cell}</div>"
+            f"<p>window mask over the merge</p>{win_cell}{rej_cell}</div>"
             f"<div>{mls_cell}</div>"
             f"<div>{check_cell}</div>"
             "</div></section>"
@@ -480,6 +671,18 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         spend_line = f"Meta spend to date: ${spend_total:.4f} of ${SPEND_CAP_USD:.2f} cap."
     except MetaRefused:
         spend_line = "Meta spend unknown, ledger unreadable"
+    pulled_line = (
+        f"<p>Windows pulled {top.get('windows_pulled', '?')}, "
+        f"kept from merge {top.get('windows_kept_from_merge', '?')}.</p>"
+    )
+    ratio = top.get("worst_reserve_ratio")
+    ratio_line = (
+        f"<p>Worst reservation-to-bill ratio {ratio:.2f}.</p>"
+        if ratio is not None
+        else "<p>Worst reservation-to-bill ratio unknown.</p>"
+    )
+    commit = top.get("code_commit")
+    commit_line = f"<p>Run from commit {commit}.</p>" if commit else "<p>Run commit unknown.</p>"
     html = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Finished review: {top["photos_finished"]} finished, {top["photos_failed"]} failed</title>
@@ -496,6 +699,9 @@ rejected {top["windows_rejected"]}, photos with windows {top["photos_with_window
 of {top["window_pixels"]} window pixels
 ({top["clip_before_pct"]:.2f}% -&gt; {top["clip_after_pct"]:.2f}%).</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
+{pulled_line}
+{ratio_line}
+{commit_line}
 <p>The shared look settings behind these photos were fitted on these same 16 photos
 against their MLS twins. They are frozen from this round on: unit 5 measures the
 same settings, unchanged, on a held-out set.</p>
@@ -542,6 +748,32 @@ def _unit_spend_usd(prior: dict | None, ledger_path=None) -> tuple[float, float]
     return baseline, round(total - baseline, 6)
 
 
+def _code_stamp() -> str | None:
+    """The commit this run's outputs come from, plus a dirty marker.
+
+    Makes stale outputs visible: the page shows the stamp, so a photo
+    older than the code says so. Unknown when git cannot answer.
+    """
+    import subprocess
+
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except Exception:  # noqa: BLE001 - any git failure reads as unknown
+        return None
+
+
 def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> dict:
     """Top-line numbers from finished records. Pure, no Meta calls.
 
@@ -549,6 +781,8 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
     confirmed window pixel in the run, so one big window cannot hide
     behind per-photo means.
     """
+    from listing_partner.meta_client import reserve_ratio_stats
+
     finished_records = [r for r in records if not r.get("error")]
     noises = [
         (r["noise_before"], r["noise_after"]) for r in finished_records if "noise_before" in r
@@ -556,6 +790,10 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
     clip_before_n = sum(r.get("clip_before_n", 0) for r in finished_records)
     clip_after_n = sum(r.get("clip_after_n", 0) for r in finished_records)
     window_pixels = sum(r.get("window_pixels", 0) for r in finished_records)
+    try:
+        worst_ratio = reserve_ratio_stats()["worst"]
+    except MetaRefused:
+        worst_ratio = None
     return {
         "photos_finished": len(finished_records),
         "photos_failed": len(records) - len(finished_records),
@@ -566,12 +804,16 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "windows_confirmed": sum(len(r.get("windows", [])) for r in finished_records),
         "windows_rejected": sum(len(r.get("rejections", [])) for r in finished_records),
         "photos_with_windows": sum(1 for r in finished_records if r.get("windows")),
+        "windows_pulled": sum(r.get("windows_pulled", 0) for r in finished_records),
+        "windows_kept_from_merge": sum(r.get("windows_kept", 0) for r in finished_records),
         "clip_before_n": clip_before_n,
         "clip_after_n": clip_after_n,
         "window_pixels": window_pixels,
         "clip_before_pct": 100 * clip_before_n / max(1, window_pixels),
         "clip_after_pct": 100 * clip_after_n / max(1, window_pixels),
         "unit_spend_usd": unit_spend_usd,
+        "worst_reserve_ratio": worst_ratio,
+        "code_commit": _code_stamp(),
     }
 
 
@@ -596,7 +838,7 @@ def ensure_merge_thumbs(output_dir: Path, manifest: dict) -> None:
 
 
 def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_dir: Path) -> None:
-    """Post-hoc criterion-11 numbers per shot, measured from shipped files.
+    """Post-hoc criterion-11 and floor numbers per shot, from shipped files.
 
     Runs after processing, never during: the MLS twin is read here only
     to verify the result, exactly as the contract allows.
@@ -608,16 +850,27 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
             continue
         number = record["index"]
         mls_here = [p for p, i in mls_matches.items() if i["set"] == number - 1]
+        finished_path = output_dir / "finished" / f"{record['name']}.jpg"
         if not mls_here:
             record["look"] = None
-            continue
+            mls_path = None
+        else:
+            mls_path = mls_dir / mls_here[0]
+            try:
+                record["look"] = measure.look_stats(finished_path, mls_path)
+            except ValueError as exc:
+                record["look"] = {"look_ok": False, "look_reason": str(exc)}
         try:
-            record["look"] = measure.look_stats(
-                output_dir / "finished" / f"{record['name']}.jpg",
-                mls_dir / mls_here[0],
+            record["floor"] = measure.floor_cast_stats(
+                finished_path, mls_path, record.get("floor_zone")
             )
         except ValueError as exc:
-            record["look"] = {"look_ok": False, "look_reason": str(exc)}
+            record["floor"] = {
+                "floor_cast": None,
+                "mls_floor_cast": None,
+                "floor_ok": False,
+                "floor_reason": f"not measured: {exc}",
+            }
 
 
 def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, dirs: dict) -> dict:

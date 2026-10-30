@@ -141,6 +141,26 @@ def test_refuses_unknown_price(ledger, key, monkeypatch):
     assert not Path(ledger).exists(), "refused calls add no line"
 
 
+def test_worst_reserve_ratio_reports_max_and_floor(ledger):
+    ledger.write_text(
+        "\n".join(
+            [
+                '{"model": "muse-spark-1.3", "estimated_usd": 0.0001, '
+                '"actual_usd": 0.00005, "status": "complete"}',
+                '{"model": "sam-3.1", "estimated_usd": 0.00009, '
+                '"actual_usd": 0.0001, "status": "complete"}',
+                '{"model": "sam-3.1", "estimated_usd": 0.0002, '
+                '"actual_usd": null, "status": "reserved"}',
+            ]
+        )
+        + "\n"
+    )
+    stats = meta_client.reserve_ratio_stats(ledger)
+    assert stats["worst"] == pytest.approx(2.0), "worst reservation-to-bill ratio"
+    assert stats["under_one"] == 1, "reservations under the real bill are counted"
+    assert stats["settled"] == 2, "open reservations never join the ratio"
+
+
 def test_refuses_non_allowlisted_and_contributor_models(ledger, key):
     for bad in ("gpt-5", "muse-spark-1.3-contributor", "muse-spark-1.2-contributor", "claude-opus"):
         with pytest.raises(ModelNotAllowed):

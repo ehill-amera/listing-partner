@@ -29,6 +29,22 @@ def test_look_stats_reads_files_not_arrays(tmp_path):
     assert abs(stats["fin_median"] - 190) < 3
 
 
+def test_floor_cast_flags_lavender_not_wood(tmp_path):
+    import cv2
+
+    wood = np.full((100, 120, 3), (191, 176, 166), np.uint8)  # warm wood, R above B
+    lav = np.full((100, 120, 3), (186, 182, 193), np.uint8)  # lavender gray
+    wood_path, lav_path = tmp_path / "wood.jpg", tmp_path / "lav.jpg"
+    cv2.imwrite(str(wood_path), cv2.cvtColor(wood, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(lav_path), cv2.cvtColor(lav, cv2.COLOR_RGB2BGR))
+    zone = (0.0, 1.0, 0.0, 1.0)
+    wood_stats = measure.floor_cast_stats(wood_path, None, zone)
+    assert wood_stats["floor_ok"] is True, wood_stats["floor_reason"]
+    lav_stats = measure.floor_cast_stats(lav_path, wood_path, zone)
+    assert lav_stats["floor_ok"] is False, "lavender floors must fail"
+    assert lav_stats["mls_floor_cast"] is not None
+
+
 def test_overlay_tint_touches_mask_only():
     from listing_partner import run_finish
 
