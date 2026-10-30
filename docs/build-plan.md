@@ -92,6 +92,7 @@ Erik's home shoot (public sample and baseline timing) must happen by Sun Nov 1.
   - controls: the $40 cap, the model allowlist, protected zones, the git-hook fence
   - records: the spend ledger, saved masks, the maintenance list, the run log
   Every line has to be true of what shipped.
+- **Held-out look test.** Unit 2's look settings were fitted on unit-a. Unit 5 runs them unchanged on Erik's home set and reports the same brightness and color comparison, as the honest test of whether the look generalizes.
 - **Baseline, measured.** Erik finishes his home set his usual way (Lightroom, plus Gemini where he would normally use it) and records start and stop times, plus the number of windows he masked by hand. The agent runs on the same raw files. The README reports minutes per photo for each, and how each scales with the number of windows.
 - **Working product for judges.** A small public sample set Erik owns outright (3 or 4 bracketed interior sets from his own home, nothing personal in frame, no exterior), attached to a GitHub Release, not committed. One command runs it with the judge's own META_API_KEY. The tool also generates a static before and after gallery, published on GitHub Pages, so judges see real output without running anything. unit-a stays private: benchmarks and testing only, never in the public repo, video, README or X post.
 - Builder spend: the navigator records the Meta Billing page's free-credit balance at the end of every unit, and stops the build if Muse Code is on pace to use more than $100 of the $150.
