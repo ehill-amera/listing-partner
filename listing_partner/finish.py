@@ -193,8 +193,9 @@ def balance_exposure(
     # Highlight shoulder runs last so no earlier gain can re-blow whites.
     # It compresses but never hides real clipping from honest numbers:
     # moderately blown glass parks just under the near-white level, so
-    # the pre-shoulder frame is the one the highlights check reads.
-    preshoulder = np.clip(work, 0, 255).astype(np.uint8)
+    # the pre-shoulder frame (unclipped float: real blowout reads in the
+    # hundreds) is the one the highlights check reads.
+    preshoulder = work.copy()
     over = work > 235.0
     work[over] = 235.0 + (work[over] - 235.0) * SHOULDER_SLOPE
     out = np.clip(work, 0, 255).astype(np.uint8)
@@ -202,7 +203,7 @@ def balance_exposure(
         out[protect] = img[protect]
     if return_preshoulder:
         if protect is not None:
-            preshoulder[protect] = img[protect]
+            preshoulder[protect] = img[protect].astype(np.float32)
         return out, report, preshoulder
     return out, report
 

@@ -571,9 +571,7 @@ def test_choose_view_frame_skips_murk_picks_fix():
     mask = np.zeros((100, 100), bool)
     mask[20:80, 20:80] = True
     idx, reason = segment.choose_view_frame([murk, fix, blown], mask, merge)
-    assert idx == 1, (
-        f"the frame that fixes blown glass wins over murk and white ({reason})"
-    )
+    assert idx == 1, f"the frame that fixes blown glass wins over murk and white ({reason})"
 
 
 def test_choose_view_frame_returns_none_when_nothing_to_fix():
