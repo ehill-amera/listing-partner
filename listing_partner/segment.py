@@ -31,12 +31,10 @@ VIEW_DETAIL_FLOOR = 50
 #: merge pixel reads blown at or above this gray: darker kept regions
 #: the merge already holds stay from the merge.
 HOLE_MERGE_FLOOR = 200
-#: Inpainting reach, as fractions of the long side: trim hugs the mask
-#: edge within ~1% of the frame, blind slats and mullion bars are thinner
-#: than ~0.25%, while glass runs hundreds of pixels deep. Minima keep
-#: small test images honest.
-HOLE_DEPTH_FRAC = 0.007
-HOLE_THICK_FRAC = 0.0025
+#: A blown keep region this thick (distance to non-keep) is glass, not
+#: frame: trim rings, slats and mullions peak at 62 px thick on unit-a
+#: 009, glass bays run into the hundreds. Measured both sides.
+HOLE_THICK_PX = 80.0
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -367,14 +365,11 @@ def pull_window(
     if keep.any():
         # Glass the merge blows out but the view reads dark inpaints from
         # neighboring real view pixels when it is sky: enclosed specks, or
-        # deep thick regions far from any frame. Trim hugs the mask edge
-        # (shallow), blind slats and mullions are thin bars, and dark
-        # woodwork reads below the merge floor: all of those stay.
-        longside = max(mask.shape)
-        depth = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
+        # blown regions thicker than any frame member. Trim rings, blind
+        # slats and mullion bars are thin (measured widths stay under
+        # 40 px); dark woodwork reads below the merge floor. All stay.
         thick = cv2.distanceTransform(keep.astype(np.uint8), cv2.DIST_L2, 3)
-        deep = depth >= max(8.0, longside * HOLE_DEPTH_FRAC)
-        stout = thick >= max(3.0, longside * HOLE_THICK_FRAC)
+        stout = thick >= HOLE_THICK_PX
         blown = merge_gray >= HOLE_MERGE_FLOOR
         count, labels, _, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), 8)
         touching = np.zeros_like(mask)
@@ -385,7 +380,7 @@ def pull_window(
         touched_labels = set(np.unique(labels[touching]).tolist()) - {0}
         all_labels = set(np.unique(labels[keep]).tolist()) - {0}
         enclosed = np.isin(labels, list(all_labels - touched_labels))
-        hole_mask = keep & blown & (enclosed | (deep & stout))
+        hole_mask = keep & blown & (enclosed | stout)
     if not replaced.any() and not hole_mask.any():
         return merge_rgb.copy(), 0
     room = ~mask
