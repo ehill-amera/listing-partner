@@ -520,6 +520,32 @@ def test_pull_replaces_shoulder_compressed_glass_but_not_trim():
     )
 
 
+def test_pull_inpaints_enclosed_sky_holes():
+    # A dark speck of the view frame fully enclosed in replaced glass is
+    # a sky hole the dark frame renders near-black: leaving it keeps a
+    # blown merge speck. It takes neighboring real view pixels instead.
+    # A dark bar touching the mask border is a real frame and stays.
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255
+    dark = np.full((200, 200, 3), 150, np.uint8)
+    dark[40:160, 60:140] = 150
+    dark[95:100, 90:110] = 20  # enclosed dark speck in bright view
+    dark[150:160, 60:140] = 25  # dark bar at the mask border: a frame
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    assert changed_outside == 0
+    hole = np.zeros_like(mask)
+    hole[95:100, 90:110] = True
+    assert abs(pulled[hole].astype(int).mean() - 150) < 30, (
+        "enclosed sky holes take neighboring real view pixels, not blown merge"
+    )
+    assert (pulled[~mask] == merge[~mask]).all()
+    bar = np.zeros_like(mask)
+    bar[152:158, 80:120] = True
+    assert (pulled[bar] == merge[bar]).all(), "border-touching frames stay"
+
+
 def test_pull_keeps_dark_mullion_bar_from_the_merge():
     merge, dark, mask = _synthetic_brackets()
     merge[90:110, 40:160] = 120  # dark mullion bar across the blown glass

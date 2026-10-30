@@ -27,6 +27,10 @@ SPARK_MODEL = "muse-spark-1.3"
 #: View-frame gray below this holds no outdoor detail: the pixel is an
 #: interior surface (frame, trim, blind) and stays from the merge.
 VIEW_DETAIL_FLOOR = 50
+#: A kept component fully enclosed in replaced glass is inpainted from
+#: neighboring view pixels only when its merge pixels read blown at or
+#: above this gray: darker kept regions the merge already holds stay.
+HOLE_MERGE_FLOOR = 200
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -340,12 +344,30 @@ def pull_window(
     # shoulder compresses blown glass to just under 250, exactly where
     # white trim sits.
     view_gray = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY)
+    merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY)
     replaced = mask & (view_gray >= VIEW_DETAIL_FLOOR)
-    if not replaced.any():
+    # Enclosed sky holes: kept components fully inside the mask whose
+    # merge pixels are blown are sky holes the dark pull frame renders
+    # near-black (unit-a 009: 1,848 specks, median 5 px, merge 245+ where
+    # the view reads 42). They take neighboring real view pixels through
+    # classical diffusion inpainting, no generative model. Keep touching
+    # the mask border is real frame, and dark kept regions the merge
+    # already holds stay from the merge.
+    keep = mask & ~replaced
+    hole_mask = np.zeros_like(mask)
+    if keep.any():
+        count, labels, _, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8), 8)
+        kernel = np.ones((3, 3), np.uint8)
+        for label in range(1, count):
+            comp = labels == label
+            touches_outside = (cv2.dilate(comp.astype(np.uint8), kernel).astype(bool) & ~mask).any()
+            if touches_outside:
+                continue
+            if float(np.median(merge_gray[comp].astype(float))) < HOLE_MERGE_FLOOR:
+                continue
+            hole_mask |= comp
+    if not replaced.any() and not hole_mask.any():
         return merge_rgb.copy(), 0
-    feather = max(2, int(round(max(mask.shape) * 0.002)))
-    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
-    alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
     room = ~mask
     matched = dark_rgb.astype(np.float32)
     if room.any():
@@ -353,6 +375,18 @@ def pull_window(
         view_lum = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[room].mean()
         gain = min(1.0, float(merge_lum) / max(1e-6, float(view_lum)))
         matched *= gain
+    if hole_mask.any():
+        paint = np.clip(matched, 0, 255).astype(np.uint8)
+        matched = cv2.inpaint(paint, hole_mask.astype(np.uint8), 3, cv2.INPAINT_TELEA).astype(
+            np.float32
+        )
+        replaced |= hole_mask
+    feather = max(2, int(round(max(mask.shape) * 0.002)))
+    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
+    alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
+    feather = max(2, int(round(max(mask.shape) * 0.002)))
+    dist = cv2.distanceTransform(replaced.astype(np.uint8), cv2.DIST_L2, 3)
+    alpha = np.clip(dist / feather, 0.0, 1.0).astype(np.float32)
     base = merge_rgb.astype(np.float32)
     pulled = base * (1 - alpha[:, :, None]) + matched * alpha[:, :, None]
     pulled = np.clip(pulled, 0, 255).astype(np.uint8)
