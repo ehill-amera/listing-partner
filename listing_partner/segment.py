@@ -37,6 +37,21 @@ SHOULDER_FLOOR = 240
 #: frames of the same surface (trim reads near-merge in an
 #: exposure-matched frame), so those pixels keep the merge.
 AGREE_GAP = 25
+#: View-frame local gray std below this holds no scene: flat paint, trim,
+#: blinds and smooth sky read the same in every direction, so a flat view
+#: pixel is an interior surface or unrecoverable sky and stays from the
+#: merge. Sunlit trim reads 130-140 in a mid frame (unit-a 005) with std
+#: ~3, while foliage glass reads 15+: the gate sits between them. Measured
+#: in a 15 px box: wide enough that a smooth ramp still reads (a real
+#: gradient holds detail), narrow enough that flat paint stays flat.
+VIEW_TEXTURE_K = 15
+VIEW_TEXTURE_MIN = 6.0
+#: A take hole whose view pixels read at least this bright is a foliage
+#: gap onto bright sky, white in every frame: filling it changes nothing
+#: visible and keeps the shipped view one continuous region. Darker holes
+#: are the merge's own detail (a leaf silhouette, a mullion shadow) and
+#: stay exactly as the merge drew them.
+VIEW_BRIGHT_HOLE = 200
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -312,28 +327,67 @@ def _ring_gain(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) ->
     return merge_med / max(1.0, view_med)
 
 
+def _view_texture(view_gray: np.ndarray) -> np.ndarray:
+    """Local gray std of the view frame: flat paint reads ~3, foliage 15+.
+
+    A flat view pixel holds no scene to pull, so it never takes: that is
+    what keeps sunlit trim (mid-tone and unblown in a mid frame, every
+    other condition passing) from dragging dark paint into a white room.
+    """
+    gray = view_gray.astype(np.float32)
+    mean = cv2.boxFilter(gray, -1, (VIEW_TEXTURE_K, VIEW_TEXTURE_K))
+    sq = cv2.boxFilter(gray * gray, -1, (VIEW_TEXTURE_K, VIEW_TEXTURE_K))
+    return np.sqrt(np.maximum(sq - mean * mean, 0.0))
+
+
 def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Mask pixels the view frame replaces: blown merge with real detail.
 
     Only pixels where the merge is near-white, the view holds outdoor
-    detail, the view itself is not near-white on any channel, and the
-    merge reads clearly brighter (the blowout signature) change. Trim,
-    mullions, blinds and sills fail one of these and keep the merge
-    pixel-exact. Inserted pixels therefore never reach near-white, so
-    the after count can only drop against an honest before count.
+    detail, the view itself is not near-white on any channel, the view
+    carries texture (flat paint holds no scene), and the merge reads
+    clearly brighter (the blowout signature) change. Trim, mullions,
+    blinds and sills fail one of these and keep the merge pixel-exact.
+    Bright holes fully inside the take (foliage gaps onto white sky) fill
+    so the shipped view is one continuous region; darker holes are the
+    merge's own detail and stay. Speckle dots too small to be a pane drop.
+    Inserted pixels therefore never reach near-white, so the after count
+    can only drop against an honest before count.
     """
     from listing_partner.checks import CLIP_LEVEL
 
     merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     view_gray = cv2.cvtColor(view_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     view_max = view_rgb.max(axis=2)
-    return (
+    raw = (
         mask
         & (merge_rgb.max(axis=2) >= SHOULDER_FLOOR)
         & (view_gray >= VIEW_DETAIL_FLOOR)
         & (view_max < CLIP_LEVEL)
         & ((merge_gray - view_gray) > AGREE_GAP)
+        & (_view_texture(view_gray) >= VIEW_TEXTURE_MIN)
     )
+    if not raw.any():
+        return raw
+    # Fill bright interior holes: invert, flood the outside from a dry
+    # seed, what stays dry is a hole. Only bright holes fill; dark ones
+    # are merge detail.
+    inv = (~raw).astype(np.uint8) * 255
+    dry = np.nonzero(inv)
+    take = raw
+    if dry[0].size:
+        flooded = inv.copy()
+        cv2.floodFill(flooded, None, (int(dry[1][0]), int(dry[0][0])), 128)
+        holes = (flooded == 255) & mask & (view_gray >= VIEW_BRIGHT_HOLE)
+        take = raw | holes
+    # Speckle dots: connected take smaller than a thousandth of the mask
+    # cannot be a pane; they would ship as isolated view dots in white.
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(take.astype(np.uint8), 8)
+    if n > 2:
+        floor = max(1.0, float(mask.sum()) * 0.001)
+        small = np.where(stats[1:, cv2.CC_STAT_AREA] < floor)[0] + 1
+        take = take & ~np.isin(labels, small)
+    return take
 
 
 def choose_view_frame(
@@ -376,6 +430,8 @@ def choose_view_frame(
     if best is None:
         if not matched_any:
             return None, "no bracket frame matches the room light here"
+        if (merge_rgb.max(axis=2) >= SHOULDER_FLOOR)[mask].any():
+            return None, "glass is blown but no frame holds a detailed view to pull"
         return None, "nothing blown to fix: the merge already holds the glass"
     return best, f"fixes {best_fixed} blown pixels"
 
@@ -388,9 +444,10 @@ def pull_window(
 ) -> tuple[np.ndarray, dict]:
     """Fill blown glass from one real view frame, glass only.
 
-    The view lands at its native gain: no rescale ever shifts its hue,
-    and inserted pixels never reach near-white (see _take_mask), so no
-    clamp or cap shapes the measurement. The feather ramps up inside the
+    The view lands at its native gain: no rescale ever shifts its hue.
+    Taken glass pixels never reach near-white (see _take_mask), so no
+    clamp or cap shapes the measurement; filled sky-gap holes match the
+    merge's own white pixel for pixel. The feather ramps up inside the
     replaced glass and is exactly zero outside it, so the blend never
     reaches the frame: no dark outline, no smear, nothing changes
     outside the mask. When the view light does not match the room the

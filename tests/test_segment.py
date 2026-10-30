@@ -461,20 +461,25 @@ def test_pull_replaces_only_blown_glass_view_holds():
     """
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255  # blown glass
-    merge[36:40, 56:144] = 242  # lit trim, same brightness as glass
+    merge[8:40, 56:144] = 242  # lit trim band, same brightness as glass
     merge[90:110, 40:160] = 120  # dark mullion bar holding merge detail
     view = np.full((200, 200, 3), 150, np.uint8)
-    glass = np.tile(np.linspace(100, 200, 80, dtype=np.uint8), (120, 1))
-    view[40:160, 60:140] = glass[:, :, None]
-    view[36:40, 56:144] = 230  # trim reads near-merge in the view frame
+    # Real bracket views carry texture; a perfectly smooth ramp is sky,
+    # which must keep the merge. Grain it the way foliage reads.
+    rng = np.random.default_rng(13)
+    glass = np.tile(np.linspace(100, 200, 80, dtype=np.float32), (120, 1))
+    glass += rng.normal(0, 10, glass.shape)
+    view[40:160, 60:140] = np.clip(glass, 0, 249).astype(np.uint8)[:, :, None]
+    view[8:40, 56:144] = 230  # trim reads near-merge in the view frame
     view[90:110, 40:160] = 110
     mask = np.zeros((200, 200), bool)
-    mask[36:164, 56:144] = True
+    mask[8:164, 56:144] = True
     pulled, info = segment.pull_window(merge, view, mask)
     assert info["refused"] is None
     assert (pulled[~mask] == merge[~mask]).all(), "outside the mask nothing changes"
+    # Band interior: both edges texture and blend their own neighbors.
     trim = np.zeros_like(mask)
-    trim[36:40, 70:130] = True
+    trim[18:28, 70:130] = True
     assert (pulled[trim] == merge[trim]).all(), "lit trim keeps its merged color"
     bar = np.zeros_like(mask)
     bar[94:106, 70:130] = True
@@ -494,9 +499,14 @@ def test_pull_inserts_view_at_native_gain():
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255
     view = np.full((200, 200, 3), 200, np.uint8)
-    glass = np.tile(np.linspace(100, 200, 80, dtype=np.uint8), (120, 1))
+    # Textured the way a real view reads; a smooth ramp is sky and keeps
+    # the merge, since the pull cannot tell it from flat trim.
+    rng = np.random.default_rng(14)
+    glass = np.tile(np.linspace(100, 200, 80, dtype=np.float32), (120, 1))
+    glass += rng.normal(0, 10, glass.shape)
+    glass = np.clip(glass, 0, 249).astype(np.uint8)
     view[40:160, 60:140] = glass[:, :, None]
-    view[40:160, 60:140, 0] = np.clip(glass + 30, 0, 249)  # warm view tint
+    view[40:160, 60:140, 0] = np.clip(glass.astype(int) + 30, 0, 249)  # warm view tint
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
     pulled, _ = segment.pull_window(merge, view, mask)
@@ -527,10 +537,13 @@ def test_pull_refuses_a_light_mismatched_view():
 
 def test_pull_keeps_sun_glints_honest():
     """A glint blown in every frame keeps the merge: no clamp may fake it."""
+    rng = np.random.default_rng(15)
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255
     view = np.full((200, 200, 3), 150, np.uint8)
-    view[40:160, 60:140] = 140
+    # Textured glass: a flat 140 models nothing a real frame holds, and
+    # flat view pixels stay from the merge (they read as trim, not scene).
+    view[40:160, 60:140] = np.clip(140 + rng.normal(0, 12, (120, 80, 1)), 0, 249).astype(np.uint8)
     view[95:100, 90:110] = 255  # sun glint, blown in the view too
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
@@ -592,12 +605,14 @@ def test_pull_fills_wide_blown_bay_from_single_view():
     # A wide blown bay takes the one view frame everywhere, border or
     # not. Trim agrees with the merge and stays pixel-exact; the slat
     # holds merge detail and stays.
+    rng = np.random.default_rng(16)
     merge = np.full((400, 400, 3), 150, np.uint8)
     merge[40:360, 60:340] = 255  # blown glass bay to the border
     merge[40:46, 60:340] = 242  # white trim along the top
     merge[190:200, 60:340] = 180  # thin blind slat across the pane
     view = np.full((400, 400, 3), 150, np.uint8)
-    view[40:360, 60:340] = 140  # the view frame holds the bay
+    # Textured bay: flat 140 reads as paint, not a view, and stays out.
+    view[40:360, 60:340] = np.clip(140 + rng.normal(0, 12, (320, 280, 1)), 0, 249).astype(np.uint8)
     view[40:46, 60:340] = 230  # trim reads near-merge in the view
     view[190:200, 60:340] = 175
     mask = np.zeros((400, 400), bool)
@@ -605,7 +620,9 @@ def test_pull_fills_wide_blown_bay_from_single_view():
     pulled, _ = segment.pull_window(merge, view, mask)
     bay = np.zeros_like(mask)
     bay[110:180, 150:250] = True
-    assert (pulled[bay] == 140).all(), "blown bays take the view, wherever they touch"
+    assert abs(pulled[bay].astype(int).mean() - 140) < 12, (
+        "blown bays take the view, wherever they touch"
+    )
     trim = np.zeros_like(mask)
     trim[42:45, 100:300] = True
     assert (pulled[trim] == merge[trim]).all(), "trim stays"
@@ -643,12 +660,14 @@ def test_pull_keeps_room_bright_flat_trim_next_to_blown_core():
     # Sunlit trim reads room-bright in the merge and dark in the view
     # frame while the blown core beside it takes the view. The trim's
     # own view pixels hold no scene, so every trim pixel stays.
+    rng = np.random.default_rng(17)
     merge = np.full((200, 200, 3), 150, np.uint8)
     merge[40:160, 60:140] = 255  # blown core
     merge[40:46, 60:140] = 242  # sunlit trim strip against the core
     view = np.full((200, 200, 3), 150, np.uint8)
     view[40:46, 60:140] = 40
-    view[46:160, 60:140] = 140  # view holds the core's scene
+    # Textured core: flat 140 reads as paint and stays out, like trim.
+    view[46:160, 60:140] = np.clip(140 + rng.normal(0, 12, (114, 80, 1)), 0, 249).astype(np.uint8)
     mask = np.zeros((200, 200), bool)
     mask[40:160, 60:140] = True
     pulled, _ = segment.pull_window(merge, view, mask)
@@ -681,3 +700,62 @@ def test_pull_reaches_full_view_inside_without_overshoot():
     hi = np.maximum(dark.astype(int), merge.astype(int))
     band = pulled.astype(int)
     assert ((band >= lo - 1) & (band <= hi + 1)).all(), "no overshoot past either input"
+
+
+def _sunlit_flat_trim_textured_glass():
+    """005 in miniature: flat sunlit trim at view 130-140 with the merge
+    trim near-white, beside grain-textured glass blown in the merge.
+
+    Every old take condition passes on that trim (bright in the merge,
+    mid-tone and unblown in the view, big gap), so the pull used to drag
+    dark flat trim into a white room and scar it brown. Flat view pixels
+    hold no scene: only textured view pixels take."""
+    rng = np.random.default_rng(11)
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255  # blown glass
+    merge[10:40, 56:144] = 250  # sunlit trim band, near-white like the glass
+    grain = rng.normal(0, 14, (120, 80, 1))
+    view = np.full((200, 200, 3), 150, np.uint8)
+    view[40:160, 60:140] = np.clip(150 + grain, 0, 249).astype(np.uint8)
+    view[10:40, 56:144] = 135  # flat trim in the mid frame, 005's own read
+    mask = np.zeros((200, 200), bool)
+    mask[10:164, 56:144] = True
+    return merge, view, mask
+
+
+def test_pull_leaves_flat_sunlit_trim_takes_textured_glass():
+    merge, view, mask = _sunlit_flat_trim_textured_glass()
+    pulled, info = segment.pull_window(merge, view, mask)
+    assert info["refused"] is None
+    assert (pulled[~mask] == merge[~mask]).all()
+    # Band interior, clear of both edges: each edge textures its own
+    # neighbors through the texture window and blends through the feather,
+    # by design. The band itself must keep the merge pixel-exact.
+    trim = np.zeros_like(mask)
+    trim[20:30, 70:130] = True
+    assert (pulled[trim] == merge[trim]).all(), "flat sunlit trim keeps the merge"
+    glass = np.zeros_like(mask)
+    glass[60:140, 70:130] = True
+    assert np.abs(pulled[glass].astype(int) - view[glass].astype(int)).mean() < 14, (
+        "textured blown glass still takes the real view"
+    )
+
+
+def test_take_mask_closes_bright_dither_holes():
+    """Foliage gaps read blown even in the view frame, dithering the take
+    into speckle: white merge dots inside the pulled glass that read as
+    solarized blobs. A bright hole fully inside the take fills, so the
+    shipped view is one continuous region."""
+    rng = np.random.default_rng(12)
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255
+    grain = rng.normal(0, 14, (120, 80, 1))
+    view = np.full((200, 200, 3), 150, np.uint8)
+    view[40:160, 60:140] = np.clip(150 + grain, 0, 249).astype(np.uint8)
+    view[95:105, 90:110] = 255  # sky gap, blown in the view too
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    take = segment._take_mask(merge, view, mask)
+    hole = np.zeros_like(mask)
+    hole[95:105, 90:110] = True
+    assert take[hole].all(), "bright dither holes fill: one continuous view"
