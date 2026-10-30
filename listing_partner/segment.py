@@ -54,14 +54,16 @@ VIEW_TEXTURE_MIN = 6.0
 #: are the merge's own detail (a leaf silhouette, a mullion shadow) and
 #: stay exactly as the merge drew them.
 HOLE_BRIGHT = 240
-#: Take erosion in pixels: the texture window straddles every glass/trim
+#: Trim halo in pixels: the texture window straddles every glass/trim
 #: edge, so a band this wide around each boundary passes texture on the
 #: glass's testimony and would drag dark trim paint into white rooms as
-#: outlines on every mullion. Eroding past the straddle radius keeps the
-#: insert on glass the window's own texture vouches for; narrow mullions
-#: vanish whole, wide glass barely notices. The seam lands on white trim
-#: beside white glass, where no line shows.
-TAKE_ERODE_PX = 9
+#: outlines on every mullion. Flat view pixels (paint, sky, smooth murk)
+#: vote no-scene; the take keeps clear of their halo, so edge bands and
+#: mullions stay from the merge while glass filaments far from any flat
+#: paint still fill. Blind area erosion collapsed sparse-but-real glass
+#: takes (unit-a 004, 006); the halo only ever touches trim-adjacent
+#: pixels, never the glass interior.
+TAKE_TRIM_HALO_PX = 9
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -360,25 +362,26 @@ def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) ->
     blinds and sills fail one of these and keep the merge pixel-exact.
     Bright holes fully inside the take (foliage gaps onto sky, bright in
     both frames) fill so the shipped view is one continuous region;
-    darker holes are the merge's own detail and stay. The take then
-    erodes past the texture straddle radius so edge bands and narrow
-    mullions never insert, and speckle dots too small to be a pane drop.
-    Glass pixels taken never reach near-white (filled holes match the
-    merge's own white), so the after count can only drop against an
-    honest before count.
+    darker holes are the merge's own detail and stay. The take then keeps
+    clear of flat paint's halo, so straddle bands and mullions never
+    insert, and speckle dots too small to be a pane drop. Glass pixels
+    taken never reach near-white (filled holes match the merge's own
+    white), so the after count can only drop against an honest before
+    count.
     """
     from listing_partner.checks import CLIP_LEVEL
 
     merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     view_gray = cv2.cvtColor(view_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     view_max = view_rgb.max(axis=2)
+    textured = _view_texture(view_gray) >= VIEW_TEXTURE_MIN
     raw = (
         mask
         & (merge_rgb.max(axis=2) >= SHOULDER_FLOOR)
         & (view_gray >= VIEW_DETAIL_FLOOR)
         & (view_max < CLIP_LEVEL)
         & ((merge_gray - view_gray) > AGREE_GAP)
-        & (_view_texture(view_gray) >= VIEW_TEXTURE_MIN)
+        & textured
     )
     if not raw.any():
         return raw
@@ -398,11 +401,15 @@ def _take_mask(merge_rgb: np.ndarray, view_rgb: np.ndarray, mask: np.ndarray) ->
             & (merge_rgb.max(axis=2) >= HOLE_BRIGHT)
         )
         take = raw | holes
-    # Past the straddle: edge bands and narrow mullions leave the take.
-    erode_d = 2 * TAKE_ERODE_PX + 1
-    take = cv2.erode(
-        take.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_d, erode_d))
+    # Clear of flat paint: dilate the texture-failing mask and drop the
+    # halo. Straddle bands and mullions sit inside it; glass far from any
+    # flat paint is untouched, however sparse its take.
+    halo_d = 2 * TAKE_TRIM_HALO_PX + 1
+    halo = cv2.dilate(
+        (~textured).astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (halo_d, halo_d)),
     ).astype(bool)
+    take = take & ~halo & mask
     if not take.any():
         return take
     # Speckle dots: connected take smaller than a thousandth of the mask
