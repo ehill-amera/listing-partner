@@ -24,6 +24,9 @@ from listing_partner import meta_client
 
 SAM_MODEL = "sam-3.1"
 SPARK_MODEL = "muse-spark-1.3"
+#: View-frame gray below this holds no outdoor detail: the pixel is an
+#: interior surface (frame, trim, blind) and stays from the merge.
+VIEW_DETAIL_FLOOR = 50
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -317,20 +320,27 @@ def pull_window(
 ) -> tuple[np.ndarray, int]:
     """Fill blown glass from the best-exposed real bracket frame.
 
-    Only near-white merge pixels (any channel at CLIP_LEVEL, the level
-    the highlights check measures) take the view: frames, mullions,
-    blinds, sills and trim already hold detail, so they stay from the
-    merge pixel-exact. The feather ramps up inside the replaced glass,
-    so the blend never reaches the frame: no dark outline, no smear.
+    A mask pixel takes the view only when the view frame holds outdoor
+    detail there (at or above VIEW_DETAIL_FLOOR): frames, mullions,
+    blinds, sills and trim read dark in the pull frame, so they stay
+    from the merge pixel-exact. The feather ramps up inside the replaced
+    glass, so the blend never reaches the frame: no dark outline, no
+    smear.
     The view is matched to the room with a single uniform gain that can
     only darken: it is never pushed brighter than its own frame, so a
     held view stays held. No clamp, no cap: what the view holds is what
     gets measured. Returns the pulled photo and the count of changed
     pixels outside the mask (must be 0).
     """
-    from listing_partner.checks import CLIP_LEVEL
-
-    replaced = mask & (merge_rgb.max(axis=2) >= CLIP_LEVEL)
+    # A pixel takes the view only when the view frame holds something
+    # there: frames, mullions, blinds, sills and trim read dark in the
+    # (dark) pull frame, while glass carries the brighter outdoor view.
+    # Measured unit-a: interior surfaces 18-36 gray, glass 60+ in the
+    # darkest frames. Brightness in the merge cannot decide: the balance
+    # shoulder compresses blown glass to just under 250, exactly where
+    # white trim sits.
+    view_gray = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY)
+    replaced = mask & (view_gray >= VIEW_DETAIL_FLOOR)
     if not replaced.any():
         return merge_rgb.copy(), 0
     feather = max(2, int(round(max(mask.shape) * 0.002)))

@@ -494,6 +494,32 @@ def test_pull_keeps_trim_and_blinds_from_the_merge():
     )
 
 
+def test_pull_replaces_shoulder_compressed_glass_but_not_trim():
+    # The balance shoulder compresses blown glass to just under 250,
+    # exactly where white trim sits: merge brightness cannot tell them
+    # apart, so the view frame decides. Glass the view holds is replaced;
+    # trim the view reads dark stays pixel-exact.
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 240  # blown, but under the near-white level
+    merge[36:40, 56:144] = 242  # white trim, same brightness as the glass
+    dark = np.full((200, 200, 3), 50, np.uint8)
+    view = np.tile(np.linspace(90, 190, 80, dtype=np.uint8), (120, 1))
+    dark[40:160, 60:140] = view[:, :, None]
+    dark[36:40, 56:144] = 45
+    mask = np.zeros((200, 200), bool)
+    mask[36:164, 56:144] = True
+    pulled, changed_outside = segment.pull_window(merge, dark, mask)
+    assert changed_outside == 0
+    trim = np.zeros_like(mask)
+    trim[36:40, 56:144] = True
+    assert (pulled[trim] == merge[trim]).all(), "white trim keeps its real color"
+    glass = np.zeros_like(mask)
+    glass[100:150, 70:130] = True
+    assert np.abs(pulled[glass].astype(int) - dark[glass].astype(int)).mean() < 15, (
+        "glass the view holds takes the view even under the clip level"
+    )
+
+
 def test_pull_keeps_dark_mullion_bar_from_the_merge():
     merge, dark, mask = _synthetic_brackets()
     merge[90:110, 40:160] = 120  # dark mullion bar across the blown glass
