@@ -178,6 +178,7 @@ def build_inputs(
     return {
         "balanced": balanced,
         "preshoulder": preshoulder,
+        "merged": merged,
         "aligned": aligned,
         "members": list(members),
         "order": order,
@@ -276,6 +277,7 @@ def finish_tail(
     final output.
     """
     from listing_partner.checks import CLIP_LEVEL
+    from listing_partner import measure
 
     name = record["name"]
     balanced = state["balanced"]
@@ -284,6 +286,37 @@ def finish_tail(
     # One shared crop for pull, measurement and file: before and after
     # count the same window pixels, and the file holds exactly those.
     y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
+    # Zone wood guard, second pass: the all-room vote can lavender shaded
+    # wood where no spill reaches. Measure the floor band on the balanced
+    # photo; when it reads purple, rebalance with the guard scaled to the
+    # excess. Rooms that need none keep the first pass untouched.
+    zone_frac = _floor_zone_frac(union, *balanced.shape[:2])
+    zone_full = measure.zone_mask(*balanced.shape[:2], zone_frac)
+    zone_purple, zone_lit = (0.0, 0)
+    if zone_full is not None and zone_full.any():
+        zone_purple, zone_lit = measure.purple_share(balanced, zone_full)
+    wood_max = 0.0
+    if zone_lit >= measure.FLOOR_MIN_LIT:
+        wood_max = finish.wood_max_for(zone_purple)
+    record["wood_guard"] = {
+        "zone_purple": round(zone_purple, 1),
+        "zone_lit": zone_lit,
+        "wood_max": wood_max,
+    }
+    if wood_max > 0:
+        anchor_full = np.zeros_like(valid)
+        anchor_full[y0:y1, x0:x1] = True
+        balanced, rebalance_report, preshoulder = finish.balance_exposure(
+            state["merged"],
+            anchor_mask=anchor_full,
+            return_preshoulder=True,
+            wood_zone=zone_full,
+            wood_max=wood_max,
+        )
+        rebalance_report["rebalanced"] = (
+            f"zone wood guard at {wood_max} (zone read {zone_purple:.1f}% purple)"
+        )
+        record["balance"] = rebalance_report
 
     def _crop(arr: np.ndarray) -> np.ndarray:
         return arr[y0:y1, x0:x1]
@@ -637,6 +670,13 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         )
         look_cell = _look_cell(entry.get("look"))
         floor_cell = _floor_cell(entry.get("floor"))
+        wood = entry.get("wood_guard") or {}
+        wood_cell = (
+            f"<p>floor zone guard at {wood['wood_max']} "
+            f"(zone read {wood['zone_purple']}% purple)</p>"
+            if wood.get("wood_max")
+            else ""
+        )
         clip_cell = (
             f"<p>window clip {entry.get('clip_before', 0.0):.4f} -&gt; "
             f"{entry.get('clip_after', 0.0):.4f} of window pixels "
@@ -653,7 +693,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f"strength {entry.get('distortion_strength', '')}, "
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')}{_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}{floor_cell}"
+            f"{clip_cell}{look_cell}{floor_cell}{wood_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"

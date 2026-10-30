@@ -47,20 +47,32 @@ SHOULDER_SLOPE = 0.07
 AUTO_GAIN_LO = 0.4
 AUTO_GAIN_HI = 3.5
 #: White balance reads the room without its brightest pixels (windows,
-#: lamps), so daylight glass never votes on tungsten walls. The vote
-#: comes from the most neutral pixels only: saturated surfaces (wood
-#: floors, grass) cannot set the illuminant, or the correction grays
-#: them. Interiors under artificial light correct hard; daylight
-#: exteriors keep their scene palette with a light touch.
+#: lamps), so daylight glass never votes on tungsten walls. Interiors
+#: under artificial light correct hard; daylight exteriors keep their
+#: scene palette with a light touch.
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
-#: The illuminant vote is the least-saturated share of mid-bright room
-#: pixels. Too few neutral pixels (fewer than WB_MIN_VOTE) means no
-#: neutral surface exists to read, and the vote falls back to the whole
-#: room, saying so in the report.
-WB_NEUTRAL_SHARE = 0.05
-WB_MIN_VOTE = 1000
+#: Zone wood guard: saturated warm surfaces (wood floors) carry their
+#: own color, so the full vote grays them lavender. Inside wood_zone the
+#: correction scales back on wood-toned pixels, in proportion to
+#: saturation-times-warmth. Walls, ceilings and spill are unsaturated or
+#: cool and keep the full vote. The strength follows the measured zone
+#: purple: wood_max_for maps it to 0 below WOOD_FIRE_AT and up to
+#: WOOD_MAX_CAP. Calibrated on unit-a's lavender floors (see the unit 02
+#: report); frozen with the other look settings.
+WOOD_GAIN = 6.0
+WOOD_FIRE_AT = 5.0
+WOOD_MAX_CAP = 0.6
+
+
+def wood_max_for(zone_purple_pct: float) -> float:
+    """Wood-guard strength for a measured floor-zone purple share.
+
+    No guard on clean zones, the full guard on lavender ones,
+    proportional between: rooms that need none get none.
+    """
+    return min(WOOD_MAX_CAP, WOOD_MAX_CAP * max(0.0, zone_purple_pct - WOOD_FIRE_AT) / 10.0)
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -91,35 +103,17 @@ def target_median(img: np.ndarray) -> float:
     return INTERIOR_TARGET_MEDIAN
 
 
-def _illuminant_vote(
-    work: np.ndarray, gray: np.ndarray, room: np.ndarray
-) -> tuple[np.ndarray, str]:
-    """The pixels the white-balance illuminant is read from, and why.
-
-    The least-saturated WB_NEUTRAL_SHARE of mid-bright room pixels:
-    neutral surfaces carry the illuminant, saturated ones (wood, grass)
-    carry their own color and must not vote. Dark pixels read noisy
-    chromaticity, so the pool starts at the room's lower quartile.
-    """
-    pool = room & (gray >= float(np.percentile(gray[room], 25.0)))
-    mx = work.max(axis=2)
-    sat = 1.0 - work.min(axis=2) / np.maximum(mx, 1.0)
-    cut = float(np.percentile(sat[pool], 100.0 * WB_NEUTRAL_SHARE))
-    vote = pool & (sat <= cut)
-    if vote.sum() < WB_MIN_VOTE:
-        return room, "all-room fallback: too few neutral pixels to vote on"
-    return vote, f"least-saturated {100 * WB_NEUTRAL_SHARE:.0f}% of mid-bright room"
-
-
 def balance_exposure(
     img: np.ndarray,
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
     return_preshoulder: bool = False,
+    wood_zone: np.ndarray | None = None,
+    wood_max: float = 0.0,
 ) -> tuple[np.ndarray, dict] | tuple[np.ndarray, dict, np.ndarray]:
     """Balance a merged room photo. Returns (photo, report).
 
-    White balance from the room's own most-neutral pixels, shadow lift
+    White balance from the room's own below-bright pixels, shadow lift
     through a blurred luminance mask, automatic gain toward the shared
     class target (bounded), then a soft highlight shoulder. Pixels under
     protect keep their exact values. No MLS twin is read.
@@ -131,6 +125,11 @@ def balance_exposure(
     With return_preshoulder, also returns the balanced photo from just
     before the shoulder: the shoulder parks blown glass under the
     near-white level, so honest highlight numbers are read there.
+
+    wood_zone with wood_max scales the white-balance correction back on
+    wood-toned pixels inside the zone (the floor band near the windows):
+    the pipeline measures the zone purple on the first pass and
+    rebalances with wood_max_for(that number) when it fires.
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
@@ -142,14 +141,22 @@ def balance_exposure(
     report: dict = {"white_balanced": False}
     if room.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
-        vote, vote_why = _illuminant_vote(work, gray, room)
-        means = np.array([work[:, :, c][vote].mean() for c in range(3)])
+        means = np.array([work[:, :, c][room].mean() for c in range(3)])
         target = float(means.mean())
-        factors = target / np.maximum(means, 1e-6)
-        factors = 1.0 + strength * (factors - 1.0)
+        base = target / np.maximum(means, 1e-6)
+        if wood_zone is not None and wood_max > 0 and wood_zone.any():
+            mx0 = work.max(axis=2)
+            sat0 = 1.0 - work.min(axis=2) / np.maximum(mx0, 1.0)
+            warmth0 = np.clip((work[:, :, 0] - work[:, :, 2]) / np.maximum(mx0, 1.0), 0.0, 1.0)
+            m = np.clip(sat0 * sat0 * warmth0 * WOOD_GAIN, 0.0, wood_max)
+            m = np.where(wood_zone, m, 0.0)
+            factors = 1.0 + (1.0 - m)[:, :, None] * strength * (base - 1.0)[None, None, :]
+            report["wood_guard"] = round(float(m[wood_zone].mean()), 4)
+        else:
+            factors = 1.0 + strength * (base - 1.0)
+            report["wood_guard"] = 0.0
         pre = work.copy()
-        work *= factors[None, None, :]
-        report["wb_vote"] = vote_why
+        work *= factors
         # Daylight-spill guard, interiors only: the vote reads
         # tungsten-lit walls, and its cooling is right for them, but
         # daylight spilling across floors near windows is already

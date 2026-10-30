@@ -52,18 +52,36 @@ def _warm_room_big_wood_floor():
     return img
 
 
-def test_white_balance_votes_gray_not_wood():
-    before = _warm_room_big_wood_floor().astype(float)
+def test_zone_wood_guard_keeps_floor_warm():
+    """Saturated warm floors keep their color inside the guarded zone.
+
+    Unit-a 006's floor voted itself gray under the all-room vote; the
+    zone wood guard scales the correction back on wood-toned pixels near
+    the windows, while walls outside the zone cool fully. The guard
+    strength follows the measured zone purple, so rooms that need none
+    get none.
+    """
+    img = _warm_room_big_wood_floor()
+    before = img.astype(float)
     wall_gap_before = before[25:55, 20:180, 0].mean() - before[25:55, 20:180, 2].mean()
-    out, _ = finish.balance_exposure(_warm_room_big_wood_floor())
+    zone = np.zeros((200, 200), bool)
+    zone[60:, :] = True
+    out, _ = finish.balance_exposure(img, wood_zone=zone, wood_max=0.6)
     walls = out[25:55, 20:180].astype(float)
     wall_gap = walls[:, :, 0].mean() - walls[:, :, 2].mean()
     assert 0 < wall_gap < wall_gap_before, (
-        f"walls cool toward neutral without flipping blue, got R-B {wall_gap:.1f}"
+        f"walls outside the zone still cool, got R-B {wall_gap:.1f}"
     )
     floor = out[100:180, 20:180].astype(float)
     gap = floor[:, :, 0].mean() - floor[:, :, 2].mean()
-    assert gap > 45, f"wood keeps its warm R-B spread instead of going gray, got {gap:.1f}"
+    assert gap > 45, f"guarded wood keeps its warm R-B spread, got {gap:.1f}"
+
+
+def test_wood_guard_strength_follows_zone_purple():
+    assert finish.wood_max_for(4.9) == 0.0, "clean zones get no guard"
+    assert finish.wood_max_for(34.0) == 0.6, "lavender zones get the full guard"
+    mid = finish.wood_max_for(10.0)
+    assert 0.0 < mid < 0.6, "mild zones get a proportional guard"
 
 
 def _exterior_room():
@@ -201,6 +219,9 @@ def test_shared_look_constants_stay_frozen():
     assert finish.WB_BRIGHT_PERCENTILE == 90.0
     assert finish.WB_INTERIOR_STRENGTH == 0.95
     assert finish.WB_EXTERIOR_STRENGTH == 0.4
+    assert finish.WOOD_GAIN == 6.0
+    assert finish.WOOD_FIRE_AT == 5.0
+    assert finish.WOOD_MAX_CAP == 0.6
 
 
 def test_flat_patches_cover_a_uniform_image():
