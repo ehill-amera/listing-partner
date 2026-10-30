@@ -598,6 +598,59 @@ def test_pull_fills_wide_blown_bay_from_detail_frame():
     assert (pulled[slat] == merge[slat]).all(), "thin slats stay"
 
 
+def test_pull_fills_shoulder_glass_but_not_lit_trim():
+    # Blown glass the shoulder parks just under near-white takes the
+    # detail frame when it holds texture there; lit trim at the same
+    # merge brightness stays because the detail frame reads it dim and
+    # flat. Samples stay clear of the hard test seam by the texture
+    # window radius; real seams hold dark frame pixels either way.
+    rng = np.random.default_rng(7)
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 240  # shoulder-parked blown glass
+    merge[150:160, 60:140] = 242  # lit trim, same brightness
+    dark = np.full((200, 200, 3), 150, np.uint8)
+    dark[40:160, 60:140] = 45  # pull frame reads both dark
+    dark[150:160, 60:140] = 40
+    mid = np.full((200, 200, 3), 150, np.uint8)
+    grain = rng.normal(0, 12, (110, 80, 1))
+    mid[40:150, 60:140] = np.clip(140 + grain, 0, 255).astype(np.uint8)
+    mid[150:160, 60:140] = 80  # trim: dim and flat in the detail frame
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
+    assert changed_outside == 0
+    glass = np.zeros_like(mask)
+    glass[60:140, 70:130] = True
+    assert abs(pulled[glass].astype(int).mean() - 140) < 30, (
+        "shoulder glass takes the detail frame that holds texture"
+    )
+    trim = np.zeros_like(mask)
+    trim[154:158, 70:130] = True
+    assert (pulled[trim] == merge[trim]).all(), "lit trim stays"
+
+
+def test_pull_keeps_room_bright_flat_trim_next_to_blown_core():
+    # Sunlit trim reads room-bright and flat in both frames while the
+    # blown core beside it takes the detail frame. The trim's own
+    # pixels hold no more texture in the detail frame than in the merge,
+    # so the shoulder rule leaves every trim pixel alone.
+    merge = np.full((200, 200, 3), 150, np.uint8)
+    merge[40:160, 60:140] = 255  # blown core
+    merge[40:46, 60:140] = 242  # sunlit trim strip against the core
+    dark = np.full((200, 200, 3), 150, np.uint8)
+    dark[40:46, 60:140] = 40
+    dark[46:160, 60:140] = 42
+    mid = np.full((200, 200, 3), 150, np.uint8)
+    mid[46:160, 60:140] = 140  # detail holds the core's view
+    mask = np.zeros((200, 200), bool)
+    mask[40:160, 60:140] = True
+    pulled, changed_outside = segment.pull_window(merge, dark, mask, mid)
+    assert changed_outside == 0
+    trim = np.zeros_like(mask)
+    trim[40:46, 70:130] = True
+    assert (pulled[trim] == merge[trim]).all(), "sunlit trim stays"
+
+
 def test_pull_keeps_dark_mullion_bar_from_the_merge():
     merge, dark, mask = _synthetic_brackets()
     merge[90:110, 40:160] = 120  # dark mullion bar across the blown glass

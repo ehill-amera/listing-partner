@@ -29,6 +29,14 @@ SPARK_MODEL = "muse-spark-1.3"
 #: The same floor scores detail frames: a frame darker than this across
 #: the window holds murk, not a view.
 VIEW_DETAIL_FLOOR = 50
+#: The detail frame must read at least this bright to fill a near-white
+#: merge pixel the pull frame reads dark: unit-a trim reads 60-100 there
+#: (stays), glass bays read 135+ (take the view). Measured both sides.
+MID_DETAIL_FLOOR = 110
+#: Merge pixels at or above this gray with no detail-frame hold are
+#: near-white: the balance shoulder parks blown glass here. Below it the
+#: merge holds its own detail.
+SHOULDER_FLOOR = 240
 
 # Follow-up rounds after the first annotated photo. Each round is one
 # capped call; the bound keeps a confused photo from eating the budget.
@@ -353,11 +361,15 @@ def pull_window(
     A mask pixel takes the darkest pull frame only when that frame holds
     outdoor detail there (at or above VIEW_DETAIL_FLOOR): frames,
     mullions, blinds, sills and trim read dark in the pull frame, so
-    they stay from the merge pixel-exact. Mask pixels the merge blows
-    out but the pull frame reads dark are sky the dark frame
-    underexposes (unit-a 009: specks where the merge reads 245+ and the
-    view reads 42): they take the detail frame's real pixels, never
-    diffusion fill. The feather ramps up inside the replaced glass, so
+    they stay from the merge pixel-exact. A mask pixel the merge blows
+    out fully is glass the dark frame underexposes: it takes the detail
+    frame's real pixels, never diffusion fill. A mask pixel parked just
+    under near-white by the balance shoulder is only filled when the
+    detail frame holds more there than the merge does: brighter than the
+    unit-a trim band (MID_DETAIL_FLOOR, trim reads 60-100) and carrying
+    more local texture than the merge's flat shoulder. Sunlit trim reads
+    room-bright and flat in both frames, so it stays. The feather ramps
+    up inside the replaced glass, so
     the blend never reaches the frame: no dark outline, no smear. Gains
     can only darken: no view is ever pushed brighter than its own frame,
     no clamp, no cap. Returns the pulled photo and the count of changed
@@ -366,8 +378,30 @@ def pull_window(
     from listing_partner.checks import CLIP_LEVEL
 
     view_gray = cv2.cvtColor(dark_rgb, cv2.COLOR_RGB2GRAY)
+    merge_max = merge_rgb.max(axis=2)
     replaced = mask & (view_gray >= VIEW_DETAIL_FLOOR)
-    specks = mask & ~replaced & (merge_rgb.max(axis=2) >= CLIP_LEVEL)
+    specks = mask & ~replaced & (merge_max >= CLIP_LEVEL)
+    if mid_rgb is not None:
+        mid_gray = cv2.cvtColor(mid_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        merge_gray = cv2.cvtColor(merge_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        # Local texture (5x5 variance) in each frame: the detail frame
+        # holds the view where it carries more texture than the merge.
+        mid_mean = cv2.blur(mid_gray, (5, 5))
+        mid_var = np.clip(cv2.blur(mid_gray * mid_gray, (5, 5)) - mid_mean * mid_mean, 0, None)
+        merge_mean = cv2.blur(merge_gray, (5, 5))
+        merge_var = np.clip(
+            cv2.blur(merge_gray * merge_gray, (5, 5)) - merge_mean * merge_mean, 0, None
+        )
+        holds_view = mid_var > np.maximum(merge_var * 1.5, 1.0)
+        near = (
+            mask
+            & ~replaced
+            & (merge_max >= SHOULDER_FLOOR)
+            & (merge_max < CLIP_LEVEL)
+            & (mid_gray >= MID_DETAIL_FLOOR)
+            & holds_view
+        )
+        specks |= near
     if not replaced.any() and not specks.any():
         return merge_rgb.copy(), 0
     room = ~mask
