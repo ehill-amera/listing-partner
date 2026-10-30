@@ -25,6 +25,18 @@ def test_white_balance_neutralizes_cast():
     assert abs(gray[:, :, 0].mean() - gray[:, :, 2].mean()) < 8, "walls read neutral"
 
 
+def test_daylight_spill_keeps_neutral_color():
+    img = np.full((200, 200, 3), (150, 100, 60), np.uint8)  # tungsten-lit room
+    img[120:180, 60:140] = (205, 205, 205)  # neutral daylight spill on the floor
+    out, _ = finish.balance_exposure(img)
+    walls = out[20:60, 20:180].astype(float)
+    assert abs(walls[:, :, 0].mean() - walls[:, :, 2].mean()) < 12, "walls still neutralize"
+    spill = out[130:170, 70:130].astype(float)
+    assert abs(spill[:, :, 2].mean() - spill[:, :, 0].mean()) < 8, (
+        "daylight spill stays neutral instead of taking the tungsten room's blue"
+    )
+
+
 def test_shadow_lift_opens_corners_without_haze():
     out, report = finish.balance_exposure(_room_cast())
     dark_before = np.sort(_room_cast().reshape(-1, 3).mean(axis=1))[:4000].mean()

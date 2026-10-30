@@ -113,8 +113,26 @@ def balance_exposure(
         target = float(means.mean())
         factors = target / np.maximum(means, 1e-6)
         factors = 1.0 + strength * (factors - 1.0)
+        pre = work.copy()
         work *= factors[None, None, :]
+        # Daylight-spill guard: the vote reads tungsten-lit walls, and its
+        # cooling is right for them, but daylight spilling across floors
+        # near windows is already neutral, so full cooling turns it blue.
+        # Bright low-saturation pixels keep their own chromaticity in
+        # proportion: tungsten walls and ceilings are saturated or dim and
+        # keep the full vote. Anchors are the photo's own percentiles, and
+        # the look targets below do not move.
+        gray_pre = pre.mean(axis=2)
+        mx = pre.max(axis=2)
+        lowsat = 1.0 - (mx - pre.min(axis=2)) / np.maximum(mx, 1.0)
+        room_gray = gray_pre[room]
+        p50 = float(np.median(room_gray))
+        p90 = float(np.percentile(room_gray, 90.0))
+        bright = np.clip((gray_pre - p50) / max(1.0, p90 - p50), 0.0, 1.0)
+        guard = (lowsat * lowsat * bright)[:, :, None].astype(np.float32)
+        work = work * (1.0 - guard) + pre * guard
         report["white_balanced"] = True
+        report["spill_guard"] = round(float(guard.mean()), 4)
     lifted_gray = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(lifted_gray.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
