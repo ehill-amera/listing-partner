@@ -79,9 +79,9 @@ def test_zone_wood_guard_keeps_floor_warm():
 
 def test_wood_guard_strength_follows_zone_purple():
     assert finish.wood_max_for(4.9) == 0.0, "clean zones get no guard"
-    assert finish.wood_max_for(34.0) == 0.6, "lavender zones get the full guard"
+    assert finish.wood_max_for(34.0) == 0.4, "lavender zones get the full guard"
     mid = finish.wood_max_for(10.0)
-    assert 0.0 < mid < 0.6, "mild zones get a proportional guard"
+    assert 0.0 < mid < 0.4, "mild zones get a proportional guard"
 
 
 def _exterior_room():
@@ -221,7 +221,8 @@ def test_shared_look_constants_stay_frozen():
     assert finish.WB_EXTERIOR_STRENGTH == 0.4
     assert finish.WOOD_GAIN == 6.0
     assert finish.WOOD_FIRE_AT == 5.0
-    assert finish.WOOD_MAX_CAP == 0.6
+    assert finish.WOOD_MAX_CAP == 0.4
+    assert finish.WOOD_RB_CAP == 35.0
 
 
 def test_flat_patches_cover_a_uniform_image():

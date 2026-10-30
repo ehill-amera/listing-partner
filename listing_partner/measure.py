@@ -24,10 +24,12 @@ def lab_mean_ab(rgb: np.ndarray) -> tuple[float, float]:
 
 #: Purple-cast tolerance for the floor zone near pulled windows, in
 #: percentage points of lit zone pixels reading R and B above G.
-#: Calibrated against the MLS twins' own zone numbers (see the unit 02
-#: report): twin zones read 0-6%, so 8 leaves margin without hiding a
-#: lavender floor like unit-a 006's 26%.
+#: Absolute bar 8; rooms whose own floor reads gray (unit-a 003, 004,
+#: 007) are judged against Erik's finish of the same floor instead
+#: (FLOOR_TWIN_SLACK): matching the reference within slack is correct
+#: even past 8, and anything worse than the reference still fails.
 FLOOR_CAST_TOL = 8.0
+FLOOR_TWIN_SLACK = 3.0
 #: A floor zone with fewer lit pixels than this is not a measurement.
 FLOOR_MIN_LIT = 1000
 
@@ -46,13 +48,17 @@ def purple_share(rgb: np.ndarray, zone: np.ndarray) -> tuple[float, int]:
 
     Purple is R and B both above G by more than 2 on pixels brighter
     than mean 90: the lavender gray a wrong white balance paints on
-    wood. Warm wood reads R above B and never counts.
+    wood. Warm wood reads R above B and never counts. Arithmetic runs
+    on int16: on uint8, G at 255 wraps the +2 and white sun patches
+    would count as purple.
     """
     lit = zone & (rgb.mean(axis=2) > 90)
     lit_n = int(lit.sum())
     if lit_n == 0:
         return 0.0, 0
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    r = rgb[:, :, 0].astype(np.int16)
+    g = rgb[:, :, 1].astype(np.int16)
+    b = rgb[:, :, 2].astype(np.int16)
     share = float((((r > g + 2) & (b > g + 2)) & lit).sum()) / lit_n * 100.0
     return share, lit_n
 
@@ -89,6 +95,9 @@ def floor_cast_stats(finished_path: Path, mls_path: Path | None, zone_frac: tupl
         mls_cast, _ = purple_share(mls_rgb, mls_zone)
     ok = cast <= FLOOR_CAST_TOL
     twin = f", MLS twin {mls_cast:.1f}%" if mls_cast is not None else ", no MLS twin"
+    if not ok and mls_cast is not None and cast <= mls_cast + FLOOR_TWIN_SLACK:
+        ok = True
+        twin += " (matches the reference floor)"
     reason = f"floor near windows {cast:.1f}% purple (limit {FLOOR_CAST_TOL:.0f}%){twin}"
     return {
         "floor_cast": round(cast, 1),

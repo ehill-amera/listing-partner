@@ -29,6 +29,23 @@ def test_look_stats_reads_files_not_arrays(tmp_path):
     assert abs(stats["fin_median"] - 190) < 3
 
 
+def test_floor_cast_ignores_white_sun_patches(tmp_path):
+    """White reads R == G == B, never purple.
+
+    Unit-a 001's floor zone holds blown sun patches through the
+    windows: on uint8 the +2 wrapped past 255 and every white pixel
+    counted, firing the wood guard at 30% on a 3% zone.
+    """
+    import cv2
+
+    white = np.full((100, 120, 3), 255, np.uint8)
+    white_path = tmp_path / "white.jpg"
+    cv2.imwrite(str(white_path), cv2.cvtColor(white, cv2.COLOR_RGB2BGR))
+    stats = measure.floor_cast_stats(white_path, None, (0.0, 1.0, 0.0, 1.0))
+    assert stats["floor_cast"] == 0.0, stats
+    assert stats["floor_ok"] is True
+
+
 def test_floor_cast_flags_lavender_not_wood(tmp_path):
     import cv2
 
@@ -43,6 +60,28 @@ def test_floor_cast_flags_lavender_not_wood(tmp_path):
     lav_stats = measure.floor_cast_stats(lav_path, wood_path, zone)
     assert lav_stats["floor_ok"] is False, "lavender floors must fail"
     assert lav_stats["mls_floor_cast"] is not None
+
+
+def test_floor_cast_matches_gray_reference_floor(tmp_path):
+    """A zone no more purple than Erik's own finish of it passes.
+
+    Unit-a 007's rug reads purple in the MLS twin too; matching the
+    reference within slack is correct there, while anything worse than
+    the reference still fails.
+    """
+    import cv2
+
+    gray = np.full((100, 120, 3), (200, 195, 210), np.uint8)
+    gray_path = tmp_path / "gray.jpg"
+    cv2.imwrite(str(gray_path), cv2.cvtColor(gray, cv2.COLOR_RGB2BGR))
+    zone = (0.0, 1.0, 0.0, 1.0)
+    same = measure.floor_cast_stats(gray_path, gray_path, zone)
+    assert same["floor_ok"] is True, same["floor_reason"]
+    wood = np.full((100, 120, 3), (191, 176, 166), np.uint8)
+    wood_path = tmp_path / "wood.jpg"
+    cv2.imwrite(str(wood_path), cv2.cvtColor(wood, cv2.COLOR_RGB2BGR))
+    worse = measure.floor_cast_stats(gray_path, wood_path, zone)
+    assert worse["floor_ok"] is False, "worse than the reference still fails"
 
 
 def test_overlay_tint_touches_mask_only():

@@ -55,15 +55,21 @@ WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
 #: Zone wood guard: saturated warm surfaces (wood floors) carry their
 #: own color, so the full vote grays them lavender. Inside wood_zone the
-#: correction scales back on wood-toned pixels, in proportion to
-#: saturation-times-warmth. Walls, ceilings and spill are unsaturated or
-#: cool and keep the full vote. The strength follows the measured zone
-#: purple: wood_max_for maps it to 0 below WOOD_FIRE_AT and up to
-#: WOOD_MAX_CAP. Calibrated on unit-a's lavender floors (see the unit 02
-#: report); frozen with the other look settings.
+#: correction scales back on wood-toned pixels that would still read
+#: cooler than finished wood (estimated R-B under WOOD_RB_CAP), in
+#: proportion to saturation-times-warmth. Already-warm wood is left
+#: alone, which bounds the global cost: only the deficit is corrected.
+#: Walls, ceilings and spill are unsaturated or cool and keep the full
+#: vote. The strength follows the measured zone purple: wood_max_for
+#: maps it to 0 below WOOD_FIRE_AT and up to WOOD_MAX_CAP. Calibrated on
+#: unit-a's lavender floors (see the unit 02 report): 0.4 fixes every
+#: wood zone while holding room 007's look, where the full 0.6 warmed
+#: the global mean past the look limit. Frozen with the other look
+#: settings.
 WOOD_GAIN = 6.0
 WOOD_FIRE_AT = 5.0
-WOOD_MAX_CAP = 0.6
+WOOD_MAX_CAP = 0.4
+WOOD_RB_CAP = 35.0
 
 
 def wood_max_for(zone_purple_pct: float) -> float:
@@ -150,6 +156,12 @@ def balance_exposure(
             warmth0 = np.clip((work[:, :, 0] - work[:, :, 2]) / np.maximum(mx0, 1.0), 0.0, 1.0)
             m = np.clip(sat0 * sat0 * warmth0 * WOOD_GAIN, 0.0, wood_max)
             m = np.where(wood_zone, m, 0.0)
+            # Cool-only: pixels the full correction would leave warmer
+            # than finished wood keep it. Estimated from the base factors
+            # so the gate reads corrected light, not raw.
+            full = 1.0 + strength * (base - 1.0)
+            est_rb = work[:, :, 0] * full[0] - work[:, :, 2] * full[2]
+            m = np.where(est_rb < WOOD_RB_CAP, m, 0.0)
             factors = 1.0 + (1.0 - m)[:, :, None] * strength * (base - 1.0)[None, None, :]
             report["wood_guard"] = round(float(m[wood_zone].mean()), 4)
         else:
