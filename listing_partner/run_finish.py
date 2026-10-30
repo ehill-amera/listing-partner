@@ -391,6 +391,28 @@ def _check_line(label: str, result) -> str:
     return f"<p>{verdict} {label}: {reason}</p>"
 
 
+def _lens_note(entry: dict) -> str:
+    """Plain reason when lens correction had nothing to correct.
+
+    A fitted strength of 0 on every focal length means the profile
+    match found no distortion, so straightness is not expected to
+    improve on that photo. Anything else (including a missing strength
+    record) carries no note.
+    """
+    strengths = entry.get("distortion_strength")
+    if not isinstance(strengths, dict) or not strengths:
+        return ""
+    try:
+        if all(float(value) == 0.0 for value in strengths.values()):
+            return (
+                " (fitted strength 0: no distortion to correct,"
+                " straightness not expected to improve)"
+            )
+    except (TypeError, ValueError):
+        return ""
+    return ""
+
+
 def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> Path:
     """review-finish.html: one row per shot plus the measured top line.
 
@@ -439,7 +461,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f" (detail: {entry.get('mid_frame', 'same')})</p>"
             f"<p>lens strength {entry.get('distortion_strength', '')}, "
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
-            f"ghosting {entry.get('ghosting', '')}</p>"
+            f"ghosting {entry.get('ghosting', '')}{_lens_note(entry)}</p>"
             f"{clip_cell}{look_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'

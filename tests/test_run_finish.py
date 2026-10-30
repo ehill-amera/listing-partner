@@ -303,3 +303,56 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
     assert "fitted on these same 16 photos" in html, (
         "the page must say plainly the shared look was fitted on these photos"
     )
+
+
+def test_review_names_zero_strength_photos_plainly(tmp_path):
+    from listing_partner import run_finish as rf
+
+    def entry(name, strengths):
+        return {
+            "index": 1,
+            "name": name,
+            "frames_used": ["a.NEF"],
+            "frames_reason": "full",
+            "pull_frame": "a.NEF",
+            "distortion_strength": strengths,
+            "verticals": "level already",
+            "vignetting": "skipped: x",
+            "ghosting": 0.0,
+            "clip_before": 0.0,
+            "clip_after": 0.0,
+            "window_pixels": 0,
+            "windows": [],
+            "rejections": [],
+            "checks": {},
+            "look": None,
+        }
+
+    manifest = {
+        "summary": {
+            "photos_finished": 2,
+            "photos_failed": 0,
+            "run_seconds": 3.0,
+            "noise_before": 3.0,
+            "noise_after": 1.5,
+            "windows_found": 0,
+            "windows_confirmed": 0,
+            "windows_rejected": 0,
+            "photos_with_windows": 0,
+            "clip_before_n": 0,
+            "clip_after_n": 0,
+            "window_pixels": 0,
+            "clip_before_pct": 0.0,
+            "clip_after_pct": 0.0,
+            "unit_spend_usd": 0.0,
+        },
+        "sets": [entry("001", {"10.0": 0.0}), entry("002", {"10.0": 0.25})],
+    }
+    html = rf.build_finish_review(tmp_path, manifest, {}).read_text()
+    assert "no distortion to correct" in html, (
+        "strength-0 photos like 001/009/012 must say why straightness did not improve"
+    )
+    corrected = html.split("Shot 002")[1]
+    assert "no distortion to correct" not in corrected, (
+        "photos with real correction must not carry the zero-strength note"
+    )
