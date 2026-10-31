@@ -56,10 +56,6 @@ AUTO_GAIN_HI = 3.5
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
-#: White-balance voters are room pixels below this saturation
-#: (max-min)/max. Warm-lit whites read ~0.17-0.25, gray floors ~0.07,
-#: wood 0.3 and up: the vote reads ceilings and trim, never wood.
-WB_NEUTRAL_SAT = 0.25
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -129,15 +125,13 @@ def balance_exposure(
     if anchor_mask is not None:
         room = room & anchor_mask
     report: dict = {"white_balanced": False}
-    # The vote reads neutral surfaces (low-saturation room pixels: white
-    # ceilings, trim, gray floors): saturated wood must never set the
-    # illuminant, or its vote flips shadowed floors blue. Too few
-    # neutral pixels, and every room pixel votes instead.
-    mx = work.max(axis=2)
-    sat = (mx - work.min(axis=2)) / np.maximum(mx, 1.0)
-    neutral = room & (sat < WB_NEUTRAL_SAT)
-    voters = neutral if neutral.sum() > 1000 else room
-    report["wb_voters"] = "neutral" if voters is neutral else "all-room"
+    # The vote reads the whole room below the bright cutoff: the
+    # low-saturation subset in real rooms is mid-dark pixels, not neutral
+    # surfaces, and voting from it under-corrects every photo (refit
+    # measurement Oct 31: 0 of 16 looks pass, rooms read far too
+    # yellow). One global multiplier per channel either way, so no
+    # regional or brightness-dependent color step exists.
+    voters = room
     if voters.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
         means = np.array([work[:, :, c][voters].mean() for c in range(3)])
