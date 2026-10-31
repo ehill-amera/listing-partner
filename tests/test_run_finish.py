@@ -231,6 +231,58 @@ def test_replay_loads_saved_rejected_masks(tmp_path, monkeypatch):
     assert (dirs["review"] / "rejected_001_3.jpg").exists()
 
 
+def test_process_set_scales_masks_width_first(tmp_path, monkeypatch):
+    """Full-res masks land on the (rows, cols) frame, not transposed.
+
+    Regression: the scale call once passed (h, w) where (w, h) belongs,
+    painting every mask and box onto a swapped frame. Dormant while
+    replays bypass scaling; fresh sets failed on it in the final round.
+    Only Meta-facing steps are stubbed (the far side); the real scale,
+    save and tail run on a non-square frame.
+    """
+    import cv2
+    from listing_partner import run_finish as rf
+    from listing_partner import segment as seg
+
+    full = np.full((30, 40, 3), 150, np.uint8)  # non-square: h=30 rows, w=40 cols
+
+    def _stub_inputs(members, record):
+        record["straight_before"] = 200.0
+        record["straight_after"] = 200.0
+        record["distortion_applied"] = False
+        record["vertical_residual"] = 0.0
+        return {
+            "balanced": full.copy(),
+            "merged": full.copy(),
+            "aligned": [full.copy()],
+            "members": list(members),
+            "order": {},
+            "small": np.zeros((8, 10, 3), np.uint8),
+            "sent_jpeg": b"0",
+            "sent_h": 8,
+            "sent_w": 10,
+            "valid": np.ones((30, 40), bool),
+            "h": 30,
+            "w": 40,
+        }
+
+    sent_mask = np.zeros((8, 10), bool)
+    sent_mask[:, 0:5] = True
+
+    def _stub_find(image_jpeg, prompt, **kwargs):
+        return [{"object_id": 0, "box": (0, 0, 5, 8), "mask": sent_mask.copy()}]
+
+    monkeypatch.setattr(rf, "build_inputs", _stub_inputs)
+    monkeypatch.setattr(seg, "find_candidates", _stub_find)
+    monkeypatch.setattr(seg, "verify_candidates", lambda *a, **k: {0: (True, "sky and trees")})
+    dirs = _tail_dirs(tmp_path)
+    record = rf.process_set([Path("a.NEF")], dirs, 1)
+    assert record["error"] is None, record.get("error")
+    assert record["windows"][0]["box"] == (0, 0, 20, 30)
+    saved = cv2.imread(str(dirs["masks"] / "001_window0.png"), cv2.IMREAD_GRAYSCALE)
+    assert saved.shape == (30, 40), f"mask lands on the frame, got {saved.shape}"
+
+
 def test_finish_tail_reports_pull_checks_not_measured(tmp_path):
     """Criteria 4, 5 and 6 are paused with the pulls: step-B checks read
     NOT MEASURED, while clip numbers are still recorded for the page."""

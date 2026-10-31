@@ -460,7 +460,11 @@ def process_set(
         else:
             verdicts = {}
         record["transcript"] = transcript
-        scaled = segment.scale_candidates(candidates, state["sent_w"], state["sent_h"], h, w)
+        # Width first, height second: the full-res frame is w columns by
+        # h rows, and a transposed call scales boxes and masks onto a
+        # swapped frame (dormant since the pulls-off replay bypasses this
+        # line; fresh sets failed on it in the final round).
+        scaled = segment.scale_candidates(candidates, state["sent_w"], state["sent_h"], w, h)
         confirmed = [c for c in scaled if verdicts.get(c["object_id"], (False, ""))[0]]
         record["windows"] = [
             {
