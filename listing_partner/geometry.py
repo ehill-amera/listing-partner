@@ -620,11 +620,17 @@ def ghosting_score(frames: list[np.ndarray]) -> float:
 
 
 def deghost_decision(score: float) -> str:
-    """Plain-words deghost decision for a ghosting score."""
+    """Plain-words deghost decision for a ghosting score.
+
+    This unit's merge has no deghost step: every decision is "no
+    deghost". Scores past the limit are flagged as such, never
+    described as repaired.
+    """
     if score > DEGHOST_LIMIT:
         return (
-            f"deghost: {score:.2f} of pixels disagree after exposure "
-            f"normalization (limit {DEGHOST_LIMIT:.2f})"
+            f"no deghost: {score:.2f} of pixels disagree after exposure "
+            f"normalization, above the {DEGHOST_LIMIT:.2f} deghost limit "
+            "(flagged); the merge fuses the aligned frames with no deghost step"
         )
     return (
         f"no deghost: {score:.2f} of pixels disagree after exposure "
