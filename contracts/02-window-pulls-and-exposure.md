@@ -55,6 +55,18 @@ Erik often re-merges a set with fewer frames, for example dropping the darkest f
 - The mask covers glass only. Window frames, sills and trim stay from the merge.
 - Every crop and zoom round goes through the capped client and counts toward the budget.
 
+### Final round: simplify the color and ship (Erik's decision, Oct 31, after the fifth review)
+
+The tone-dependent color steps (blue cap, daylight-spill guard and any other step whose color change depends on brightness or position) caused pink floors, color bands on walls and ceilings, and patches in window views. Erik's decision: replace them with the simplest honest finish, then ship unit 2.
+
+- Per photo: one global exposure gain and one global white balance (one multiplier per channel for the whole photo, chosen from neutral surfaces). No regional, positional or brightness-dependent color change of any kind.
+- One shared tone curve applied to luminance only, so hue and saturation do not change with brightness. Lens, verticals, edge trim and denoise stay as they are.
+- The shared look may be refitted once in this round on the same 16 photos. The new constants are pinned by a test, the report says plainly that the look changed in this round, and unit 5 still measures it unchanged on the held-out home set.
+- Required proof: a test feeds one paint color under a smooth brightness ramp through the finish and its a* and b* stay within 2 across the ramp (observed failing on the old code first). Criterion 11 is measured again and reported per photo.
+- Also fix: the check passes on a fresh clone without the gitignored raw photos (fixtures or explicit skips that print their reason), the window near-white line uses one scale on both sides or is removed, the stale comments about window pulls are corrected, and rejected window candidates get their masks saved and shown.
+- Known limits, accepted by Erik for this unit and listed in the report and later the README: no deghost step (016 reads above the ghosting limit and is flagged), window views stay as merged, masks are not glass-only, lit-wall noise is not measured. These are not ship blockers.
+- Ship rule for the next review: SHIP if the hackathon rules, hygiene, cap, honesty rules, the ramp test, criterion 11 and the check all hold, and the finished photos at full resolution show no box, seam, band or patch introduced by the finish. Anything else the reviewer finds goes to Known limits for Erik to see, not another round.
+
 ### Window pulls are off for this unit (Erik's decision, Oct 30, after the fourth review)
 
 All 14 pulls failed at full resolution in the fourth review, and the builder's report had called them clean. Erik's decision: window pulls are turned off for unit 2. Remove the pull and its gate from the finish path. Every window keeps the balanced merge's pixels. Section A still runs (SAM finds the windows, Muse Spark confirms or rejects each one with its reason), and the page shows the found, confirmed and rejected windows with their masks, labeled "found, not edited". Section B below and criteria 4, 5, 6 and the pull parts of 13 are paused, not deleted. A later unit may return to the pull only if Erik says so. The builder never states a visual verdict ("clean", "natural", "no halo") in the report or status. It reports measured numbers, and the reviewer and Erik judge how photos look.
