@@ -53,6 +53,27 @@ AUTO_GAIN_HI = 3.5
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
+#: Blue-cap: white balance may neutralize warmth but never manufacture
+#: blueness on warm wood in the dark. The gray-world vote is dominated
+#: by dark warm wood, so its blue gains (up to 2.2x) flip shadowed wood
+#: floors blue (floor B-G moves -31 to +25 on unit-a 006). Dim,
+#: strongly warm pixels keep at most this much blue-over-green after
+#: the vote. Blue-origin pixels (sky) are untouched, bright pixels keep
+#: the full vote (lit walls still neutralize, which the look check
+#: requires), and near-neutral pixels (gray rugs read purple even in a
+#: correct finish; the twin-slack check covers them) are untouched too.
+#: Both ramps are smooth per-pixel weights, continuous in value space:
+#: no region, no edge anywhere.
+WB_BLUE_CAP = 0.0
+#: Full cap at or below this pre-WB gray, no cap at or above
+#: WB_BLUE_CAP_DIM_HI, linear ramp between.
+WB_BLUE_CAP_DIM_LO = 80.0
+WB_BLUE_CAP_DIM_HI = 160.0
+#: Full cap at or above this pre-WB saturation, no cap at or below
+#: WB_BLUE_CAP_SAT_LO, linear ramp between. Saturation is
+#: (max-min)/max; gray floors read ~0.07, wood 0.3 and up.
+WB_BLUE_CAP_SAT_LO = 0.10
+WB_BLUE_CAP_SAT_HI = 0.18
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -122,6 +143,33 @@ def balance_exposure(
         factors = 1.0 + strength * (base - 1.0)
         pre = work.copy()
         work *= factors
+        d0 = pre[:, :, 2] - pre[:, :, 1]
+        d1 = work[:, :, 2] - work[:, :, 1]
+        capped = (d0 <= WB_BLUE_CAP) & (d1 > WB_BLUE_CAP)
+        if capped.any():
+            gray_pre = pre.mean(axis=2)
+            mx_pre = pre.max(axis=2)
+            dim = np.clip(
+                (WB_BLUE_CAP_DIM_HI - gray_pre) / (WB_BLUE_CAP_DIM_HI - WB_BLUE_CAP_DIM_LO),
+                0.0,
+                1.0,
+            )
+            sat_pre = (mx_pre - pre.min(axis=2)) / np.maximum(mx_pre, 1.0)
+            warm = np.clip(
+                (sat_pre - WB_BLUE_CAP_SAT_LO) / (WB_BLUE_CAP_SAT_HI - WB_BLUE_CAP_SAT_LO),
+                0.0,
+                1.0,
+            )
+            weight = (dim * warm).astype(np.float32)
+            alpha = np.ones(d0.shape, np.float32)
+            need = capped & (weight > 0)
+            alpha[need] = 1.0 - weight[need] * (
+                1.0 - (WB_BLUE_CAP - d0[need]) / (d1[need] - d0[need])
+            )
+            work = pre * (1.0 + alpha[:, :, None] * (factors - 1.0))
+            report["blue_capped"] = round(float((alpha < 1.0).mean()), 4)
+        else:
+            report["blue_capped"] = 0.0
         # Daylight-spill guard, interiors only: the vote reads
         # tungsten-lit walls, and its cooling is right for them, but
         # daylight spilling across floors near windows is already

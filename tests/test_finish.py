@@ -138,6 +138,39 @@ def test_pipeline_takes_no_mls_twin():
         assert not [p for p in params if "mls" in p], func.__name__
 
 
+def _tungsten_room_wood_floor():
+    """Dark warm room with a dim saturated wood floor.
+
+    Unit-a 006: the all-room gray-world vote's blue gain (1.6x) flipped
+    the shadowed wood floor from B-G -31 to +25. The floor is dim
+    (shadowed) and strongly warm (wood), the population the blue-cap
+    protects; the lamp band holds the vote ceiling up the way bright
+    fixtures do in real rooms.
+    """
+    img = np.full((200, 200, 3), (95, 70, 40), np.uint8)  # dark warm room
+    img[100:, :] = (120, 100, 72)  # dim saturated wood floor below
+    img[:16, :] = (230, 230, 230)  # bright lamp band, above the vote
+    return img
+
+
+def test_blue_cap_never_flips_warm_wood_blue():
+    """White balance neutralizes warmth but never manufactures blueness.
+
+    The wood floor starts warm (B below G) and must never read blue
+    (B above G) after balancing: the per-pixel cap pulls each flipped
+    pixel back to neutral, with smooth dim and warmth ramps and no
+    region anywhere. Blue-origin pixels such as sky are untouched.
+    """
+    img = _tungsten_room_wood_floor()
+    before = img[120:190, 20:180].astype(float)
+    assert (before[:, :, 2] - before[:, :, 1]).max() <= 0, "fixture starts warm"
+    out, report = finish.balance_exposure(img)
+    assert report.get("blue_capped", 0.0) > 0, "the cap engages on this room"
+    floor = out[120:190, 20:180].astype(float)
+    gap = (floor[:, :, 2] - floor[:, :, 1]).max()
+    assert gap <= 1, f"warm wood must never read blue, got B-G up to {gap:.1f}"
+
+
 def test_balance_does_not_hide_real_clipping():
     dark = np.full((200, 200, 3), 60, np.uint8)
     dark[40:160, 60:140] = 255
