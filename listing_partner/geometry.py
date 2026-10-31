@@ -639,42 +639,53 @@ def deghost_decision(score: float) -> str:
     )
 
 
-#: Edge fringe trim: rows/cols along the image border that read darker
-#: than the room are resampling fringe, not scene. A line strips while it
-#: reads this far below both the interior median and the pixels just
-#: inside it (a smooth dark ceiling or floor gradient recovers too slowly
-#: to strip). At most this many lines per edge: the unit-a fringe runs
-#: 2-3 rows (measured 2026-10-31).
-EDGE_DROP = 10.0
+#: Edge fringe trim: border lines that read darker or more tinted than
+#: the pixels just inside them are resampling fringe, not scene. A line
+#: strips while its gray mean sits this far below the mean of the next
+#: three lines inward, or one channel sits EDGE_TINT off: smooth real
+#: gradients (2 levels a row) recover too slowly to strip. At most this
+#: many lines per edge. Calibrated on the shipped unit-a files
+#: 2026-10-31: single darker rows (drops of 7-28) and tinted rows remain
+#: past the valid-pixel crop on 002, 007, 008, 010, 013, 014 and 016.
+EDGE_DROP = 6.0
+EDGE_TINT = 12.0
 EDGE_MAX_PX = 6
 
 
 def trim_dark_edges(img: np.ndarray) -> dict[str, int]:
-    """Border lines to crop: dark resampling fringe, never scene.
+    """Border lines to crop: dark or tinted resampling fringe, never scene.
 
     Returns {"top": n, "bottom": n, "left": n, "right": n}. A line counts
-    as fringe while its mean sits EDGE_DROP below the interior median
-    and below the mean three lines inward: smooth real gradients fail
-    the second bar and survive.
+    as fringe while it reads darker (or one channel more tinted) than
+    the three lines just inside it.
     """
-    gray = (img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)).astype(float)
-    h, w = gray.shape
-    interior_med = float(np.median(gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]))
+    work = img.astype(float)
+    gray = work if work.ndim == 2 else work.mean(axis=2)
     row_mean = gray.mean(axis=1)
     col_mean = gray.mean(axis=0)
+    if work.ndim == 3:
+        row_ch = work.mean(axis=1)
+        col_ch = work.mean(axis=0)
+    else:
+        row_ch = col_ch = None
 
-    def _count(line_mean: np.ndarray) -> int:
+    def _count(line_mean: np.ndarray, line_ch) -> int:
         n = 0
         while n < EDGE_MAX_PX and n + 4 < len(line_mean):
             edge, inward = line_mean[n], line_mean[n + 1 : n + 4].mean()
-            if edge < interior_med - EDGE_DROP and edge < inward - EDGE_DROP:
+            dark = edge < inward - EDGE_DROP
+            tinted = False
+            if line_ch is not None:
+                inward_ch = line_ch[n + 1 : n + 4].mean(axis=0)
+                tinted = bool((np.abs(line_ch[n] - inward_ch)).max() > EDGE_TINT)
+            if dark or tinted:
                 n += 1
             else:
                 break
         return n
 
-    top = _count(row_mean)
-    bottom = _count(row_mean[::-1])
-    left = _count(col_mean)
-    right = _count(col_mean[::-1])
+    top = _count(row_mean, row_ch)
+    bottom = _count(row_mean[::-1], row_ch[::-1] if row_ch is not None else None)
+    left = _count(col_mean, col_ch)
+    right = _count(col_mean[::-1], col_ch[::-1] if col_ch is not None else None)
     return {"top": top, "bottom": bottom, "left": left, "right": right}

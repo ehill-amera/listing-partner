@@ -258,3 +258,37 @@ def test_ghosting_detects_motion_after_normalization():
 def test_deghost_decision_names_no_motion():
     assert "no deghost" in geometry.deghost_decision(0.01).lower()
     assert "deghost" in geometry.deghost_decision(0.99).lower()
+
+
+def test_trim_dark_edges_strips_single_fringe_row():
+    """One edge row 8 levels under its neighbors is fringe, not scene.
+
+    The shipped files keep single darker rows (drops of 8-9 vs the rows
+    inside) that the old 10-level bar lets through.
+    """
+    img = np.full((100, 120, 3), 200, np.uint8)
+    img[0, :] = 192
+    img[-1, :] = 191
+    trim = geometry.trim_dark_edges(img)
+    assert trim["top"] == 1, trim
+    assert trim["bottom"] == 1, trim
+    assert trim["left"] == 0 and trim["right"] == 0
+
+
+def test_trim_dark_edges_strips_tinted_row():
+    """A row with the room's brightness but an off-color channel is fringe."""
+    img = np.full((100, 120, 3), 200, np.uint8)
+    row = img[0, :].astype(int)
+    row[:, 2] = 182  # same gray, blue 18 under the room
+    img[0, :] = row
+    trim = geometry.trim_dark_edges(img)
+    assert trim["top"] == 1, trim
+
+
+def test_trim_dark_edges_keeps_smooth_gradients():
+    """A gentle real gradient (2 levels a row) is scene on every edge."""
+    rows = (200 - np.arange(100) * 2).clip(100, 200).astype(np.uint8)
+    img = np.repeat(rows[:, None, None], 120, axis=1)
+    img = np.repeat(img, 3, axis=2)
+    trim = geometry.trim_dark_edges(img)
+    assert trim == {"top": 0, "bottom": 0, "left": 0, "right": 0}, trim
