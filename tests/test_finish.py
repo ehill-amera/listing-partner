@@ -281,6 +281,8 @@ def test_denoise_compared_on_shared_patches():
 
 
 def test_shared_look_constants_stay_frozen():
+    """The refitted final-round look, pinned: unit 5 measures these same
+    settings unchanged on the held-out home set."""
     assert finish.INTERIOR_TARGET_MEDIAN == 194.0
     assert finish.SKY_FRACTION_CUT == 0.001
     assert finish.EXTERIOR_SKY_SLOPE == 240.0
@@ -296,6 +298,11 @@ def test_shared_look_constants_stay_frozen():
     assert finish.WB_EXTERIOR_STRENGTH == 0.4
     # No WOOD_* constants: the zone wood guard and its tuning are removed
     # (finding 2, criterion 14: no spatial box in any color correction).
+    # No WB_BLUE_CAP_* or WB_NEUTRAL_SAT constants: the blue cap, the
+    # daylight-spill guard and the neutral-subset vote are gone with the
+    # final round (one global room vote instead).
+    for gone in ("WB_BLUE_CAP", "WB_BLUE_CAP_DIM_LO", "WB_NEUTRAL_SAT", "wood_max_for"):
+        assert not hasattr(finish, gone), f"removed constant is back: {gone}"
 
 
 def test_flat_patches_cover_a_uniform_image():
