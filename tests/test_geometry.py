@@ -226,3 +226,35 @@ def test_ghosting_detects_motion():
     frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(3)]
     frames[1][20:30, 20:30] = 255
     assert geometry.ghosting_score(frames) > 0.0
+
+
+def test_ghosting_ignores_exposure_steps():
+    """Bracket-like exposure scaling is not motion.
+
+    Three frames of one scene at 1x/2x/4x gain (the way brackets differ)
+    must read near zero once the score normalizes exposure first. The
+    old spread-without-normalization reads ~1.0 here ("99% of pixels
+    moved"), which is what made the A0 number meaningless.
+    """
+    rng = np.random.default_rng(7)
+    base = rng.integers(10, 60, size=(64, 64, 3)).astype(np.uint8)
+    frames = [
+        np.clip(base.astype(np.float32) * gain, 0, 255).astype(np.uint8) for gain in (1.0, 2.0, 4.0)
+    ]
+    assert geometry.ghosting_score(frames) < 0.05, "exposure steps are not motion"
+
+
+def test_ghosting_detects_motion_after_normalization():
+    """Real motion still reads once exposure is normalized away."""
+    rng = np.random.default_rng(11)
+    base = rng.integers(10, 60, size=(64, 64, 3)).astype(np.float32)
+    frames = [np.clip(base * gain, 0, 255).astype(np.uint8) for gain in (1.0, 2.0, 4.0)]
+    moved = frames[1].copy()
+    moved[10:30, 10:30] = 200
+    moved_frames = [frames[0], moved, frames[2]]
+    assert geometry.ghosting_score(moved_frames) > 0.05, "moved pixels still count"
+
+
+def test_deghost_decision_names_no_motion():
+    assert "no deghost" in geometry.deghost_decision(0.01).lower()
+    assert "deghost" in geometry.deghost_decision(0.99).lower()

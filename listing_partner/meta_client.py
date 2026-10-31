@@ -554,13 +554,17 @@ def _settle(
     os.fsync(handle.fileno())
 
 
-def reserve_ratio_stats(ledger_path: Path | None = None) -> dict:
+def reserve_ratio_stats(ledger_path: Path | None = None, since: str | None = None) -> dict:
     """Reservation-to-bill stats over settled ledger lines.
 
-    worst is the largest estimated/actual ratio: reservations must cover
-    the bill, so anything under 1 is counted in under_one. Open
-    reservations never join a ratio. A missing file means no call was
-    ever recorded (zeros); anything unreadable or corrupt raises
+    worst is the lowest estimated/actual ratio: the thinnest coverage is
+    what says whether reservations cover the bill, so the largest ratio
+    is the best-covered call, never the worst. Anything under 1 is
+    counted in under_one. Open reservations never join a ratio. since
+    scopes to lines at or after that ISO timestamp (a unit reports its
+    own calls; earlier units' under-covered calls are reported
+    separately, never folded into the minimum). A missing file means no
+    call was ever recorded (zeros); anything unreadable or corrupt raises
     LedgerError instead of reading as clean.
     """
     path = Path(ledger_path) if ledger_path is not None else default_ledger_path()
@@ -570,7 +574,7 @@ def reserve_ratio_stats(ledger_path: Path | None = None) -> dict:
         return {"worst": 0.0, "under_one": 0, "settled": 0}
     except OSError as exc:
         raise LedgerError(f"ledger unreadable: {exc}") from exc
-    worst, under_one, settled = 0.0, 0, 0
+    worst, under_one, settled = None, 0, 0
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -581,15 +585,18 @@ def reserve_ratio_stats(ledger_path: Path | None = None) -> dict:
             raise LedgerError(f"ledger corrupt: {exc}") from exc
         if actual is None:
             continue
+        if since is not None and str(entry.get("ts", "")) < since:
+            continue
         actual = float(actual)
         if actual <= 0:
             raise LedgerError("ledger holds a non-positive settled cost")
         settled += 1
         ratio = estimated / actual
-        worst = max(worst, ratio)
+        worst = ratio if worst is None else min(worst, ratio)
         if ratio < 1:
             under_one += 1
-    return {"worst": worst, "under_one": under_one, "settled": settled}
+    worst_out = worst if worst is not None else 0.0
+    return {"worst": worst_out, "under_one": under_one, "settled": settled}
 
 
 def read_spend_total(ledger_path: Path | None = None) -> float:

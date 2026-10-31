@@ -53,32 +53,6 @@ AUTO_GAIN_HI = 3.5
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
-#: Zone wood guard: saturated warm surfaces (wood floors) carry their
-#: own color, so the full vote grays them lavender. Inside wood_zone the
-#: correction scales back on wood-toned pixels that would still read
-#: cooler than finished wood (estimated R-B under WOOD_RB_CAP), in
-#: proportion to saturation-times-warmth. Already-warm wood is left
-#: alone, which bounds the global cost: only the deficit is corrected.
-#: Walls, ceilings and spill are unsaturated or cool and keep the full
-#: vote. The strength follows the measured zone purple: wood_max_for
-#: maps it to 0 below WOOD_FIRE_AT and up to WOOD_MAX_CAP. Calibrated on
-#: unit-a's lavender floors (see the unit 02 report): 0.4 fixes every
-#: wood zone while holding room 007's look, where the full 0.6 warmed
-#: the global mean past the look limit. Frozen with the other look
-#: settings.
-WOOD_GAIN = 6.0
-WOOD_FIRE_AT = 5.0
-WOOD_MAX_CAP = 0.4
-WOOD_RB_CAP = 35.0
-
-
-def wood_max_for(zone_purple_pct: float) -> float:
-    """Wood-guard strength for a measured floor-zone purple share.
-
-    No guard on clean zones, the full guard on lavender ones,
-    proportional between: rooms that need none get none.
-    """
-    return min(WOOD_MAX_CAP, WOOD_MAX_CAP * max(0.0, zone_purple_pct - WOOD_FIRE_AT) / 10.0)
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -114,15 +88,15 @@ def balance_exposure(
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
     return_preshoulder: bool = False,
-    wood_zone: np.ndarray | None = None,
-    wood_max: float = 0.0,
 ) -> tuple[np.ndarray, dict] | tuple[np.ndarray, dict, np.ndarray]:
     """Balance a merged room photo. Returns (photo, report).
 
     White balance from the room's own below-bright pixels, shadow lift
     through a blurred luminance mask, automatic gain toward the shared
     class target (bounded), then a soft highlight shoulder. Pixels under
-    protect keep their exact values. No MLS twin is read.
+    protect keep their exact values. No MLS twin is read. Every step is
+    global and smooth: no spatial box or zone anywhere, so no regional
+    correction can leave a visible boundary (contract 02 section C).
 
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
@@ -131,11 +105,6 @@ def balance_exposure(
     With return_preshoulder, also returns the balanced photo from just
     before the shoulder: the shoulder parks blown glass under the
     near-white level, so honest highlight numbers are read there.
-
-    wood_zone with wood_max scales the white-balance correction back on
-    wood-toned pixels inside the zone (the floor band near the windows):
-    the pipeline measures the zone purple on the first pass and
-    rebalances with wood_max_for(that number) when it fires.
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
@@ -150,23 +119,7 @@ def balance_exposure(
         means = np.array([work[:, :, c][room].mean() for c in range(3)])
         target = float(means.mean())
         base = target / np.maximum(means, 1e-6)
-        if wood_zone is not None and wood_max > 0 and wood_zone.any():
-            mx0 = work.max(axis=2)
-            sat0 = 1.0 - work.min(axis=2) / np.maximum(mx0, 1.0)
-            warmth0 = np.clip((work[:, :, 0] - work[:, :, 2]) / np.maximum(mx0, 1.0), 0.0, 1.0)
-            m = np.clip(sat0 * sat0 * warmth0 * WOOD_GAIN, 0.0, wood_max)
-            m = np.where(wood_zone, m, 0.0)
-            # Cool-only: pixels the full correction would leave warmer
-            # than finished wood keep it. Estimated from the base factors
-            # so the gate reads corrected light, not raw.
-            full = 1.0 + strength * (base - 1.0)
-            est_rb = work[:, :, 0] * full[0] - work[:, :, 2] * full[2]
-            m = np.where(est_rb < WOOD_RB_CAP, m, 0.0)
-            factors = 1.0 + (1.0 - m)[:, :, None] * strength * (base - 1.0)[None, None, :]
-            report["wood_guard"] = round(float(m[wood_zone].mean()), 4)
-        else:
-            factors = 1.0 + strength * (base - 1.0)
-            report["wood_guard"] = 0.0
+        factors = 1.0 + strength * (base - 1.0)
         pre = work.copy()
         work *= factors
         # Daylight-spill guard, interiors only: the vote reads

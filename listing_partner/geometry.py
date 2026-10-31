@@ -583,9 +583,92 @@ def rotation_valid_mask(h: int, w: int, angle_deg: float) -> np.ndarray:
     return warped > 0
 
 
+#: Ghosting is scored after exposure normalization (gain-matched on
+#: mid-tone pixels), so bracket exposure steps never read as motion.
+#: Pixels disagreeing by more than this after normalization count.
+GHOST_SPREAD_LEVEL = 15.0
+#: Deghost only past this share of disagreeing pixels. Calibrated
+#: 2026-10-31: unit-a brackets read 0.05-0.20 here, and shifting one
+#: frame by 3 px moves the score by ~0.01, so 0.25 means gross
+#: disagreement, not noise or a small shift.
+DEGHOST_LIMIT = 0.25
+
+
 def ghosting_score(frames: list[np.ndarray]) -> float:
-    """Fraction of pixels that move between aligned bracket frames."""
+    """Fraction of pixels that move between bracket frames.
+
+    Each frame is gain-matched to the middle frame on mid-tone pixels
+    (both sides 20-200 gray) before comparing, so the exposure steps
+    between brackets never read as motion: identical scenes at 1x/2x/4x
+    gain score near zero, while moved pixels still count.
+    """
     gray = [f if f.ndim == 2 else cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in frames]
-    stack = np.stack([g.astype(np.float32) for g in gray])
-    spread = stack.max(axis=0) - stack.min(axis=0)
-    return float((spread > 15.0).mean())
+    ref = gray[len(gray) // 2].astype(np.float32)
+    mref = (ref > 20) & (ref < 200)
+    ref_med = float(np.median(ref[mref])) if mref.any() else 0.0
+    matched = []
+    for g in gray:
+        g = g.astype(np.float32)
+        m = mref & (g > 20) & (g < 200)
+        if m.sum() > 100 and ref_med > 0:
+            gain = ref_med / float(np.median(g[m]))
+        else:
+            gain = 1.0
+        matched.append(g * gain)
+    spread = np.stack(matched).max(axis=0) - np.stack(matched).min(axis=0)
+    return float((spread > GHOST_SPREAD_LEVEL).mean())
+
+
+def deghost_decision(score: float) -> str:
+    """Plain-words deghost decision for a ghosting score."""
+    if score > DEGHOST_LIMIT:
+        return (
+            f"deghost: {score:.2f} of pixels disagree after exposure "
+            f"normalization (limit {DEGHOST_LIMIT:.2f})"
+        )
+    return (
+        f"no deghost: {score:.2f} of pixels disagree after exposure "
+        f"normalization (limit {DEGHOST_LIMIT:.2f}); the merge fuses "
+        "the aligned frames with no deghost step"
+    )
+
+
+#: Edge fringe trim: rows/cols along the image border that read darker
+#: than the room are resampling fringe, not scene. A line strips while it
+#: reads this far below both the interior median and the pixels just
+#: inside it (a smooth dark ceiling or floor gradient recovers too slowly
+#: to strip). At most this many lines per edge: the unit-a fringe runs
+#: 2-3 rows (measured 2026-10-31).
+EDGE_DROP = 10.0
+EDGE_MAX_PX = 6
+
+
+def trim_dark_edges(img: np.ndarray) -> dict[str, int]:
+    """Border lines to crop: dark resampling fringe, never scene.
+
+    Returns {"top": n, "bottom": n, "left": n, "right": n}. A line counts
+    as fringe while its mean sits EDGE_DROP below the interior median
+    and below the mean three lines inward: smooth real gradients fail
+    the second bar and survive.
+    """
+    gray = (img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)).astype(float)
+    h, w = gray.shape
+    interior_med = float(np.median(gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]))
+    row_mean = gray.mean(axis=1)
+    col_mean = gray.mean(axis=0)
+
+    def _count(line_mean: np.ndarray) -> int:
+        n = 0
+        while n < EDGE_MAX_PX and n + 4 < len(line_mean):
+            edge, inward = line_mean[n], line_mean[n + 1 : n + 4].mean()
+            if edge < interior_med - EDGE_DROP and edge < inward - EDGE_DROP:
+                n += 1
+            else:
+                break
+        return n
+
+    top = _count(row_mean)
+    bottom = _count(row_mean[::-1])
+    left = _count(col_mean)
+    right = _count(col_mean[::-1])
+    return {"top": top, "bottom": bottom, "left": left, "right": right}

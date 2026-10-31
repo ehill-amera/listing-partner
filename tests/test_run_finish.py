@@ -72,7 +72,9 @@ def _tail_dirs(tmp_path):
     return dirs
 
 
-def test_finish_tail_pulls_from_best_frame_not_darkest(tmp_path):
+def test_finish_tail_reports_pull_checks_not_measured(tmp_path):
+    """Criteria 4, 5 and 6 are paused with the pulls: step-B checks read
+    NOT MEASURED, while clip numbers are still recorded for the page."""
     from listing_partner import run_finish as rf
 
     state, union = _tail_state()
@@ -85,16 +87,10 @@ def test_finish_tail_pulls_from_best_frame_not_darkest(tmp_path):
         "windows": [{"id": 0, "reason": "shows sky"}],
     }
     rf.finish_tail(record, state, _tail_dirs(tmp_path), {0: union}, union)
-    assert record["pull_frame"] == "frame1.NEF", (
-        "the tail chooses the frame that fixes blown glass, never assumes darkest"
-    )
-    assert record["windows"][0]["pull"] == "pulled"
-    # The flat room fails texture, so its halo keeps a thin merge ring at
-    # the mask borders (the trim zone in production): most of the glass
-    # fills, the border ring stays honestly white.
-    assert 0.1 < record["clip_after"] < 0.25
-    assert record["clip_after"] < 1.0
-    assert record["checks"]["highlights"][0] is True
+    for label in ("highlights", "outside"):
+        ok, reason = record["checks"][label]
+        assert ok is False and "not measured" in reason, label
+    assert record["window_pixels"] > 0, "clip numbers still cover the window pixels"
 
 
 def test_finish_tail_with_no_mask_reports_not_measured(tmp_path):
@@ -120,36 +116,228 @@ def test_finish_tail_with_no_mask_reports_not_measured(tmp_path):
     )
 
 
-def test_finish_tail_keeps_a_failed_window_from_merge(tmp_path):
+def test_review_labels_windows_found_not_edited(tmp_path):
+    """The page shows confirmed windows as found, not edited (pulls off),
+    with the lowest reservation ratio labeled as the worst call."""
+    from listing_partner import run_finish as rf
+
+    manifest = {
+        "summary": {
+            "photos_finished": 1,
+            "photos_failed": 0,
+            "run_seconds": 3.0,
+            "noise_before": 3.0,
+            "noise_after": 1.5,
+            "windows_found": 1,
+            "windows_confirmed": 1,
+            "windows_rejected": 0,
+            "photos_with_windows": 1,
+            "windows_not_edited": 1,
+            "clip_before_n": 10,
+            "clip_after_n": 1,
+            "window_pixels": 1000,
+            "clip_before_pct": 1.0,
+            "clip_after_pct": 0.1,
+            "unit_spend_usd": 0.0,
+            "worst_reserve_ratio": 2.0,
+            "reserve_ratio_calls": 212,
+            "prior_under_one": 2,
+            "code_commit": "abc123",
+        },
+        "sets": [
+            {
+                "index": 1,
+                "name": "001",
+                "frames_used": ["a.NEF"],
+                "frames_reason": "full",
+                "pull_frame": None,
+                "distortion_strength": {},
+                "lens": "lens ok",
+                "verticals": "level already",
+                "vignetting": "skipped: x",
+                "ghosting": 0.18,
+                "deghost": "no deghost: test",
+                "clip_before": 0.01,
+                "clip_after": 0.001,
+                "window_pixels": 1000,
+                "edge_trim": {"top": 3, "bottom": 0, "left": 0, "right": 0},
+                "windows": [{"id": 0, "reason": "shows sky"}],
+                "rejections": [],
+                "checks": {},
+                "look": None,
+            }
+        ],
+    }
+    html = rf.build_finish_review(tmp_path, manifest, {}).read_text()
+    assert "found, not edited" in html
+    assert "Windows pulled" not in html
+    assert "window kept from merge" not in html
+    assert "Lowest reservation-to-bill ratio 2.00" in html
+    assert "worst-covered" in html
+    assert "no deghost" in html
+    assert "edge trim" in html
+
+
+def test_finish_tail_leaves_windows_found_not_edited(tmp_path):
+    """Window pulls are off: every window keeps the balanced merge's pixels.
+
+    The tail labels each confirmed window "found, not edited", changes no
+    pixel from the balance output, and the finished file's window region
+    matches the balanced crop (up to JPEG tolerance).
+    """
     import cv2
     from listing_partner import run_finish as rf
 
     state, union = _tail_state()
-    state["aligned"] = [state["balanced"].copy()]  # only the merge itself: no view
-    state["members"] = [Path("frame0.NEF")]
+    state["merged"] = state["balanced"].copy()
     record = {
-        "index": 3,
-        "name": "003",
-        "straight_before": 360.0,
-        "straight_after": 360.0,
-        "distortion_applied": False,
-        "vertical_residual": None,
+        "index": 1,
+        "name": "001",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
         "windows": [{"id": 0, "reason": "shows sky"}],
     }
     rf.finish_tail(record, state, _tail_dirs(tmp_path), {0: union}, union)
-    assert record["windows"][0]["pull"] == "kept from merge", (
-        "a window no frame can fix keeps the merge, with the reason"
-    )
-    assert record["windows"][0]["pull_reason"]
+    assert record["windows"][0]["pull"] == "found, not edited"
     assert record["changed_outside"] == 0
-    reread = cv2.imread(str(tmp_path / "finished" / "003.jpg"))
-    reread = cv2.cvtColor(reread, cv2.COLOR_BGR2RGB)
-    # The valid-pixel crop shaves one border pixel: reread[i] is
-    # balanced[i + 1]. The window interior is flat white either way.
-    kept = reread[25:75, 25:75].astype(int)
-    assert (kept == 255).mean() > 0.99, "a kept window ships merge pixels, not a new view"
-    ok, reason = record["checks"]["highlights"]
-    assert ok is False and "kept from merge" in reason
+    assert record["pull_frame"] is None
+    reread = cv2.cvtColor(
+        cv2.imread(str(tmp_path / "finished" / "001.jpg")), cv2.COLOR_BGR2RGB
+    ).astype(int)
+    # The valid-pixel crop shaves the border: the file matches the
+    # balanced input cropped the same way (no trim fires on this image).
+    assert record["edge_trim"] == {"top": 0, "bottom": 0, "left": 0, "right": 0}
+    assert (np.abs(reread - state["balanced"][1:99, 1:99].astype(int)) < 12).mean() > 0.99, (
+        "unedited windows ship balanced-merge pixels"
+    )
+
+
+def _lab_step_rows(rgb: np.ndarray, rows: range, cols) -> float:
+    """Largest adjacent-row mean a*/b* step inside rows x cols (Lab)."""
+    import cv2
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(float)
+    means = lab[rows, cols, 1:].mean(axis=1)
+    return float(np.abs(np.diff(means, axis=0)).max())
+
+
+def test_balance_leaves_no_color_seam():
+    """No spatial box in any color correction (finding 2, criterion 14).
+
+    The old zone wood guard scaled white balance back inside an
+    unfeathered box: a*/b* steps near 14 across its edges (observed
+    failing first at 12.6 on this image), the orange rectangle on
+    003/004/005/006/007. The box is removed: the correction takes no
+    zone, and the same image balances with no visible boundary (at most
+    2 units anywhere outside the lamp-band scene edge).
+    """
+    import inspect
+
+    from listing_partner import finish
+
+    params = inspect.signature(finish.balance_exposure).parameters
+    assert "wood_zone" not in params and "wood_max" not in params, (
+        "the zone box must be gone from the correction, not just unfired"
+    )
+    rng = np.random.default_rng(3)
+    img = np.full((200, 200, 3), (200, 150, 100), np.uint8)
+    img = (
+        (img.astype(float) + rng.integers(-4, 5, size=(200, 200, 1))).clip(0, 255).astype(np.uint8)
+    )
+    img[:10, :] = (240, 240, 240)  # bright band above the vote, like fixtures
+    out, _ = finish.balance_exposure(img)
+    step = _lab_step_rows(out, range(40, 160), slice(None))
+    assert step <= 2.0, f"color step without the zone box: {step:.1f} (limit 2)"
+
+
+def test_finish_tail_measures_whole_floor(tmp_path):
+    """Floors are measured across the whole visible floor, not a box.
+
+    The old narrow band under the window bbox missed lavender floors
+    just below it (finding 6: 60% purple below the box on 006/007).
+    """
+    from listing_partner import run_finish as rf
+
+    state, union = _tail_state()
+    record = {
+        "index": 1,
+        "name": "001",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
+        "windows": [{"id": 0, "reason": "shows sky"}],
+    }
+    rf.finish_tail(record, state, _tail_dirs(tmp_path), {0: union}, union)
+    assert record["floor_zone"] == (0.5, 1.0, 0.0, 1.0), (
+        "the floor zone is the whole visible floor (lower half), "
+        f"not a window band: {record['floor_zone']}"
+    )
+
+
+def test_finish_tail_crops_dark_edge_rows(tmp_path):
+    """Edge rows that read darker than the room are cropped (finding 11)."""
+    import cv2
+    from listing_partner import run_finish as rf
+
+    n = 100
+    balanced = np.full((n, n, 3), 200, np.uint8)
+    balanced[:4, :] = 140  # dark resampling fringe along the top edge
+    members = [Path("frame0.NEF")]
+    state = {
+        "balanced": balanced,
+        "preshoulder": balanced.copy(),
+        "merged": balanced.copy(),
+        "aligned": [balanced.copy()],
+        "members": members,
+        "order": {members[0]: 0},
+        "valid": np.ones((n, n), bool),
+    }
+    record = {
+        "index": 9,
+        "name": "009",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
+        "windows": [],
+    }
+    rf.finish_tail(record, state, _tail_dirs(tmp_path), {}, np.zeros((n, n), bool))
+    assert record["edge_trim"]["top"] == 3, record["edge_trim"]
+    reread = cv2.cvtColor(
+        cv2.imread(str(tmp_path / "finished" / "009.jpg")), cv2.COLOR_BGR2RGB
+    ).astype(float)
+    assert abs(reread[0].mean() - 200) < 8, "the shipped top row reads like the room"
+
+
+def test_finish_tail_keeps_real_dark_floors(tmp_path):
+    """The edge crop must not eat a genuinely dark floor at the bottom."""
+    from listing_partner import run_finish as rf
+
+    n = 100
+    balanced = np.full((n, n, 3), 200, np.uint8)
+    balanced[80:, :] = np.linspace(150, 120, 20)[:, None, None]  # dark wood floor
+    members = [Path("frame0.NEF")]
+    state = {
+        "balanced": balanced,
+        "preshoulder": balanced.copy(),
+        "merged": balanced.copy(),
+        "aligned": [balanced.copy()],
+        "members": members,
+        "order": {members[0]: 0},
+        "valid": np.ones((n, n), bool),
+    }
+    record = {
+        "index": 9,
+        "name": "009",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
+        "windows": [],
+    }
+    rf.finish_tail(record, state, _tail_dirs(tmp_path), {}, np.zeros((n, n), bool))
+    assert record["edge_trim"]["bottom"] == 0, (
+        f"a smooth dark floor is scene, not fringe: {record['edge_trim']}"
+    )
 
 
 def test_build_inputs_measures_straightness_on_the_same_frame(monkeypatch):
@@ -319,8 +507,7 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
             "windows_confirmed": 1,
             "windows_rejected": 0,
             "photos_with_windows": 1,
-            "windows_pulled": 0,
-            "windows_kept_from_merge": 1,
+            "windows_not_edited": 1,
             "clip_before_n": 10,
             "clip_after_n": 1,
             "window_pixels": 1000,
@@ -328,6 +515,8 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
             "clip_after_pct": 0.1,
             "unit_spend_usd": 0.0,
             "worst_reserve_ratio": 2.0,
+            "reserve_ratio_calls": 212,
+            "prior_under_one": 2,
             "code_commit": "abc123",
         },
         "sets": [
@@ -336,12 +525,13 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
                 "name": "001",
                 "frames_used": ["a.NEF"],
                 "frames_reason": "full",
-                "pull_frame": "a.NEF",
+                "pull_frame": None,
                 "distortion_strength": {},
                 "lens": "Nikon AF-P DX 10-20mm (vendored lensfun profile)",
                 "verticals": "level already",
                 "vignetting": "skipped: x",
-                "ghosting": 0.0,
+                "ghosting": 0.18,
+                "deghost": "no deghost: test",
                 "clip_before": 0.01,
                 "clip_after": 0.001,
                 "window_pixels": 1000,
@@ -349,13 +539,16 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
                     {
                         "id": 0,
                         "reason": "shows sky",
-                        "pull": "kept from merge",
-                        "pull_reason": "rim darkened",
+                        "pull": "found, not edited",
+                        "pull_reason": "pulls off",
                     }
                 ],
                 "rejections": [{"id": 1, "reason": "a mirror"}],
                 "checks": {
-                    "highlights": (True, "clipped 0.0100 -> 0.0010 of window pixels"),
+                    "highlights": (
+                        False,
+                        "not measured: window pulls are off for this unit",
+                    ),
                     "verticals": (False, "not measured: no agreeing lines"),
                 },
                 "look": {"look_ok": True, "look_reason": "brightness 190 vs 192 (1.0%)"},
@@ -376,8 +569,8 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
     assert "NOT MEASURED" in html
     assert "skipped: x" in html
     assert "PASS look" in html, "every look row shows pass or fail"
-    assert "window kept from merge" in html
-    assert "rim darkened" in html
+    assert "found, not edited" in html
+    assert "Lowest reservation-to-bill ratio 2.00" in html
     assert "fitted on these same 16 photos" in html, (
         "the page must say plainly the shared look was fitted on these photos"
     )

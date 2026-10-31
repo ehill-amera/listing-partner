@@ -141,7 +141,7 @@ def test_refuses_unknown_price(ledger, key, monkeypatch):
     assert not Path(ledger).exists(), "refused calls add no line"
 
 
-def test_worst_reserve_ratio_reports_max_and_floor(ledger):
+def test_worst_reserve_ratio_reports_minimum(ledger):
     ledger.write_text(
         "\n".join(
             [
@@ -156,9 +156,31 @@ def test_worst_reserve_ratio_reports_max_and_floor(ledger):
         + "\n"
     )
     stats = meta_client.reserve_ratio_stats(ledger)
-    assert stats["worst"] == pytest.approx(2.0), "worst reservation-to-bill ratio"
+    assert stats["worst"] == pytest.approx(0.9), "worst means the lowest coverage"
     assert stats["under_one"] == 1, "reservations under the real bill are counted"
     assert stats["settled"] == 2, "open reservations never join the ratio"
+
+
+def test_reserve_ratio_stats_scopes_to_since(ledger):
+    ledger.write_text(
+        "\n".join(
+            [
+                '{"ts": "2026-10-26T17:00:00+00:00", "model": "muse-spark-1.3", '
+                '"estimated_usd": 0.000078, "actual_usd": 0.000822, '
+                '"status": "complete"}',
+                '{"ts": "2026-10-29T14:00:00+00:00", "model": "sam-3.1", '
+                '"estimated_usd": 0.0002, "actual_usd": 0.0001, '
+                '"status": "complete"}',
+            ]
+        )
+        + "\n"
+    )
+    scoped = meta_client.reserve_ratio_stats(ledger, since="2026-10-29T00:00:00+00:00")
+    assert scoped["worst"] == pytest.approx(2.0), "earlier unit lines stay out"
+    assert scoped["settled"] == 1
+    assert scoped["under_one"] == 0
+    unscoped = meta_client.reserve_ratio_stats(ledger)
+    assert unscoped["under_one"] == 1, "the earlier under-covered call still counts"
 
 
 def test_refuses_non_allowlisted_and_contributor_models(ledger, key):

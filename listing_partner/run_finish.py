@@ -2,10 +2,10 @@
 
 Per set: undistort each frame (vendored lens profile, per-photo fitted
 strength) and correct TCA, align, fuse the chosen subset, straighten
-verticals, balance exposure, SAM windows plus Spark verdicts, pull views
-from the darkest frame, denoise last, crop to valid pixels, save. Every
-Meta call goes through the spend-capped client; failures land in plain
-words and still count.
+verticals, balance exposure, SAM windows plus Spark verdicts (found, not
+edited: window pulls are off for this unit), denoise last, crop to valid
+pixels plus the dark edge fringe, save. Every Meta call goes through the
+spend-capped client; failures land in plain words and still count.
 """
 
 from __future__ import annotations
@@ -56,7 +56,9 @@ def build_inputs(
         record["distortion_applied"] = False
         record["straight_before"] = geometry.line_measure(decoded[len(decoded) // 2])
         record["straight_after"] = None
-        record["ghosting"] = round(geometry.ghosting_score(corrected), 4)
+        ghost = geometry.ghosting_score(corrected)
+        record["ghosting"] = round(ghost, 4)
+        record["deghost"] = geometry.deghost_decision(ghost)
         h0, w0 = corrected[0].shape[:2]
         valid = np.ones((h0, w0), bool)
     else:
@@ -92,7 +94,9 @@ def build_inputs(
             if tca_ran
             else "skipped: the profile carries no TCA row at these focals"
         )
-        record["ghosting"] = round(geometry.ghosting_score(corrected), 4)
+        ghost = geometry.ghosting_score(corrected)
+        record["ghosting"] = round(ghost, 4)
+        record["deghost"] = geometry.deghost_decision(ghost)
         h0, w0 = corrected[0].shape[:2]
         valid = np.ones((h0, w0), bool)
         for frame_focal, strength in strengths.items():
@@ -205,118 +209,43 @@ def tint_overlay(base: np.ndarray, union: np.ndarray) -> np.ndarray:
     return overlay
 
 
-def _floor_zone_frac(union: np.ndarray, h: int, w: int) -> tuple | None:
-    """Fractional (y0, y1, x0, x1) floor band under the window bbox.
-
-    A quarter frame tall under the lowest window glass, slightly wider
-    than the glass: the floor the windows light. None with no union.
-    """
-    if not union.any():
-        return None
-    ys, xs = np.nonzero(union)
-    y1 = min(h, int(ys.max()) + h // 4)
-    return (
-        float(ys.max()) / h,
-        float(y1) / h,
-        max(0.0, (float(xs.min()) - w * 0.05) / w),
-        min(1.0, (float(xs.max()) + w * 0.05) / w),
-    )
-
-
-def _gate_window(
-    balanced: np.ndarray,
-    preshoulder: np.ndarray,
-    view_rgb: np.ndarray,
-    mask: np.ndarray,
-    union: np.ndarray,
-) -> tuple[np.ndarray, bool, str]:
-    """Ship gate for one window (contract 02 section B), automatic.
-
-    Pulls the window from its one view frame, then verifies: the pull
-    was not refused (view light matches the room), near-white on glass
-    drops against the honest pre-shoulder before count, and the unblown
-    rim keeps its merged light. Returns (pixels, kept, reason): kept
-    windows go back untouched and the page names them.
-    """
-    from listing_partner.checks import CLIP_LEVEL
-
-    candidate, info = segment.pull_window(balanced, view_rgb, mask, union)
-    if info["refused"] is not None:
-        return balanced, False, info["refused"]
-    gain_ok, gain_reason = checks.check_pull_gain(info["rim_gain"])
-    if not gain_ok:
-        return balanced, False, gain_reason
-    wpx = int(mask.sum())
-    clip_before = float((preshoulder.max(axis=2) >= CLIP_LEVEL)[mask].mean())
-    clip_after = float((candidate.max(axis=2) >= CLIP_LEVEL)[mask].mean())
-    clip_ok, clip_reason = checks.check_highlights(clip_before, clip_after, wpx)
-    if not clip_ok:
-        return balanced, False, f"near-white not lower: {clip_reason}"
-    rim = mask & ~cv2.erode(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
-    rim_keep = rim & (balanced.max(axis=2) < CLIP_LEVEL)
-    if rim_keep.any():
-        rim_before = float(cv2.cvtColor(balanced, cv2.COLOR_RGB2GRAY)[rim_keep].mean())
-        rim_after = float(cv2.cvtColor(candidate, cv2.COLOR_RGB2GRAY)[rim_keep].mean())
-        rim_ok, rim_reason = checks.check_window_rim(rim_before, rim_after)
-        if not rim_ok:
-            return balanced, False, rim_reason
-    return candidate, True, f"near-white {clip_before:.4f} -> {clip_after:.4f} of window pixels"
+#: The floor zone as fractions of the shipped frame: the whole
+#: visible floor (the lower half), never a window band. Window-adjacent
+#: bands boxed lavender floors out of the measurement (finding 6).
+FLOOR_ZONE_FRAC = (0.5, 1.0, 0.0, 1.0)
 
 
 def finish_tail(
     record: dict, state: dict, dirs: dict, masks: dict[int, np.ndarray], union: np.ndarray
 ) -> None:
-    """Local tail after verdicts: pull, denoise, crop, checks, saves.
+    """Local tail after verdicts: denoise, crop, checks, saves.
 
     No Meta calls, no MLS twin. Fills the measured fields of record in
-    place. Each window pulls alone through the section-B ship gate;
-    windows that fail keep the merge's pixels untouched. Clip numbers
-    are fractions of window pixels: before is read pre-shoulder (the
-    shoulder parks blown glass under the level, so post-shoulder would
-    hide it), after is read back from the saved JPEG file, the actual
-    final output.
+    place. Window pulls are off for this unit (contract 02, Erik's
+    decision Oct 30): every confirmed window keeps the balanced merge's
+    pixels, labeled "found, not edited". Clip numbers are fractions of
+    window pixels: before is read pre-shoulder (the shoulder parks blown
+    glass under the level, so post-shoulder would hide it), after is
+    read back from the saved JPEG file, the actual final output. Both
+    sides read the balanced merge this unit; no pull changes either.
     """
     from listing_partner.checks import CLIP_LEVEL
-    from listing_partner import measure
 
     name = record["name"]
     balanced = state["balanced"]
     preshoulder = state["preshoulder"]
     valid = state["valid"]
-    # One shared crop for pull, measurement and file: before and after
-    # count the same window pixels, and the file holds exactly those.
+    # One shared crop for measurement and file. The valid-pixel crop
+    # drops undistort/rotation borders; the edge trim then drops the
+    # darker resampling fringe inside them, so the file holds exactly
+    # the measured pixels.
     y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
-    # Zone wood guard, second pass: the all-room vote can lavender shaded
-    # wood where no spill reaches. Measure the floor band on the balanced
-    # photo; when it reads purple, rebalance with the guard scaled to the
-    # excess. Rooms that need none keep the first pass untouched.
-    zone_frac = _floor_zone_frac(union, *balanced.shape[:2])
-    zone_full = measure.zone_mask(*balanced.shape[:2], zone_frac)
-    zone_purple, zone_lit = (0.0, 0)
-    if zone_full is not None and zone_full.any():
-        zone_purple, zone_lit = measure.purple_share(balanced, zone_full)
-    wood_max = 0.0
-    if zone_lit >= measure.FLOOR_MIN_LIT:
-        wood_max = finish.wood_max_for(zone_purple)
-    record["wood_guard"] = {
-        "zone_purple": round(zone_purple, 1),
-        "zone_lit": zone_lit,
-        "wood_max": wood_max,
-    }
-    if wood_max > 0:
-        anchor_full = np.zeros_like(valid)
-        anchor_full[y0:y1, x0:x1] = True
-        balanced, rebalance_report, preshoulder = finish.balance_exposure(
-            state["merged"],
-            anchor_mask=anchor_full,
-            return_preshoulder=True,
-            wood_zone=zone_full,
-            wood_max=wood_max,
-        )
-        rebalance_report["rebalanced"] = (
-            f"zone wood guard at {wood_max} (zone read {zone_purple:.1f}% purple)"
-        )
-        record["balance"] = rebalance_report
+    trim = geometry.trim_dark_edges(balanced[y0:y1, x0:x1])
+    record["edge_trim"] = trim
+    y0 += trim["top"]
+    y1 -= trim["bottom"]
+    x0 += trim["left"]
+    x1 -= trim["right"]
 
     def _crop(arr: np.ndarray) -> np.ndarray:
         return arr[y0:y1, x0:x1]
@@ -324,35 +253,15 @@ def finish_tail(
     balanced_c = _crop(balanced)
     preshoulder_c = _crop(preshoulder)
     union_c = _crop(union)
-    masks_c = {wid: _crop(m) for wid, m in masks.items()}
-    aligned_c = [_crop(f) for f in state["aligned"]]
     composed = balanced_c.copy()
-    pulled_frames: list[str] = []
     for window in record.get("windows", []):
-        wid = window["id"]
-        wmask = masks_c[wid]
-        idx, note = segment.choose_view_frame(aligned_c, wmask, balanced_c, union_c)
-        if idx is None:
-            window["pull"] = "kept from merge"
-            window["pull_reason"] = note
-            continue
-        view = aligned_c[idx]
-        gated, kept, reason = _gate_window(balanced_c, preshoulder_c, view, wmask, union_c)
-        if kept:
-            composed[wmask] = gated[wmask]
-            pulled_frames.append(state["members"][idx].name)
-            window["pull"] = "pulled"
-            window["pull_frame"] = state["members"][idx].name
-            window["pull_reason"] = f"from {state['members'][idx].name}: {note}; {reason}"
-        else:
-            window["pull"] = "kept from merge"
-            window["pull_reason"] = f"view from {state['members'][idx].name} refused: {reason}"
-    record["pull_frame"] = pulled_frames[0] if pulled_frames else None
-    record["pull_frames"] = sorted(set(pulled_frames))
-    pulled = [w for w in record.get("windows", []) if w.get("pull") == "pulled"]
-    kept = [w for w in record.get("windows", []) if w.get("pull") == "kept from merge"]
-    record["windows_pulled"] = len(pulled)
-    record["windows_kept"] = len(kept)
+        window["pull"] = "found, not edited"
+        window["pull_reason"] = (
+            "window pulls are off for this unit: kept the balanced merge's pixels"
+        )
+    record["pull_frame"] = None
+    record["pull_frames"] = []
+    record["windows_not_edited"] = len(record.get("windows", []))
     changed_outside = int((np.any(composed != balanced_c, axis=2) & ~union_c).sum())
 
     # Same patches both sides: the patch set is picked on the pulled
@@ -398,16 +307,20 @@ def finish_tail(
     vertical_final = geometry.dominant_vertical_angle(cv2.cvtColor(reread_rgb, cv2.COLOR_RGB2GRAY))
     record["vertical_final"] = vertical_final
 
-    if window_pixels and record["windows_pulled"] == 0:
-        highlights: tuple[bool, str] = (
-            False,
-            "not measured: every window kept from merge, step B changed nothing",
-        )
-    else:
-        highlights = checks.check_highlights(clip_before_raw, clip_after_raw, window_pixels)
+    # Criteria 4, 5 and 6 are paused with the pulls: the clip numbers
+    # above are reported, never gated, and step B is off, so its checks
+    # have nothing to measure.
+    highlights: tuple[bool, str] = (
+        False,
+        "not measured: window pulls are off for this unit (criterion 4 paused)",
+    )
+    outside: tuple[bool, str] = (
+        False,
+        "not measured: window pulls are off for this unit (criterion 5 paused)",
+    )
     record["checks"] = {
         "highlights": highlights,
-        "outside": checks.check_outside_unchanged(changed_outside, window_pixels),
+        "outside": outside,
         "noise": checks.check_noise(noise_before, record["noise_after"]),
         "edges": checks.check_edges(edge_before, record["edge_after"]),
         "straightness": checks.check_straightness(
@@ -417,12 +330,11 @@ def finish_tail(
         ),
         "verticals": checks.check_verticals(vertical_final),
     }
-    # Floor zone near the windows, as fractions of the shipped frame, so
-    # the post-hoc measure maps it onto the MLS twin too: the band under
-    # the window bbox, a quarter frame tall. No union, no zone.
-    record["floor_zone"] = _floor_zone_frac(union_c, *finished.shape[:2])
-    # The third image is the window mask over the merge (tinted balance
-    # output, pre-pull), not over the finished photo.
+    # Floor zone as fractions of the shipped frame, so the post-hoc
+    # measure maps it onto the MLS twin too: the whole visible floor.
+    record["floor_zone"] = FLOOR_ZONE_FRAC
+    # The third image is the window mask over the balanced merge (tinted
+    # balance output), not over the finished photo.
     thumb = cv2.resize(
         finished,
         (1024, int(round(finished.shape[0] * 1024 / finished.shape[1]))),
@@ -467,12 +379,12 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
         masks[window["id"]] = mask > 127
         union |= masks[window["id"]]
     finish_tail(record, state, dirs, masks, union)
-    # The saved verdicts stand; the pull statuses are this run's: carry
-    # them onto the prior window rows by id.
-    pulled = {w["id"]: w for w in record.get("windows", [])}
+    # The saved verdicts stand; the found-not-edited labels are this
+    # run's: carry them onto the prior window rows by id.
+    labeled = {w["id"]: w for w in record.get("windows", [])}
     for window in prior.get("windows", []):
-        fresh = pulled.get(window["id"], {})
-        for key in ("pull", "pull_reason", "pull_frame"):
+        fresh = labeled.get(window["id"], {})
+        for key in ("pull", "pull_reason"):
             if key in fresh:
                 window[key] = fresh[key]
     for key in ("candidates_found", "transcript", "windows", "rejections"):
@@ -596,21 +508,13 @@ def _lens_note(entry: dict) -> str:
 
 
 def _window_lines(windows: list[dict]) -> str:
-    """One page line per confirmed window, pulled or kept from merge."""
+    """One page line per confirmed window: found, not edited."""
     lines = []
     for w in windows:
-        if w.get("pull") == "pulled":
-            lines.append(
-                f"<p>window {w['id']}: {w.get('reason', '')} — "
-                f"pulled ({w.get('pull_reason', '')})</p>"
-            )
-        elif w.get("pull") == "kept from merge":
-            lines.append(
-                f"<p>window {w['id']}: {w.get('reason', '')} — "
-                f"window kept from merge: {w.get('pull_reason', '')}</p>"
-            )
-        else:
-            lines.append(f"<p>window {w['id']}: {w.get('reason', '')}</p>")
+        lines.append(
+            f"<p>window {w['id']}: {w.get('reason', '')} — "
+            "found, not edited (window pulls are off for this unit)</p>"
+        )
     return "".join(lines)
 
 
@@ -670,30 +574,31 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         )
         look_cell = _look_cell(entry.get("look"))
         floor_cell = _floor_cell(entry.get("floor"))
-        wood = entry.get("wood_guard") or {}
-        wood_cell = (
-            f"<p>floor zone guard at {wood['wood_max']} "
-            f"(zone read {wood['zone_purple']}% purple)</p>"
-            if wood.get("wood_max")
+        trim = entry.get("edge_trim") or {}
+        trim_cell = (
+            f"<p>edge trim (px): top {trim.get('top', 0)}, bottom {trim.get('bottom', 0)}, "
+            f"left {trim.get('left', 0)}, right {trim.get('right', 0)}</p>"
+            if trim
             else ""
         )
         clip_cell = (
             f"<p>window clip {entry.get('clip_before', 0.0):.4f} -&gt; "
             f"{entry.get('clip_after', 0.0):.4f} of window pixels "
             f"({entry.get('window_pixels', 0)} px, before read pre-shoulder, "
-            "after read from the file)</p>"
+            "after read from the file; window pulls are off, so both sides "
+            "read the balanced merge)</p>"
         )
-        pull_from = entry.get("pull_frame") or "no pulled windows"
         rows.append(
             f"<section><h2>Shot {name}</h2>"
             f"<p>{', '.join(entry.get('frames_used', []))}</p>"
             f"<p>merge: {entry.get('frames_reason', '')}</p>"
-            f"<p>window view from: {pull_from}</p>"
+            f"<p>windows: found, not edited (window pulls are off for this unit)</p>"
             f"<p>{entry.get('lens', '')}, "
             f"strength {entry.get('distortion_strength', '')}, "
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
-            f"ghosting {entry.get('ghosting', '')}{_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}{floor_cell}{wood_cell}"
+            f"ghosting {entry.get('ghosting', '')} "
+            f"({entry.get('deghost', '')}){_lens_note(entry)}</p>"
+            f"{clip_cell}{look_cell}{floor_cell}{trim_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
@@ -712,15 +617,23 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
     except MetaRefused:
         spend_line = "Meta spend unknown, ledger unreadable"
     pulled_line = (
-        f"<p>Windows pulled {top.get('windows_pulled', '?')}, "
-        f"kept from merge {top.get('windows_kept_from_merge', '?')}.</p>"
+        f"<p>Windows found, not edited: {top.get('windows_not_edited', '?')} "
+        f"(confirmed {top.get('windows_confirmed', '?')} of "
+        f"{top.get('windows_found', '?')} candidates, "
+        f"{top.get('windows_rejected', '?')} rejected). "
+        "Window pulls are off for this unit.</p>"
     )
     ratio = top.get("worst_reserve_ratio")
-    ratio_line = (
-        f"<p>Worst reservation-to-bill ratio {ratio:.2f}.</p>"
-        if ratio is not None
-        else "<p>Worst reservation-to-bill ratio unknown.</p>"
-    )
+    ratio_n = top.get("reserve_ratio_calls")
+    prior_under = top.get("prior_under_one", 0)
+    if ratio is not None:
+        ratio_line = (
+            f"<p>Lowest reservation-to-bill ratio {ratio:.2f} "
+            f"across {ratio_n} settled unit calls (the worst-covered call). "
+            f"{prior_under} earlier unit-1 call(s) under 1, reported separately.</p>"
+        )
+    else:
+        ratio_line = "<p>Lowest reservation-to-bill ratio unknown.</p>"
     commit = top.get("code_commit")
     commit_line = f"<p>Run from commit {commit}.</p>" if commit else "<p>Run commit unknown.</p>"
     html = f"""<!DOCTYPE html>
@@ -737,7 +650,9 @@ Windows found {top["windows_found"]}, confirmed {top["windows_confirmed"]},
 rejected {top["windows_rejected"]}, photos with windows {top["photos_with_windows"]}.</p>
 <p>Near-white window pixels {top["clip_before_n"]} -&gt; {top["clip_after_n"]}
 of {top["window_pixels"]} window pixels
-({top["clip_before_pct"]:.2f}% -&gt; {top["clip_after_pct"]:.2f}%).</p>
+({top["clip_before_pct"]:.2f}% -&gt; {top["clip_after_pct"]:.2f}%.
+Window pulls are off, so both sides read the balanced merge: the drop
+comes from the balance shoulder, not from pulls).</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
 {pulled_line}
 {ratio_line}
@@ -814,12 +729,21 @@ def _code_stamp() -> str | None:
         return None
 
 
+#: Unit 2's Meta calls start here: unit 1's 3 live calls are all Oct 26
+#: ($0.000988 total), and every later ledger line is this unit's. The
+#: reservation ratio page line scopes to this timestamp, so the minimum
+#: it reports is the unit's own thinnest coverage.
+UNIT2_RATIOS_SINCE = "2026-10-29T00:00:00+00:00"
+
+
 def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> dict:
     """Top-line numbers from finished records. Pure, no Meta calls.
 
     Noise is the median across photos; clip is pooled over every
     confirmed window pixel in the run, so one big window cannot hide
-    behind per-photo means.
+    behind per-photo means. The reservation ratio is the lowest
+    (worst-covered) ratio across this unit's settled calls; earlier
+    units' under-covered calls count separately.
     """
     from listing_partner.meta_client import reserve_ratio_stats
 
@@ -831,9 +755,13 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
     clip_after_n = sum(r.get("clip_after_n", 0) for r in finished_records)
     window_pixels = sum(r.get("window_pixels", 0) for r in finished_records)
     try:
-        worst_ratio = reserve_ratio_stats()["worst"]
+        scoped = reserve_ratio_stats(since=UNIT2_RATIOS_SINCE)
+        unscoped = reserve_ratio_stats()
+        worst_ratio = scoped["worst"]
+        ratio_calls = scoped["settled"]
+        prior_under = unscoped["under_one"] - scoped["under_one"]
     except MetaRefused:
-        worst_ratio = None
+        worst_ratio, ratio_calls, prior_under = None, None, 0
     return {
         "photos_finished": len(finished_records),
         "photos_failed": len(records) - len(finished_records),
@@ -844,8 +772,7 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "windows_confirmed": sum(len(r.get("windows", [])) for r in finished_records),
         "windows_rejected": sum(len(r.get("rejections", [])) for r in finished_records),
         "photos_with_windows": sum(1 for r in finished_records if r.get("windows")),
-        "windows_pulled": sum(r.get("windows_pulled", 0) for r in finished_records),
-        "windows_kept_from_merge": sum(r.get("windows_kept", 0) for r in finished_records),
+        "windows_not_edited": sum(r.get("windows_not_edited", 0) for r in finished_records),
         "clip_before_n": clip_before_n,
         "clip_after_n": clip_after_n,
         "window_pixels": window_pixels,
@@ -853,6 +780,8 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "clip_after_pct": 100 * clip_after_n / max(1, window_pixels),
         "unit_spend_usd": unit_spend_usd,
         "worst_reserve_ratio": worst_ratio,
+        "reserve_ratio_calls": ratio_calls,
+        "prior_under_one": prior_under,
         "code_commit": _code_stamp(),
     }
 
