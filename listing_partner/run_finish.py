@@ -11,7 +11,10 @@ spend-capped client; failures land in plain words and still count.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import resource
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -379,6 +382,11 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
         masks[window["id"]] = mask > 127
         union |= masks[window["id"]]
     finish_tail(record, state, dirs, masks, union)
+    # The set's images die here, before the next set starts: nothing in
+    # the record references them (records are numbers, and the manifest
+    # must stay JSON-serializable), so refcounting plus the caller's
+    # gc.collect() returns the memory instead of growing across 17 sets.
+    del state, union, masks
     # The saved verdicts stand; the found-not-edited labels are this
     # run's: carry them onto the prior window rows by id.
     labeled = {w["id"]: w for w in record.get("windows", [])}
@@ -842,12 +850,22 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
             }
 
 
+def peak_rss_mb() -> float:
+    """Peak resident set size of this process in MiB, for the run log."""
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return peak / (1024.0 * 1024.0)
+    return peak / 1024.0
+
+
 def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, dirs: dict) -> dict:
     """Re-run every set's local tail with its saved Meta results.
 
     Makes no Meta calls. Rewrites finished photos, review thumbs and the
     manifest; priors with errors are kept as-is. The unit spend stays the
-    prior run's: replaying cost nothing.
+    prior run's: replaying cost nothing. Sets run strictly one at a time
+    in this process (no workers): each set's images are released before
+    the next starts, and the run log carries one peak-memory line per set.
     """
     manifest_path = output_dir / "finish_manifest.json"
     prior_manifest = json.loads(manifest_path.read_text())
@@ -859,16 +877,21 @@ def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, d
         if old is None or old.get("error"):
             records.append(old if old is not None else {"index": number})
             print(f"set {number}/{len(sets)}: kept prior record", flush=True)
-            continue
-        try:
-            record = replay_set(old, members, dirs)
-            print(f"set {number}/{len(sets)}: replayed", flush=True)
-        except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
-            record = dict(old)
-            record["error"] = f"{type(exc).__name__}: {exc}"
-            record["traceback"] = traceback.format_exc(limit=3)
-            print(f"set {number}/{len(sets)}: REPLAY FAILED {record['error']}", flush=True)
-        records.append(record)
+        else:
+            try:
+                record = replay_set(old, members, dirs)
+                print(f"set {number}/{len(sets)}: replayed", flush=True)
+            except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
+                record = dict(old)
+                record["error"] = f"{type(exc).__name__}: {exc}"
+                record["traceback"] = traceback.format_exc(limit=3)
+                print(f"set {number}/{len(sets)}: REPLAY FAILED {record['error']}", flush=True)
+            records.append(record)
+        gc.collect()
+        print(
+            f"set {number}/{len(sets)}: peak_rss_mb={peak_rss_mb():.0f}",
+            flush=True,
+        )
     elapsed = time.perf_counter() - started
     attach_look(records, mls_matches, mls_dir, output_dir)
     baseline, unit_spend = _unit_spend_usd(prior_manifest)

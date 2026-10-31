@@ -678,3 +678,88 @@ def test_review_names_zero_strength_photos_plainly(tmp_path):
     assert "line sweep on a center crop did not improve" not in corrected, (
         "photos with real correction must not carry the zero-strength note"
     )
+
+
+def test_replay_logs_peak_memory_per_set_and_releases_images(tmp_path, monkeypatch, capsys):
+    """The replay runs one set at a time, logs peak memory per set, keeps no images.
+
+    The Mac ran out of memory mid-rerun: replay handles sets strictly
+    sequentially (no workers), each set's images are released before the
+    next starts (finished records carry no arrays), and the run log
+    carries one peak_rss_mb line per set.
+    """
+    import json
+
+    import numpy as np
+
+    from listing_partner import run_finish as rf
+
+    assert rf.peak_rss_mb() > 0, "peak RSS must read a real number"
+
+    tiny = np.full((20, 20, 3), 150, np.uint8)
+
+    def _stub(members, record):
+        record["straight_before"] = 200.0
+        record["straight_after"] = 200.0
+        record["distortion_applied"] = False
+        return {
+            "balanced": tiny.copy(),
+            "preshoulder": tiny.astype(np.float32),
+            "merged": tiny.copy(),
+            "aligned": [tiny.copy()],
+            "members": list(members),
+            "order": {},
+            "small": tiny.copy(),
+            "sent_jpeg": b"0",
+            "sent_h": 20,
+            "sent_w": 20,
+            "valid": np.ones((20, 20), bool),
+            "h": 20,
+            "w": 20,
+        }
+
+    monkeypatch.setattr(rf, "build_inputs", _stub)
+
+    output_dir = tmp_path / "unit"
+    for dirname in ("finished", "masks", "review"):
+        (output_dir / dirname).mkdir(parents=True)
+    prior_sets = [
+        {
+            "index": number,
+            "name": f"{number:03d}",
+            "notes": [],
+            "windows": [],
+            "candidates_found": 0,
+            "transcript": [],
+            "rejections": [],
+        }
+        for number in (1, 2)
+    ]
+    (output_dir / "finish_manifest.json").write_text(
+        json.dumps({"summary": {}, "sets": prior_sets})
+    )
+    dirs = {
+        "finished": output_dir / "finished",
+        "masks": output_dir / "masks",
+        "review": output_dir / "review",
+    }
+    manifest = rf.run_replay([[Path("a.NEF")], [Path("b.NEF")]], {}, tmp_path, output_dir, dirs)
+
+    assert [r["index"] for r in manifest["sets"]] == [1, 2], "sets replay in order"
+    assert all(r.get("error") is None for r in manifest["sets"])
+
+    def _no_arrays(node):
+        if isinstance(node, np.ndarray):
+            return False
+        if isinstance(node, dict):
+            return all(_no_arrays(value) for value in node.values())
+        if isinstance(node, (list, tuple)):
+            return all(_no_arrays(value) for value in node)
+        return True
+
+    assert all(_no_arrays(record) for record in manifest["sets"]), (
+        "a finished set's record carries numbers, never images"
+    )
+    lines = capsys.readouterr().out.splitlines()
+    mem_lines = [line for line in lines if "peak_rss_mb" in line]
+    assert len(mem_lines) == 2, f"one peak-memory line per set, got: {lines}"
