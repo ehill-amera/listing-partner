@@ -1,6 +1,5 @@
 """Pipeline seam tests: build_inputs carries undistort validity to the crop."""
 
-import glob
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +14,24 @@ def _synthetic_frame(height=120, width=160):
     return np.stack([frame, frame, frame], axis=-1).astype(np.uint8)
 
 
+def _synthetic_members(monkeypatch, n=5):
+    """Stand-in member paths with stubbed EXIF reads.
+
+    The raw NEFs are gitignored, so a fresh clone has no
+    inputs/unit-a/raw/: these members run identically with or without
+    them. Only the far side is stubbed (file EXIF and pixel decode);
+    the real lens profile, displacement math, merge choice and balance
+    still run.
+    """
+    members = [Path(f"frame{i}.NEF") for i in range(n)]
+    monkeypatch.setattr(geometry, "read_focal", lambda path: 10.0)
+    monkeypatch.setattr(geometry, "read_lens_identity", lambda path: dict(geometry.UNIT_A_LENS))
+    monkeypatch.setattr(
+        hdr, "read_exposure_seconds", lambda path: 1.0 + int(path.stem.replace("frame", ""))
+    )
+    return members
+
+
 def test_build_inputs_keeps_undistort_invalid_out(monkeypatch):
     """Undistort-invalid borders must reach state['valid'] (and the crop).
 
@@ -22,8 +39,7 @@ def test_build_inputs_keeps_undistort_invalid_out(monkeypatch):
     profile, the real displacement math and the real combination run.
     Strength is fixed so the invalid-border path is deterministic.
     """
-    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
-    assert len(members) == 5
+    members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
     monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.5)
@@ -53,7 +69,6 @@ def _tail_state(n=100):
     members = [Path(f"frame{i}.NEF") for i in range(2)]
     return {
         "balanced": balanced,
-        "preshoulder": balanced.copy(),
         "aligned": [blown, clean],
         "members": members,
         "order": {p: i for i, p in enumerate(members)},
@@ -70,6 +85,150 @@ def _tail_dirs(tmp_path):
     for d in dirs.values():
         d.mkdir(parents=True)
     return dirs
+
+
+def test_finish_tail_reads_clip_on_one_scale(tmp_path):
+    """Near-white window pixels read one scale both sides (contract 02,
+    final round): before from the balanced crop, after from the saved
+    file. No pre-shoulder float hides behind the shoulder."""
+    import cv2
+    from listing_partner import run_finish as rf
+
+    state, union = _tail_state()
+    record = {
+        "index": 1,
+        "name": "001",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
+        "windows": [{"id": 0, "reason": "shows sky"}],
+    }
+    rf.finish_tail(record, state, _tail_dirs(tmp_path), {0: union}, union)
+    crop = state["balanced"][1:99, 1:99]
+    union_c = union[1:99, 1:99]
+    expected = int(((crop.max(axis=2) >= 250) & union_c).sum())
+    assert record["clip_before_n"] == expected, "before reads the balanced crop"
+    reread = cv2.cvtColor(cv2.imread(str(tmp_path / "finished" / "001.jpg")), cv2.COLOR_BGR2RGB)
+    expected_after = int(((reread.max(axis=2) >= 250) & union_c).sum())
+    assert record["clip_after_n"] == expected_after, "after reads the saved file"
+
+
+def test_finish_tail_saves_rejected_thumbs(tmp_path):
+    """Every rejected candidate gets its mask saved and a review thumb."""
+    from listing_partner import run_finish as rf
+
+    state, union = _tail_state()
+    rej = np.zeros((100, 100), bool)
+    rej[0:20, 0:20] = True
+    record = {
+        "index": 1,
+        "name": "001",
+        "straight_before": 200.0,
+        "straight_after": 210.0,
+        "vertical_residual": 0.0,
+        "windows": [{"id": 0, "reason": "shows sky"}],
+    }
+    dirs = _tail_dirs(tmp_path)
+    rf.finish_tail(record, state, dirs, {0: union}, union, rej_masks={7: rej})
+    assert (dirs["review"] / "rejected_001_7.jpg").exists(), "rejected mask shows on the page"
+
+
+def test_review_shows_rejected_mask_or_says_why_not(tmp_path):
+    """Rejections show their mask image, or say the run predates masks."""
+    from listing_partner import run_finish as rf
+
+    manifest = {
+        "summary": {
+            "photos_finished": 1,
+            "photos_failed": 0,
+            "run_seconds": 1.0,
+            "noise_before": 3.0,
+            "noise_after": 1.5,
+            "windows_found": 2,
+            "windows_confirmed": 0,
+            "windows_rejected": 2,
+            "photos_with_windows": 0,
+            "windows_not_edited": 0,
+            "clip_before_n": 0,
+            "clip_after_n": 0,
+            "window_pixels": 0,
+            "clip_before_pct": 0.0,
+            "clip_after_pct": 0.0,
+            "unit_spend_usd": 0.0,
+        },
+        "sets": [
+            {
+                "index": 12,
+                "name": "012",
+                "frames_used": ["a.NEF"],
+                "frames_reason": "full",
+                "pull_frame": None,
+                "distortion_strength": {},
+                "lens": "lens ok",
+                "verticals": "level already",
+                "vignetting": "skipped: x",
+                "ghosting": 0.0,
+                "clip_before": 0.0,
+                "clip_after": 0.0,
+                "window_pixels": 0,
+                "windows": [],
+                "rejections": [
+                    {"id": 1, "reason": "a mirror", "mask_file": "012_rejected1.png"},
+                    {"id": 2, "reason": "a screen"},
+                ],
+                "checks": {},
+                "look": None,
+            }
+        ],
+    }
+    html = rf.build_finish_review(tmp_path, manifest, {}).read_text()
+    assert "review/rejected_012_1.jpg" in html, "saved rejected masks show"
+    assert "mask not saved by that run" in html, "older rows say why no mask shows"
+
+
+def test_replay_loads_saved_rejected_masks(tmp_path, monkeypatch):
+    """Replay rebuilds rejected thumbs from the saved mask files."""
+    import cv2
+    from listing_partner import run_finish as rf
+
+    tiny = np.full((20, 20, 3), 150, np.uint8)
+
+    def _stub(members, record):
+        record["straight_before"] = 200.0
+        record["straight_after"] = 200.0
+        record["distortion_applied"] = False
+        return {
+            "balanced": tiny.copy(),
+            "merged": tiny.copy(),
+            "aligned": [tiny.copy()],
+            "members": list(members),
+            "order": {},
+            "small": tiny.copy(),
+            "sent_jpeg": b"0",
+            "sent_h": 20,
+            "sent_w": 20,
+            "valid": np.ones((20, 20), bool),
+            "h": 20,
+            "w": 20,
+        }
+
+    monkeypatch.setattr(rf, "build_inputs", _stub)
+    dirs = _tail_dirs(tmp_path)
+    rej = np.zeros((20, 20), np.uint8)
+    rej[0:10, 0:10] = 255
+    cv2.imwrite(str(dirs["masks"] / "001_rejected3.png"), rej)
+    prior = {
+        "index": 1,
+        "name": "001",
+        "notes": [],
+        "windows": [],
+        "candidates_found": 1,
+        "transcript": [],
+        "rejections": [{"id": 3, "reason": "a mirror", "mask_file": "001_rejected3.png"}],
+    }
+    record = rf.replay_set(prior, [Path("a.NEF")], dirs)
+    assert record["error"] is None
+    assert (dirs["review"] / "rejected_001_3.jpg").exists()
 
 
 def test_finish_tail_reports_pull_checks_not_measured(tmp_path):
@@ -286,7 +445,6 @@ def test_finish_tail_crops_dark_edge_rows(tmp_path):
     members = [Path("frame0.NEF")]
     state = {
         "balanced": balanced,
-        "preshoulder": balanced.copy(),
         "merged": balanced.copy(),
         "aligned": [balanced.copy()],
         "members": members,
@@ -319,7 +477,6 @@ def test_finish_tail_keeps_real_dark_floors(tmp_path):
     members = [Path("frame0.NEF")]
     state = {
         "balanced": balanced,
-        "preshoulder": balanced.copy(),
         "merged": balanced.copy(),
         "aligned": [balanced.copy()],
         "members": members,
@@ -347,8 +504,7 @@ def test_build_inputs_measures_straightness_on_the_same_frame(monkeypatch):
     profile, the real displacement math and the real merge run. Strength
     is fixed so the corrected side is deterministic.
     """
-    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
-    assert len(members) == 5
+    members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
     monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.5)
@@ -371,8 +527,7 @@ def test_build_inputs_skips_lens_without_profile(monkeypatch):
     instead of failing the whole photo. Only the profile match is
     stubbed (the far side); EXIF reads and everything downstream run.
     """
-    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
-    assert len(members) == 5
+    members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
     monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
     monkeypatch.setattr(geometry, "match_profile", lambda identity: None)
@@ -390,7 +545,7 @@ def test_build_inputs_skips_lens_without_profile(monkeypatch):
 def test_build_inputs_names_uncorrected_frames_not_measured(monkeypatch):
     from listing_partner import checks
 
-    members = [Path(p) for p in sorted(glob.glob("inputs/unit-a/raw/*.NEF"))[:5]]
+    members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
     monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.0)
@@ -571,8 +726,8 @@ def test_review_shows_merge_finished_outline_and_mls(tmp_path):
     assert "PASS look" in html, "every look row shows pass or fail"
     assert "found, not edited" in html
     assert "Lowest reservation-to-bill ratio 2.00" in html
-    assert "fitted on these same 16 photos" in html, (
-        "the page must say plainly the shared look was fitted on these photos"
+    assert "refitted in the final round" in html and "on these same 16 photos" in html, (
+        "the page must say plainly the shared look was refitted on these photos this round"
     )
     assert "abc123" in html, "the run's commit stamp shows on the page"
 
@@ -704,7 +859,6 @@ def test_replay_logs_peak_memory_per_set_and_releases_images(tmp_path, monkeypat
         record["distortion_applied"] = False
         return {
             "balanced": tiny.copy(),
-            "preshoulder": tiny.astype(np.float32),
             "merged": tiny.copy(),
             "aligned": [tiny.copy()],
             "members": list(members),

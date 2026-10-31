@@ -25,54 +25,77 @@ def test_white_balance_neutralizes_cast():
     assert abs(gray[:, :, 0].mean() - gray[:, :, 2].mean()) < 8, "walls read neutral"
 
 
-def test_daylight_spill_keeps_neutral_color():
+def test_tone_changes_no_hue_anywhere():
+    """Every tone step is a luminance scale shared by all channels.
+
+    Past the reported global white-balance factors, no pixel's
+    chromaticity may move: predicted chromaticity (input times the
+    reported factors) matches the output on every unclipped pixel, in
+    dim corners, mid walls and bright spill alike. Per-channel gamma
+    and shoulder, the blue cap and the spill guard all moved
+    chromaticity by brightness or region and fail this; clipping is
+    excluded on both sides because a clipped channel carries no hue.
+    """
     img = np.full((200, 200, 3), (150, 100, 60), np.uint8)  # tungsten-lit room
-    img[120:180, 60:140] = (205, 205, 205)  # neutral daylight spill on the floor
-    out, _ = finish.balance_exposure(img)
-    walls = out[20:60, 20:180].astype(float)
-    assert abs(walls[:, :, 0].mean() - walls[:, :, 2].mean()) < 12, "walls still neutralize"
-    spill = out[130:170, 70:130].astype(float)
-    assert abs(spill[:, :, 2].mean() - spill[:, :, 0].mean()) < 8, (
-        "daylight spill stays neutral instead of taking the tungsten room's blue"
-    )
-
-
-def _warm_room_big_wood_floor():
-    """Warm-cast walls plus a wood floor that dominates the room pixels.
-
-    Unit-a 006's floor voted itself gray: the all-room vote let saturated
-    wood set the illuminant and the correction lavendered the floor. The
-    bright lamp band holds the vote ceiling above walls and floor alike,
-    the way bright fixtures do in real rooms. Walls read brighter than
-    the floor, the way lit walls do.
-    """
-    img = np.full((200, 200, 3), (200, 160, 115), np.uint8)  # warm-cast neutral walls
-    img[60:, :] = (190, 130, 80)  # saturated wood floor, most room pixels
-    img[:20, :] = (230, 230, 230)  # bright lamp band, above the vote
-    return img
-
-
-def test_balance_holds_warm_rooms_without_a_zone():
-    """The global vote still cools a warm cast with no box anywhere.
-
-    The zone wood guard is removed (finding 2: its unfeathered box
-    painted the orange rectangle). The same warm room balances through
-    the global vote alone: walls cool toward neutral, with no regional
-    correction and no boundary to measure.
-    """
-    import inspect
-
-    assert "wood_zone" not in inspect.signature(finish.balance_exposure).parameters
-    assert not hasattr(finish, "wood_max_for"), "the guard strength map is gone too"
-    img = _warm_room_big_wood_floor()
+    img[:40, :] = (60, 45, 30)  # dim corners
+    img[120:180, 60:140] = (205, 205, 205)  # bright neutral spill on the floor
     before = img.astype(float)
-    wall_gap_before = before[25:55, 20:180, 0].mean() - before[25:55, 20:180, 2].mean()
-    out, _ = finish.balance_exposure(img)
-    walls = out[25:55, 20:180].astype(float)
-    wall_gap = walls[:, :, 0].mean() - walls[:, :, 2].mean()
-    assert 0 < wall_gap < wall_gap_before, (
-        f"walls still cool under the global vote, got R-B {wall_gap:.1f}"
-    )
+    out, report = finish.balance_exposure(img)
+    after = out.astype(float)
+    factors = np.array(report["wb_factors"], float)
+    pred = before * factors
+    keep = (before.max(axis=2) < 250) & (after.max(axis=2) < 250)
+    assert keep.sum() > 1000, "the comparison needs unclipped pixels"
+    for channel in (0, 2):
+        actual = after[:, :, channel][keep] / np.maximum(after[:, :, 1][keep], 1.0)
+        expected = pred[:, :, channel][keep] / np.maximum(pred[:, :, 1][keep], 1.0)
+        gap = float(np.abs(actual - expected).mean())
+        assert gap <= 0.02, f"channel {channel} chromaticity moves {gap:.3f} past the vote"
+
+
+def _cast_room_with_wood_floor():
+    """A neutral room plus saturated wood floor under one warm cast.
+
+    Unit-a 006's floor voted itself gray: the old all-room vote let
+    saturated wood set the illuminant and the correction lavendered the
+    floor. Here the vote reads neutral surfaces only (white ceiling and
+    gray rug, like real rooms), so the cast lifts and the wood keeps its
+    warm character. The bright lamp band holds the vote ceiling above
+    walls and floor alike, the way bright fixtures do in real rooms.
+    """
+    img = np.full((200, 200, 3), (200, 160, 115), np.uint8)  # warm beige walls
+    img[:25, :] = (220, 218, 216)  # near-white neutral ceiling
+    img[:10, :] = (245, 245, 245)  # bright lamp band, above the vote
+    img[30:55, 20:180] = (175, 172, 170)  # neutral gray rug on the wall band
+    img[110:, :] = (190, 130, 80)  # saturated wood floor, most room pixels
+    cast = np.array([1.08, 1.0, 0.92])  # one warm cast over the whole room
+    return np.clip(img.astype(float) * cast, 0, 255).astype(np.uint8)
+
+
+def test_neutral_vote_cools_cast_keeps_wood_warm():
+    """The vote reads neutral surfaces, never saturated wood.
+
+    The warm cast cools on walls and ceiling, while the dim wood floor
+    keeps its warm character (red above blue, blue at or below green):
+    warm wood must never read blue. No regional correction exists, so
+    there is no boundary to measure.
+    """
+    img = _cast_room_with_wood_floor()
+    out, report = finish.balance_exposure(img)
+    assert report.get("wb_voters") == "neutral", "neutrals vote, not the wood"
+    # The neutral ceiling reads neutral again: the cast is gone where the
+    # surface is gray.
+    ceiling = out[12:25, 20:180].astype(float)
+    ceiling_gap = ceiling[:, :, 0].mean() - ceiling[:, :, 2].mean()
+    assert abs(ceiling_gap) < 12, f"ceiling neutralizes, got R-B {ceiling_gap:.1f}"
+    # The beige walls keep the paint's own warmth, not the cast's: their
+    # red/blue ratio matches the uncast paint (200/115).
+    walls = out[60:100, 20:180].astype(float)
+    wall_ratio = walls[:, :, 0].mean() / max(walls[:, :, 2].mean(), 1.0)
+    assert abs(wall_ratio - 200.0 / 115.0) < 0.2, f"walls keep the paint, got R/B {wall_ratio:.2f}"
+    floor = out[130:190, 20:180].astype(float)
+    assert (floor[:, :, 0] - floor[:, :, 2]).mean() > 5, "wood keeps its warm red-over-blue"
+    assert (floor[:, :, 2] - floor[:, :, 1]).max() <= 2, "warm wood never reads blue"
 
 
 def _exterior_room():
@@ -82,16 +105,20 @@ def _exterior_room():
     return img
 
 
-def test_spill_guard_skips_exteriors():
+def test_no_brightness_or_region_color_step():
+    """Every brightness-dependent, regional and positional color step is
+    gone (contract 02, final round): no blue cap, no daylight-spill
+    guard, nothing like them, on interiors or exteriors."""
+    assert not hasattr(finish, "WB_BLUE_CAP"), "the blue cap constant is gone"
+    assert not hasattr(finish, "WB_BLUE_CAP_DIM_LO"), "the cap's dim ramp is gone too"
+    assert not hasattr(finish, "wood_max_for"), "the old zone guard stays gone"
     assert finish.classify_scene(_exterior_room()) == "exterior"
     spill = np.full((200, 200, 3), (150, 100, 60), np.uint8)
     spill[120:180, 60:140] = (205, 205, 205)
-    _, interior_report = finish.balance_exposure(spill)
-    assert interior_report.get("spill_guard", 0.0) > 0, "interiors keep the guard"
-    _, exterior_report = finish.balance_exposure(_exterior_room())
-    assert exterior_report.get("spill_guard", 0.0) == 0.0, (
-        "exteriors skip the guard: unit-a 013's daylight needs no tungsten vote"
-    )
+    for img in (spill, _exterior_room()):
+        _, report = finish.balance_exposure(img)
+        assert "blue_capped" not in report, "no blue-cap report key"
+        assert "spill_guard" not in report, "no spill-guard report key"
 
 
 def test_shadow_lift_opens_corners_without_haze():
@@ -106,7 +133,13 @@ def test_shadow_lift_opens_corners_without_haze():
 
 def test_highlights_held_and_mls_matched():
     out, report = finish.balance_exposure(_room_cast())
-    assert (out.astype(float).max(axis=2) >= 250).mean() < 0.02, "hot patch held"
+    # Highlights hold in luminance: the shoulder compresses over-bright
+    # luminance toward 235 while every pixel keeps its chromaticity, so
+    # no per-channel clamp hides (or invents) clipping. A per-channel
+    # clamp would be a brightness-dependent color step, which the final
+    # round removes.
+    lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
+    assert lum.max() <= 240, f"luminance holds at {lum.max():.0f}, not blown open"
     assert abs(out.astype(float).mean() - finish.INTERIOR_TARGET_MEDIAN) < 25, (
         "overall brightness near the shared interior target, with no twin read"
     )
@@ -153,22 +186,45 @@ def _tungsten_room_wood_floor():
     return img
 
 
-def test_blue_cap_never_flips_warm_wood_blue():
-    """White balance neutralizes warmth but never manufactures blueness.
+def test_all_room_fallback_still_votes():
+    """With no neutral surface in the room, every room pixel votes.
 
-    The wood floor starts warm (B below G) and must never read blue
-    (B above G) after balancing: the per-pixel cap pulls each flipped
-    pixel back to neutral, with smooth dim and warmth ramps and no
-    region anywhere. Blue-origin pixels such as sky are untouched.
+    A saturated room with no neutrals (no ceiling, no trim in frame)
+    still white-balances instead of silently skipping: the vote falls
+    back to all room pixels and says so in the report.
     """
     img = _tungsten_room_wood_floor()
-    before = img[120:190, 20:180].astype(float)
-    assert (before[:, :, 2] - before[:, :, 1]).max() <= 0, "fixture starts warm"
     out, report = finish.balance_exposure(img)
-    assert report.get("blue_capped", 0.0) > 0, "the cap engages on this room"
-    floor = out[120:190, 20:180].astype(float)
-    gap = (floor[:, :, 2] - floor[:, :, 1]).max()
-    assert gap <= 1, f"warm wood must never read blue, got B-G up to {gap:.1f}"
+    assert report.get("wb_voters") == "all-room", "the fallback says all-room"
+    assert report["white_balanced"] is True
+
+
+def test_one_paint_keeps_one_color_across_brightness():
+    """One paint keeps one color across its brightness range (contract 02,
+    final round: one global exposure gain and white balance per photo, one
+    luminance-only shared tone curve, no brightness-dependent color step).
+
+    A single paint color under a smooth brightness ramp goes through the
+    finish; its a* and b* stay within 2 across the ramp. The old
+    tone-dependent steps (blue cap, daylight-spill guard, per-channel
+    gamma and shoulder) moved b* by ~8 across the same ramp.
+    """
+    import cv2
+
+    paint = np.array([200.0, 160.0, 115.0])  # one warm wall paint
+    ramp = np.linspace(0.35, 1.0, 200)[:, None, None]
+    img = np.clip(paint * ramp, 0, 255).astype(np.uint8)
+    img = np.repeat(img, 20, axis=1)  # 200 rows of ramp x 20 cols
+    out, _ = finish.balance_exposure(img)
+    lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB).astype(float)[:, :, 1:] - 128.0
+    # Band means, not single rows: 8-bit rounding chatters single rows
+    # by ~1 level, while a real hue shift moves whole bands (the old
+    # code read b* 1.2, 1.3, 1.4, 1.8, 4.3, 7.6, 10.0, 7.4 by band).
+    bands = lab[20:180].reshape(8, 20, 20, 2).mean(axis=(1, 2))
+    drift_a = float(bands[:, 0].max() - bands[:, 0].min())
+    drift_b = float(bands[:, 1].max() - bands[:, 1].min())
+    assert drift_a <= 2.0, f"a* drifts {drift_a:.1f} across one paint's ramp (limit 2)"
+    assert drift_b <= 2.0, f"b* drifts {drift_b:.1f} across one paint's ramp (limit 2)"
 
 
 def test_balance_does_not_hide_real_clipping():

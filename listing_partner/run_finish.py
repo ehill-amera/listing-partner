@@ -168,9 +168,7 @@ def build_inputs(
     y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
     anchor = np.zeros_like(valid)
     anchor[y0:y1, x0:x1] = True
-    balanced, balance_report, preshoulder = finish.balance_exposure(
-        merged, anchor_mask=anchor, return_preshoulder=True
-    )
+    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=anchor)
     record["balance"] = balance_report
 
     h, w = balanced.shape[:2]
@@ -184,7 +182,6 @@ def build_inputs(
     sent_h, sent_w = small.shape[:2]
     return {
         "balanced": balanced,
-        "preshoulder": preshoulder,
         "merged": merged,
         "aligned": aligned,
         "members": list(members),
@@ -219,7 +216,12 @@ FLOOR_ZONE_FRAC = (0.5, 1.0, 0.0, 1.0)
 
 
 def finish_tail(
-    record: dict, state: dict, dirs: dict, masks: dict[int, np.ndarray], union: np.ndarray
+    record: dict,
+    state: dict,
+    dirs: dict,
+    masks: dict[int, np.ndarray],
+    union: np.ndarray,
+    rej_masks: dict[int, np.ndarray] | None = None,
 ) -> None:
     """Local tail after verdicts: denoise, crop, checks, saves.
 
@@ -227,16 +229,15 @@ def finish_tail(
     place. Window pulls are off for this unit (contract 02, Erik's
     decision Oct 30): every confirmed window keeps the balanced merge's
     pixels, labeled "found, not edited". Clip numbers are fractions of
-    window pixels: before is read pre-shoulder (the shoulder parks blown
-    glass under the level, so post-shoulder would hide it), after is
-    read back from the saved JPEG file, the actual final output. Both
-    sides read the balanced merge this unit; no pull changes either.
+    window pixels read on one scale both sides: before from the
+    balanced crop, after back from the saved JPEG file, the actual
+    final output (contract 02, final round). Both sides read the
+    balanced merge this unit; no pull changes either.
     """
     from listing_partner.checks import CLIP_LEVEL
 
     name = record["name"]
     balanced = state["balanced"]
-    preshoulder = state["preshoulder"]
     valid = state["valid"]
     # One shared crop for measurement and file. The valid-pixel crop
     # drops undistort/rotation borders; the edge trim then drops the
@@ -254,7 +255,6 @@ def finish_tail(
         return arr[y0:y1, x0:x1]
 
     balanced_c = _crop(balanced)
-    preshoulder_c = _crop(preshoulder)
     union_c = _crop(union)
     composed = balanced_c.copy()
     for window in record.get("windows", []):
@@ -281,10 +281,10 @@ def finish_tail(
     window_pixels = int(union_c.sum())
     if window_pixels:
         # Any channel at 250, as the contract says: grayscale understates
-        # blowout, and a result shaped by clamping would not count. The
-        # before side reads pre-shoulder float (real blowout reads in the
-        # hundreds); post-shoulder would hide it under the level.
-        clip_before_n = int(((preshoulder_c.max(axis=2) >= CLIP_LEVEL) & union_c).sum())
+        # blowout, and a result shaped by clamping would not count. Both
+        # sides read the same uint8 scale: before from the balanced crop,
+        # after back from the saved file below.
+        clip_before_n = int(((balanced_c.max(axis=2) >= CLIP_LEVEL) & union_c).sum())
     else:
         clip_before_n = 0
     record["window_pixels"] = window_pixels
@@ -350,6 +350,16 @@ def finish_tail(
         interpolation=cv2.INTER_AREA,
     )
     save_clean_jpeg(overlay_thumb, dirs["review"] / f"overlay_{name}.jpg")
+    # Rejected candidates get their own overlay thumbs, so every
+    # rejection on the page shows its mask, not just its reason.
+    for rej_id, rej_mask in (rej_masks or {}).items():
+        rej_c = _crop(rej_mask)
+        rej_thumb = cv2.resize(
+            tint_overlay(balanced_c, rej_c),
+            (1024, int(round(finished.shape[0] * 1024 / finished.shape[1]))),
+            interpolation=cv2.INTER_AREA,
+        )
+        save_clean_jpeg(rej_thumb, dirs["review"] / f"rejected_{name}_{rej_id}.jpg")
 
 
 def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
@@ -381,7 +391,21 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
             )
         masks[window["id"]] = mask > 127
         union |= masks[window["id"]]
-    finish_tail(record, state, dirs, masks, union)
+    rej_masks: dict[int, np.ndarray] = {}
+    for rejection in prior.get("rejections", []):
+        mask_file = rejection.get("mask_file")
+        if not mask_file:
+            continue  # saved before rejected masks existed: reason only
+        path = dirs["masks"] / mask_file
+        mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise ValueError(f"saved mask missing for rejection {rejection['id']}: {path.name}")
+        if mask.shape != (state["h"], state["w"]):
+            raise ValueError(
+                f"saved mask {path.name} is {mask.shape}, expected {(state['h'], state['w'])}"
+            )
+        rej_masks[rejection["id"]] = mask > 127
+    finish_tail(record, state, dirs, masks, union, rej_masks=rej_masks)
     # The set's images die here, before the next set starts: nothing in
     # the record references them (records are numbers, and the manifest
     # must stay JSON-serializable), so refcounting plus the caller's
@@ -436,11 +460,8 @@ def process_set(
         else:
             verdicts = {}
         record["transcript"] = transcript
-        confirmed = [
-            c
-            for c in segment.scale_candidates(candidates, state["sent_w"], state["sent_h"], h, w)
-            if verdicts.get(c["object_id"], (False, ""))[0]
-        ]
+        scaled = segment.scale_candidates(candidates, state["sent_w"], state["sent_h"], h, w)
+        confirmed = [c for c in scaled if verdicts.get(c["object_id"], (False, ""))[0]]
         record["windows"] = [
             {
                 "id": c["object_id"],
@@ -449,13 +470,17 @@ def process_set(
             }
             for c in confirmed
         ]
+        rejected = [
+            c for c in scaled if c["object_id"] in verdicts and not verdicts[c["object_id"]][0]
+        ]
         record["rejections"] = [
             {
                 "id": c["object_id"],
+                "box": list(c["box"]),
                 "reason": verdicts[c["object_id"]][1],
+                "mask_file": f"{name}_rejected{c['object_id']}.png",
             }
-            for c in segment.scale_candidates(candidates, state["sent_w"], state["sent_h"], h, w)
-            if c["object_id"] in verdicts and not verdicts[c["object_id"]][0]
+            for c in rejected
         ]
         union = np.zeros((h, w), bool)
         masks: dict[int, np.ndarray] = {}
@@ -466,7 +491,14 @@ def process_set(
                 c["mask"],
                 dirs["masks"] / f"{name}_window{c['object_id']}.png",
             )
-        finish_tail(record, state, dirs, masks, union)
+        rej_masks: dict[int, np.ndarray] = {}
+        for c in rejected:
+            rej_masks[c["object_id"]] = c["mask"]
+            segment.save_mask_png(
+                c["mask"],
+                dirs["masks"] / f"{name}_rejected{c['object_id']}.png",
+            )
+        finish_tail(record, state, dirs, masks, union, rej_masks=rej_masks)
         record["error"] = None
     except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
         record["transcript"] = transcript
@@ -567,7 +599,18 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         else:
             win_cell = "<p>no windows confirmed</p>"
         rejected = entry.get("rejections", [])
-        rej_cell = "".join(f"<p>rejected {r['id']}: {r['reason']}</p>" for r in rejected)
+        rej_rows = []
+        for r in rejected:
+            if r.get("mask_file"):
+                rej_rows.append(
+                    f"<p>rejected {r['id']}: {r['reason']}</p>"
+                    f'<img src="review/rejected_{name}_{r["id"]}.jpg" loading="lazy">'
+                )
+            else:
+                rej_rows.append(
+                    f"<p>rejected {r['id']}: {r['reason']} (mask not saved by that run)</p>"
+                )
+        rej_cell = "".join(rej_rows)
         check_cell = "".join(
             _check_line(label, result) for label, result in entry.get("checks", {}).items()
         )
@@ -592,9 +635,9 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         clip_cell = (
             f"<p>window clip {entry.get('clip_before', 0.0):.4f} -&gt; "
             f"{entry.get('clip_after', 0.0):.4f} of window pixels "
-            f"({entry.get('window_pixels', 0)} px, before read pre-shoulder, "
-            "after read from the file; window pulls are off, so both sides "
-            "read the balanced merge)</p>"
+            f"({entry.get('window_pixels', 0)} px, one scale both sides: "
+            "before from the balanced crop, after from the file; window "
+            "pulls are off, so both sides read the balanced merge)</p>"
         )
         rows.append(
             f"<section><h2>Shot {name}</h2>"
@@ -659,15 +702,18 @@ rejected {top["windows_rejected"]}, photos with windows {top["photos_with_window
 <p>Near-white window pixels {top["clip_before_n"]} -&gt; {top["clip_after_n"]}
 of {top["window_pixels"]} window pixels
 ({top["clip_before_pct"]:.2f}% -&gt; {top["clip_after_pct"]:.2f}%.
-Window pulls are off, so both sides read the balanced merge: the drop
-comes from the balance shoulder, not from pulls).</p>
+One scale both sides (before from the balanced crop, after from the
+saved file). Window pulls are off, so both sides read the balanced
+merge and no pull changes either.</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
 {pulled_line}
 {ratio_line}
 {commit_line}
-<p>The shared look settings behind these photos were fitted on these same 16 photos
-against their MLS twins. They are frozen from this round on: unit 5 measures the
-same settings, unchanged, on a held-out set.</p>
+<p>The shared look settings behind these photos were refitted in the final round
+(Oct 31) on these same 16 photos against their MLS twins: the tone-dependent
+color steps are gone, replaced by one global exposure gain and white balance
+per photo plus one luminance-only shared tone curve. They are frozen from this
+round on: unit 5 measures the same settings, unchanged, on a held-out set.</p>
 {"".join(rows)}
 <footer><p>{spend_line}</p></footer>
 </body></html>"""

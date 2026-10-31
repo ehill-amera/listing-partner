@@ -1,10 +1,13 @@
 """Exposure balance and denoising (unit 2, steps C and D). Local only.
 
-Balance is global smooth curves plus a blurred luminance lift: no region
-edges by construction. The white point comes from near-gray pixels so
-walls read true; pulled-window interiors can be protected and wait for
-step B. Denoise is edge-preserving bilateral on full-res luminance plus
-light chroma smoothing, applied last.
+Balance is one global white balance plus one global exposure gain per
+photo and one shared tone pipeline applied to luminance only: every
+tone step multiplies all three channels by the same per-pixel factor
+derived from luminance, so hue and saturation never change with
+brightness. No regional, positional or brightness-dependent color step
+exists anywhere (contract 02, final round Oct 31). Denoise is
+edge-preserving bilateral on full-res luminance plus light chroma
+smoothing, applied last.
 """
 
 from __future__ import annotations
@@ -23,10 +26,10 @@ import numpy as np
 #: Interior rooms finish bright and airy; exterior shots finish at their
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
-#: 194, not the MLS center 187: the window pull swaps in darker real
-#: view pixels after the gain anchors, so large-window rooms land ~15
-#: levels under the anchor. 194 doubles set 004's margin (176 at 193
-#: left 0.4 points); set 008 keeps over two points the other way.
+#: 194, not the MLS center 187: large-window rooms meter bright glass
+#: with the room, so they land ~15 levels under the anchor. 194 doubles
+#: set 004's margin (176 at 193 left 0.4 points); set 008 keeps over two
+#: points the other way.
 INTERIOR_TARGET_MEDIAN = 194.0
 SKY_FRACTION_CUT = 0.001
 #: Exterior target scales with open sky, clipped to the range Erik's own
@@ -53,27 +56,10 @@ AUTO_GAIN_HI = 3.5
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
-#: Blue-cap: white balance may neutralize warmth but never manufacture
-#: blueness on warm wood in the dark. The gray-world vote is dominated
-#: by dark warm wood, so its blue gains (up to 2.2x) flip shadowed wood
-#: floors blue (floor B-G moves -31 to +25 on unit-a 006). Dim,
-#: strongly warm pixels keep at most this much blue-over-green after
-#: the vote. Blue-origin pixels (sky) are untouched, bright pixels keep
-#: the full vote (lit walls still neutralize, which the look check
-#: requires), and near-neutral pixels (gray rugs read purple even in a
-#: correct finish; the twin-slack check covers them) are untouched too.
-#: Both ramps are smooth per-pixel weights, continuous in value space:
-#: no region, no edge anywhere.
-WB_BLUE_CAP = 0.0
-#: Full cap at or below this pre-WB gray, no cap at or above
-#: WB_BLUE_CAP_DIM_HI, linear ramp between.
-WB_BLUE_CAP_DIM_LO = 80.0
-WB_BLUE_CAP_DIM_HI = 160.0
-#: Full cap at or above this pre-WB saturation, no cap at or below
-#: WB_BLUE_CAP_SAT_LO, linear ramp between. Saturation is
-#: (max-min)/max; gray floors read ~0.07, wood 0.3 and up.
-WB_BLUE_CAP_SAT_LO = 0.10
-WB_BLUE_CAP_SAT_HI = 0.18
+#: White-balance voters are room pixels below this saturation
+#: (max-min)/max. Warm-lit whites read ~0.17-0.25, gray floors ~0.07,
+#: wood 0.3 and up: the vote reads ceilings and trim, never wood.
+WB_NEUTRAL_SAT = 0.25
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -104,28 +90,36 @@ def target_median(img: np.ndarray) -> float:
     return INTERIOR_TARGET_MEDIAN
 
 
+def _apply_luminance_scale(work: np.ndarray, scale: np.ndarray) -> None:
+    """Multiply every channel by one per-pixel factor, in place.
+
+    The single rule every tone step obeys: the factor comes from
+    luminance, and all three channels share it, so hue and saturation
+    cannot change with brightness.
+    """
+    work *= scale[:, :, None]
+
+
 def balance_exposure(
     img: np.ndarray,
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
-    return_preshoulder: bool = False,
-) -> tuple[np.ndarray, dict] | tuple[np.ndarray, dict, np.ndarray]:
+) -> tuple[np.ndarray, dict]:
     """Balance a merged room photo. Returns (photo, report).
 
-    White balance from the room's own below-bright pixels, shadow lift
-    through a blurred luminance mask, automatic gain toward the shared
-    class target (bounded), then a soft highlight shoulder. Pixels under
-    protect keep their exact values. No MLS twin is read. Every step is
-    global and smooth: no spatial box or zone anywhere, so no regional
-    correction can leave a visible boundary (contract 02 section C).
+    One global white balance from the room's own below-bright pixels,
+    then one shared tone pipeline applied to luminance only (shadow
+    lift through a blurred luminance mask, a gentle gamma, one global
+    exposure gain toward the shared class target, then a soft highlight
+    shoulder). Pixels under protect keep their exact values. No MLS
+    twin is read. No regional, positional or brightness-dependent color
+    step exists: the only per-pixel differences are luminance scales
+    shared by all three channels (contract 02 section C and final
+    round).
 
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
     under the target the shipped file is measured against).
-
-    With return_preshoulder, also returns the balanced photo from just
-    before the shoulder: the shoulder parks blown glass under the
-    near-white level, so honest highlight numbers are read there.
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
@@ -135,72 +129,33 @@ def balance_exposure(
     if anchor_mask is not None:
         room = room & anchor_mask
     report: dict = {"white_balanced": False}
-    if room.sum() > 1000:
+    # The vote reads neutral surfaces (low-saturation room pixels: white
+    # ceilings, trim, gray floors): saturated wood must never set the
+    # illuminant, or its vote flips shadowed floors blue. Too few
+    # neutral pixels, and every room pixel votes instead.
+    mx = work.max(axis=2)
+    sat = (mx - work.min(axis=2)) / np.maximum(mx, 1.0)
+    neutral = room & (sat < WB_NEUTRAL_SAT)
+    voters = neutral if neutral.sum() > 1000 else room
+    report["wb_voters"] = "neutral" if voters is neutral else "all-room"
+    if voters.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
-        means = np.array([work[:, :, c][room].mean() for c in range(3)])
+        means = np.array([work[:, :, c][voters].mean() for c in range(3)])
         target = float(means.mean())
         base = target / np.maximum(means, 1e-6)
         factors = 1.0 + strength * (base - 1.0)
-        pre = work.copy()
         work *= factors
-        d0 = pre[:, :, 2] - pre[:, :, 1]
-        d1 = work[:, :, 2] - work[:, :, 1]
-        capped = (d0 <= WB_BLUE_CAP) & (d1 > WB_BLUE_CAP)
-        if capped.any():
-            gray_pre = pre.mean(axis=2)
-            mx_pre = pre.max(axis=2)
-            dim = np.clip(
-                (WB_BLUE_CAP_DIM_HI - gray_pre) / (WB_BLUE_CAP_DIM_HI - WB_BLUE_CAP_DIM_LO),
-                0.0,
-                1.0,
-            )
-            sat_pre = (mx_pre - pre.min(axis=2)) / np.maximum(mx_pre, 1.0)
-            warm = np.clip(
-                (sat_pre - WB_BLUE_CAP_SAT_LO) / (WB_BLUE_CAP_SAT_HI - WB_BLUE_CAP_SAT_LO),
-                0.0,
-                1.0,
-            )
-            weight = (dim * warm).astype(np.float32)
-            alpha = np.ones(d0.shape, np.float32)
-            need = capped & (weight > 0)
-            alpha[need] = 1.0 - weight[need] * (
-                1.0 - (WB_BLUE_CAP - d0[need]) / (d1[need] - d0[need])
-            )
-            work = pre * (1.0 + alpha[:, :, None] * (factors - 1.0))
-            report["blue_capped"] = round(float((alpha < 1.0).mean()), 4)
-        else:
-            report["blue_capped"] = 0.0
-        # Daylight-spill guard, interiors only: the vote reads
-        # tungsten-lit walls, and its cooling is right for them, but
-        # daylight spilling across floors near windows is already
-        # neutral, so full cooling turns it blue. Bright low-saturation
-        # pixels keep their own chromaticity in proportion: tungsten
-        # walls and ceilings are saturated or dim and keep the full vote.
-        # Exterior daylight needs no tungsten vote, so the guard stays
-        # off there. Anchors are the photo's own percentiles, and the
-        # look targets below do not move.
-        if scene == "interior":
-            gray_pre = pre.mean(axis=2)
-            mx = pre.max(axis=2)
-            lowsat = 1.0 - (mx - pre.min(axis=2)) / np.maximum(mx, 1.0)
-            room_gray = gray_pre[room]
-            p50 = float(np.median(room_gray))
-            p90 = float(np.percentile(room_gray, 90.0))
-            bright = np.clip((gray_pre - p50) / max(1.0, p90 - p50), 0.0, 1.0)
-            guard = (lowsat * lowsat * bright)[:, :, None].astype(np.float32)
-            work = work * (1.0 - guard) + pre * guard
-            report["spill_guard"] = round(float(guard.mean()), 4)
-        else:
-            report["spill_guard"] = 0.0
         report["white_balanced"] = True
-    lifted_gray = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    blur = cv2.GaussianBlur(lifted_gray.astype(np.float32), (0, 0), max(img.shape) / 40.0)
+        report["wb_factors"] = [round(float(f), 4) for f in factors]
+    lum = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    blur = cv2.GaussianBlur(lum.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
     shadow_gain = 1.0 + SHADOW_LIFT * darkness
-    work *= shadow_gain[:, :, None]
+    _apply_luminance_scale(work, shadow_gain)
     report["shadow_gain"] = round(float(shadow_gain.mean() - 1.0), 4)
     if LOOK_GAMMA != 1.0:
-        work = 255.0 * np.power(np.clip(work / 255.0, 0.0, 1.0), LOOK_GAMMA)
+        lum = np.maximum(_luminance(np.clip(work, 0, 255).astype(np.uint8)), 1.0)
+        _apply_luminance_scale(work, np.power(np.clip(lum / 255.0, 0.0, 1.0), LOOK_GAMMA - 1.0))
     # The gain runs after the tone work so the class target is the final
     # anchor: per-photo automatic exposure, still with no twin read.
     post = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
@@ -211,20 +166,21 @@ def balance_exposure(
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
     # Highlight shoulder runs last so no earlier gain can re-blow whites.
-    # It compresses but never hides real clipping from honest numbers:
-    # moderately blown glass parks just under the near-white level, so
-    # the pre-shoulder frame (unclipped float: real blowout reads in the
-    # hundreds) is the one the highlights check reads.
-    preshoulder = work.copy()
-    over = work > 235.0
-    work[over] = 235.0 + (work[over] - 235.0) * SHOULDER_SLOPE
+    # Luminance-only like every tone step: over-bright luminance
+    # compresses toward 235 while every pixel keeps its chromaticity.
+    # Luminance reads the unclipped float work: the uint8 frame hides
+    # real blowout in the hundreds, and a scale built from it would
+    # leave those pixels blown.
+    lum = (0.299 * work[:, :, 0] + 0.587 * work[:, :, 1] + 0.114 * work[:, :, 2]).astype(np.float32)
+    over = lum > 235.0
+    if over.any():
+        compressed = 235.0 + (lum - 235.0) * SHOULDER_SLOPE
+        scale = np.ones_like(lum)
+        scale[over] = compressed[over] / np.maximum(lum[over], 1.0)
+        _apply_luminance_scale(work, scale)
     out = np.clip(work, 0, 255).astype(np.uint8)
     if protect is not None:
         out[protect] = img[protect]
-    if return_preshoulder:
-        if protect is not None:
-            preshoulder[protect] = img[protect].astype(np.float32)
-        return out, report, preshoulder
     return out, report
 
 

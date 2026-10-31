@@ -102,6 +102,9 @@ def test_unit_a_lens_identity_matches_all_raw_frames():
     import glob
 
     paths = sorted(glob.glob("inputs/unit-a/raw/*.NEF"))
+    if not paths:
+        print("SKIP: inputs/unit-a/raw/*.NEF are gitignored, no raw frames on a fresh clone")
+        pytest.skip("no raw frames on a fresh clone (gitignored)")
     assert len(paths) == 86
     for p in paths:
         assert geometry.match_profile(geometry.read_lens_identity(p)) is not None
