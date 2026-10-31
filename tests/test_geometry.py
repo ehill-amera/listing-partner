@@ -223,8 +223,13 @@ def test_ghosting_zero_on_identical_frames():
 
 
 def test_ghosting_detects_motion():
-    frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(3)]
-    frames[1][20:30, 20:30] = 255
+    """A mid-tone square in one frame counts; crushed/clipped pixels cannot.
+
+    Only pixels well exposed in both frames vote, so the scene sits at
+    mid-tone gray and the square at a brighter (but unclipped) level.
+    """
+    frames = [np.full((64, 64, 3), 100, np.uint8) for _ in range(3)]
+    frames[1][20:30, 20:30] = 180
     assert geometry.ghosting_score(frames) > 0.0
 
 
@@ -253,6 +258,47 @@ def test_ghosting_detects_motion_after_normalization():
     moved[10:30, 10:30] = 200
     moved_frames = [frames[0], moved, frames[2]]
     assert geometry.ghosting_score(moved_frames) > 0.05, "moved pixels still count"
+
+
+def _wide_bracket(static=True, seed=3):
+    """Five-frame static bracket over a 16x exposure range, with clipping.
+
+    Gains 0.25-4x push shadows into crush and highlights into clip, the
+    way real 7-frame tripod brackets do. Nothing moves: a correct metric
+    reads near zero here, whatever the exposure spread.
+    """
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:128, 0:128]
+    base = np.zeros((128, 128, 3), np.float32)
+    base[:, :, 0] = (xx * 1.2 + yy * 0.5) % 200 + 20
+    base[:, :, 1] = (yy * 1.5 + 10) % 200 + 15
+    base[:, :, 2] = ((xx + yy) * 0.9) % 200 + 10
+    base += rng.normal(0, 1.5, base.shape)
+    base = np.clip(base, 0, 255)
+    frames = [np.clip(base * gain, 0, 255).astype(np.uint8) for gain in (0.25, 0.5, 1.0, 2.0, 4.0)]
+    if not static:
+        # An object present in one frame only: the middle frame is the
+        # score's reference, so every other frame disagrees there.
+        frames[2][40:80, 40:80] = 200
+    return frames
+
+
+def test_ghosting_wide_static_bracket_near_zero():
+    """A static bracket with clipped ends is not motion.
+
+    The old max-minus-min across the whole stack read ~1.0 here ("every
+    pixel moved"), which is what scored tripod unit-a sets 0.83-1.00.
+    Only pixels well exposed in both frames may vote.
+    """
+    assert geometry.ghosting_score(_wide_bracket(static=True)) < 0.05
+
+
+def test_ghosting_wide_bracket_moved_object_reads_high():
+    """A moved object in the same wide bracket still reads high."""
+    static_score = geometry.ghosting_score(_wide_bracket(static=True))
+    moved_score = geometry.ghosting_score(_wide_bracket(static=False))
+    assert moved_score > 0.05, "a moved object must read well above zero"
+    assert moved_score > 5 * static_score, "motion must stand out from the static bed"
 
 
 def test_deghost_decision_names_no_motion():

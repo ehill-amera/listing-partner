@@ -583,40 +583,85 @@ def rotation_valid_mask(h: int, w: int, angle_deg: float) -> np.ndarray:
     return warped > 0
 
 
-#: Ghosting is scored after exposure normalization (gain-matched on
-#: mid-tone pixels), so bracket exposure steps never read as motion.
-#: Pixels disagreeing by more than this after normalization count.
+#: Ghosting is scored after exposure normalization (each frame
+#: gain-matched to the middle frame on mid-tone pixels), so bracket
+#: exposure steps never read as motion. Only pixels well exposed in
+#: both frames after gain matching vote: crushed shadows, clipped
+#: highlights and amplified dark-frame noise are not motion. Pixels
+#: disagreeing by more than this after normalization count.
 GHOST_SPREAD_LEVEL = 15.0
+#: Well-exposed gray range (after gain matching) for both voting and
+#: comparing. Outside it a pixel is crushed or clipped in at least one
+#: frame and carries no motion evidence either way.
+GHOST_WELL_LO = 30.0
+GHOST_WELL_HI = 220.0
 #: Deghost only past this share of disagreeing pixels. Calibrated
-#: 2026-10-31: unit-a brackets read 0.05-0.20 here, and shifting one
-#: frame by 3 px moves the score by ~0.01, so 0.25 means gross
+#: 2026-10-31: static tripod brackets read near zero here, and a moved
+#: object covering ~10% of the frame reads ~0.1, so 0.25 means gross
 #: disagreement, not noise or a small shift.
 DEGHOST_LIMIT = 0.25
 
 
-def ghosting_score(frames: list[np.ndarray]) -> float:
-    """Fraction of pixels that move between bracket frames.
+def _well_exposed(g: np.ndarray) -> np.ndarray:
+    """Pixels well exposed in every channel: no crush, no clip.
 
-    Each frame is gain-matched to the middle frame on mid-tone pixels
-    (both sides 20-200 gray) before comparing, so the exposure steps
-    between brackets never read as motion: identical scenes at 1x/2x/4x
-    gain score near zero, while moved pixels still count.
+    A single channel clips long before gray does, and a clipped
+    channel breaks the gain match for the whole pixel, so the gate
+    reads all three channels, not the gray mean. Single-band frames
+    gate on their one value.
     """
-    gray = [f if f.ndim == 2 else cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in frames]
-    ref = gray[len(gray) // 2].astype(np.float32)
-    mref = (ref > 20) & (ref < 200)
-    ref_med = float(np.median(ref[mref])) if mref.any() else 0.0
-    matched = []
-    for g in gray:
-        g = g.astype(np.float32)
-        m = mref & (g > 20) & (g < 200)
-        if m.sum() > 100 and ref_med > 0:
-            gain = ref_med / float(np.median(g[m]))
-        else:
-            gain = 1.0
-        matched.append(g * gain)
-    spread = np.stack(matched).max(axis=0) - np.stack(matched).min(axis=0)
-    return float((spread > GHOST_SPREAD_LEVEL).mean())
+    f = g.astype(np.float32)
+    if f.ndim == 2:
+        return (f >= GHOST_WELL_LO) & (f <= GHOST_WELL_HI)
+    return (
+        (f[:, :, 0] >= GHOST_WELL_LO)
+        & (f[:, :, 0] <= GHOST_WELL_HI)
+        & (f[:, :, 1] >= GHOST_WELL_LO)
+        & (f[:, :, 1] <= GHOST_WELL_HI)
+        & (f[:, :, 2] >= GHOST_WELL_LO)
+        & (f[:, :, 2] <= GHOST_WELL_HI)
+    )
+
+
+def _to_gray(f: np.ndarray) -> np.ndarray:
+    """Gray values of an RGB or single-band frame."""
+    if f.ndim == 2:
+        return f.astype(np.float32)
+    return cv2.cvtColor(f, cv2.COLOR_RGB2GRAY).astype(np.float32)
+
+
+def ghosting_score(frames: list[np.ndarray]) -> float:
+    """Share of well-exposed pixels that move between bracket frames.
+
+    Each non-reference frame is gain-matched to the middle frame on
+    pixels well exposed in both, then compared against the reference
+    only on pixels still well exposed after matching. Crushed shadows,
+    clipped highlights (any channel) and amplified dark-frame noise
+    never vote, so a static bracket scores near zero however wide its
+    exposure spread, while a moved object still counts. The score is
+    the mean over frames of each frame's disagreeing share.
+    """
+    well = [_well_exposed(f) for f in frames]
+    gray = [_to_gray(f) for f in frames]
+    ref = gray[len(gray) // 2]
+    ref_well = well[len(gray) // 2]
+    shares = []
+    for i, (g, g_well) in enumerate(zip(gray, well)):
+        if i == len(gray) // 2:
+            continue
+        vote = ref_well & g_well
+        if vote.sum() < 100:
+            continue
+        ref_med = float(np.median(ref[vote]))
+        g_med = float(np.median(g[vote]))
+        if ref_med <= 0 or g_med <= 0:
+            continue
+        matched = g * (ref_med / g_med)
+        comparable = vote & (matched >= GHOST_WELL_LO) & (matched <= GHOST_WELL_HI)
+        if comparable.sum() < 100:
+            continue
+        shares.append(float((np.abs(matched - ref) > GHOST_SPREAD_LEVEL)[comparable].mean()))
+    return float(sum(shares) / len(shares)) if shares else 0.0
 
 
 def deghost_decision(score: float) -> str:
