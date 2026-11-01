@@ -36,6 +36,8 @@ SEND_LONG_SIDE = 1024
 def build_inputs(
     members: list[Path],
     record: dict,
+    window_mask: np.ndarray | None = None,
+    settle_wb: bool = True,
 ) -> dict:
     """Local prep for one set: white balance, geometry, merge, balance, send size.
 
@@ -44,18 +46,46 @@ def build_inputs(
     on failure, like before) and returns the state the Meta step and the
     tail need.
 
-    Bright-surface fallback (contract 02, final round part three): an
-    interior photo whose bright cyan/blue share reads over the limit
-    re-decodes every frame at the camera's as-shot white balance and
-    ships that, labeled. The MLS twin never steers this: a new listing
-    has no twin, so the pipeline falls back on the 1% bar alone and the
-    post-hoc check judges against the twin.
+    window_mask is the union of the set's confirmed window masks: the only
+    place the cool trigger can act. A fresh set has none yet, so it builds with
+    settle_wb=False, asks Meta, then calls apply_window_mask.
     """
     wb = hdr.estimate_set_wb(members)
     record["wb_estimate"] = wb["multipliers"]
     if wb["multipliers"] is None:
         record["wb_as_shot"] = wb["as_shot_reason"]
-    state = _prepare(members, record, wb)
+    state = _prepare(members, record, wb, window_mask)
+    state["wb"] = wb
+    return _settle_white_balance(members, record, state, window_mask) if settle_wb else state
+
+
+def apply_window_mask(
+    members: list[Path], record: dict, state: dict, window_mask: np.ndarray
+) -> dict:
+    """Rebalance a fresh set once its windows are known, then settle white balance."""
+    wb = state["wb"]
+    state["balanced"], record["balance"] = finish.balance_exposure(
+        state["merged"],
+        anchor_mask=state["anchor"],
+        scene=wb["scene"],
+        sky=wb["sky"],
+        window_mask=window_mask,
+    )
+    return _settle_white_balance(members, record, state, window_mask)
+
+
+def _settle_white_balance(
+    members: list[Path], record: dict, state: dict, window_mask: np.ndarray | None
+) -> dict:
+    """Bright-surface fallback (contract 02, final round part three).
+
+    An interior photo whose bright cyan/blue share reads over the limit
+    re-decodes every frame at the camera's as-shot white balance and
+    ships that, labeled. The MLS twin never steers this: a new listing
+    has no twin, so the pipeline falls back on the 1% bar alone and the
+    post-hoc check judges against the twin.
+    """
+    wb = state["wb"]
     record["bright_share"] = round(checks.bright_surface_share(state["balanced"]), 2)
     if (
         wb["multipliers"] is not None
@@ -67,12 +97,16 @@ def build_inputs(
             f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
         )
         del state
-        state = _prepare(members, record, {**wb, "multipliers": None})
+        as_shot = {**wb, "multipliers": None}
+        state = _prepare(members, record, as_shot, window_mask)
+        state["wb"] = as_shot
         record["bright_share_final"] = round(checks.bright_surface_share(state["balanced"]), 2)
     return state
 
 
-def _prepare(members: list[Path], record: dict, wb: dict) -> dict:
+def _prepare(
+    members: list[Path], record: dict, wb: dict, window_mask: np.ndarray | None = None
+) -> dict:
     """Decode every frame with one white balance, then everything downstream."""
     focals = [geometry.read_focal(p) for p in members]
     identity = geometry.read_lens_identity(members[len(members) // 2])
@@ -201,7 +235,7 @@ def _prepare(members: list[Path], record: dict, wb: dict) -> dict:
     anchor = np.zeros_like(valid)
     anchor[y0:y1, x0:x1] = True
     balanced, balance_report = finish.balance_exposure(
-        merged, anchor_mask=anchor, scene=wb["scene"], sky=wb["sky"]
+        merged, anchor_mask=anchor, scene=wb["scene"], sky=wb["sky"], window_mask=window_mask
     )
     record["balance"] = balance_report
 
@@ -217,6 +251,7 @@ def _prepare(members: list[Path], record: dict, wb: dict) -> dict:
     return {
         "balanced": balanced,
         "merged": merged,
+        "anchor": anchor,
         "aligned": aligned,
         "members": list(members),
         "order": order,
@@ -367,6 +402,10 @@ def finish_tail(
         ),
         "verticals": checks.check_verticals(vertical_final),
     }
+    gate = (record.get("balance") or {}).get("cool_gate") or {}
+    record["checks"]["cool edge"] = checks.check_region_edge(
+        gate.get("edge_step_a"), gate.get("edge_step_b")
+    )
     # Floor zone as fractions of the shipped frame, so the post-hoc
     # measure maps it onto the MLS twin too: the whole visible floor.
     record["floor_zone"] = FLOOR_ZONE_FRAC
@@ -411,20 +450,24 @@ def replay_set(prior: dict, members: list[Path], dirs: dict) -> dict:
             for w in prior.get("windows", [])
         ],
     }
-    state = build_inputs(members, record)
-    union = np.zeros((state["h"], state["w"]), bool)
+    # The cool trigger reads the window masks, so they load before the balance.
     masks: dict[int, np.ndarray] = {}
     for window in prior.get("windows", []):
         path = dirs["masks"] / f"{record['name']}_window{window['id']}.png"
         mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if mask is None:
             raise ValueError(f"saved mask missing for window {window['id']}: {path.name}")
-        if mask.shape != (state["h"], state["w"]):
-            raise ValueError(
-                f"saved mask {path.name} is {mask.shape}, expected {(state['h'], state['w'])}"
-            )
         masks[window["id"]] = mask > 127
-        union |= masks[window["id"]]
+    window_mask = None
+    if masks:
+        shapes = {mask.shape for mask in masks.values()}
+        if len(shapes) != 1:
+            raise ValueError(f"saved masks for {record['name']} disagree on size: {shapes}")
+        window_mask = np.logical_or.reduce(list(masks.values()))
+    state = build_inputs(members, record, window_mask=window_mask)
+    union = np.zeros((state["h"], state["w"]), bool)
+    if window_mask is not None:
+        union = window_mask
     rej_masks: dict[int, np.ndarray] = {}
     for rejection in prior.get("rejections", []):
         mask_file = rejection.get("mask_file")
@@ -482,7 +525,8 @@ def process_set(
     record: dict = {"index": index, "name": name, "notes": []}
     transcript: list = []
     try:
-        state = build_inputs(members, record)
+        # No cool trigger on what Meta sees: the masks do not exist yet.
+        state = build_inputs(members, record, settle_wb=False)
         h, w = state["h"], state["w"]
         candidates = []
         for prompt in SAM_PROMPTS:
@@ -536,6 +580,7 @@ def process_set(
                 c["mask"],
                 dirs["masks"] / f"{name}_rejected{c['object_id']}.png",
             )
+        state = apply_window_mask(members, record, state, union)
         finish_tail(record, state, dirs, masks, union, rej_masks=rej_masks)
         record["error"] = None
     except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
@@ -635,6 +680,20 @@ def _flat_white_cell(flat: dict | None) -> str:
     )
 
 
+def _gate_cell(entry: dict) -> str:
+    """How far the cool trigger reached on this photo, from the gate it used."""
+    gate = (entry.get("balance") or {}).get("cool_gate")
+    if gate is None:
+        return "<p>cool trigger gate share: not measured</p>"
+    if not gate.get("strength"):
+        return "<p>cool trigger gate share: 0.00% of the frame (did not fire)</p>"
+    return (
+        f"<p>cool trigger gate share {gate['frame_pct']:.2f}% of the frame, "
+        f"{gate['window_pct']:.1f}% of window pixels, {gate['outside_pct']:.2f}% outside "
+        f"the masks, strength {gate['strength']:.2f}</p>"
+    )
+
+
 def _floor_cell(floor: dict | None) -> str:
     """Floor-cast numbers with their verdict, or why there is none."""
     if not floor:
@@ -697,6 +756,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         wb_cell = _wb_cell(entry)
         bright_cell = _bright_cell(entry.get("bright"))
         flat_cell = _flat_white_cell(entry.get("flat_white"))
+        gate_cell = _gate_cell(entry)
         trim = entry.get("edge_trim") or {}
         trim_cell = (
             f"<p>edge trim (px): top {trim.get('top', 0)}, bottom {trim.get('bottom', 0)}, "
@@ -721,7 +781,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')} "
             f"({entry.get('deghost', '')}){_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}{floor_cell}{wb_cell}{bright_cell}{flat_cell}{trim_cell}"
+            f"{clip_cell}{look_cell}{floor_cell}{wb_cell}{bright_cell}{flat_cell}{gate_cell}{trim_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
@@ -786,7 +846,9 @@ merge and no pull changes either.</p>
 part three (Oct 31), on these same 16 photos against their MLS twins: one set of
 raw-decode white-balance multipliers per set, one global exposure gain per photo,
 and one luminance-only shared tone curve. The highlight roll-off and shoulder were
-rebuilt after the review of commit 970ce8f; the other settings did not change.
+rebuilt after the review of commit 970ce8f, and the roll-off's cool trigger was
+confined to the window masks after the review of commit 7ee0217; the other
+settings did not change.
 They are frozen from this round on:
 unit 5 measures the same settings, unchanged, on a held-out set. Window verdicts
 and masks are the saved results; replay makes no Meta calls.</p>

@@ -226,7 +226,7 @@ def test_one_wall_keeps_one_color_through_the_highlight_range():
 def _room_with_window_view():
     """Warm dim room with a cool window view at wall-level merge brightness."""
     img = np.full((200, 200, 3), (60, 52, 45), np.uint8)
-    img[40:120, 40:120] = (70, 105, 135)  # view, far from clipping in the merge
+    img[40:120, 40:120] = (100, 112, 130)  # view, far from clipping in the merge
     return img
 
 
@@ -234,18 +234,27 @@ def test_cool_window_view_does_not_read_cyan():
     """The roll-off's cool trigger, in isolation from the clip trigger."""
     img = _room_with_window_view()
     assert img.max() < finish.ROLL_CLIP_START, "this case must not reach the clip trigger"
-    out, _ = finish.balance_exposure(img, scene="interior")
+    mask = np.zeros(img.shape[:2], bool)
+    mask[40:120, 40:120] = True
+    out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    assert report["cool_gate"]["strength"] > 0.0, "the trigger must fire on this view"
     view = out[40:120, 40:120]
     assert view.mean() > 170, "the view must land bright enough for the check to apply"
-    assert checks.bright_surface_share(out) == 0.0
-    spread = float((view.astype(float).max(axis=2) - view.astype(float).min(axis=2)).mean())
-    assert spread <= 15.0, f"window view reads tinted, mean channel spread {spread:.0f}"
+    # The feather leaves the outermost pixels their color, on purpose: the view's
+    # core is held at zero, the whole frame to the product's 1% bar.
+    assert checks.bright_surface_share(out[50:110, 50:110]) == 0.0
+    assert checks.bright_surface_share(out) <= checks.BRIGHT_SURFACE_LIMIT_PCT
+    plain, _ = finish.balance_exposure(img, scene="interior")
+    assert checks.bright_surface_share(plain) > 1.0, "without the trigger this view reads cyan"
 
 
 def test_exterior_sky_keeps_its_blue():
     """The cool trigger is interior only: real sky is not a color error."""
     img = _room_with_window_view()
-    out, _ = finish.balance_exposure(img, scene="exterior", sky=0.1)
+    mask = np.zeros(img.shape[:2], bool)
+    mask[40:120, 40:120] = True
+    out, report = finish.balance_exposure(img, scene="exterior", sky=0.1, window_mask=mask)
+    assert report["cool_gate"]["strength"] == 0.0
     view = out[40:120, 40:120].astype(float)
     assert float((view[:, :, 2] - view[:, :, 0]).mean()) > 40.0
 
@@ -389,6 +398,9 @@ def test_shared_look_constants_stay_frozen():
     assert (finish.ROLL_CLIP_START, finish.ROLL_CLIP_FULL) == (235.0, 252.0)
     assert (finish.ROLL_COOL_PEAK_START, finish.ROLL_COOL_PEAK_FULL) == (200.0, 280.0)
     assert (finish.ROLL_COOL_START, finish.ROLL_COOL_FULL) == (0.05, 0.15)
+    assert (finish.ROLL_COOL_VIEW_START, finish.ROLL_COOL_VIEW_FULL) == (0.02, 0.10)
+    assert finish.ROLL_COOL_STRENGTH == 0.8
+    assert finish.ROLL_COOL_FEATHER_FRAC == 0.01
     # No WOOD_* constants: the zone wood guard and its tuning are removed
     # (finding 2, criterion 14: no spatial box in any color correction).
     # No WB_BLUE_CAP_* or WB_NEUTRAL_SAT constants: the blue cap, the
@@ -419,14 +431,14 @@ def _implied_blend(img: np.ndarray, out: np.ndarray) -> np.ndarray:
     """How far each pixel moved toward neutral, read from input and output.
 
     Every other step scales the three channels by one factor, so (B - R) / peak
-    only changes by the blend. Three-pixel averaging keeps 8-bit rounding out.
+    only changes by the blend. Where the input is barely cool, 8-bit rounding
+    swamps that ratio, so those pixels read NaN.
     """
     before = img.astype(np.float32)
     after = out.astype(np.float32)
     cool_in = (before[:, :, 2] - before[:, :, 0]) / np.maximum(before.max(axis=2), 1.0)
     cool_out = (after[:, :, 2] - after[:, :, 0]) / np.maximum(after.max(axis=2), 1.0)
-    blend = 1.0 - cool_out / np.where(np.abs(cool_in) < 0.02, np.nan, cool_in)
-    return cv2.blur(np.nan_to_num(blend, nan=0.0), (3, 3))
+    return 1.0 - cool_out / np.where(np.abs(cool_in) < 0.10, np.nan, cool_in)
 
 
 def _noisy_surface_across_the_cool_threshold():
@@ -457,9 +469,9 @@ def test_noisy_surface_crossing_the_cool_threshold_changes_color_boundedly():
     out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
     assert report["auto_gain"] * 120.0 > finish.ROLL_COOL_PEAK_START, "the surface must land bright"
     blend = _implied_blend(img, out)[20:-20, 60:840]
-    assert blend.max() > 0.2, "the trigger must act on this surface for the bound to mean anything"
+    assert np.nanmax(blend) > 0.2, "the trigger must act on this surface for the bound to mean it"
     step = np.abs(np.diff(blend, axis=1))
-    p99 = float(np.percentile(step, 99))
+    p99 = float(np.nanpercentile(step, 99))
     assert p99 <= 0.05, f"blend toward neutral jumps {p99:.3f} between neighbors (limit 0.05)"
 
 
@@ -473,5 +485,80 @@ def test_cool_trigger_is_zero_outside_the_window_mask():
     out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
     assert report["auto_gain"] * 125.0 > finish.ROLL_COOL_PEAK_FULL, "the gate must be fully open"
     floor = _implied_blend(img, out)[270:380, 20:880]
-    worst = float(np.abs(floor).max())
+    worst = float(np.nanmax(np.abs(floor)))
     assert worst <= 0.03, f"the floor outside the mask moved {worst:.3f} toward neutral"
+
+
+def _view_house_and_lawn():
+    """A window view: a cool house beside a saturated green lawn, in a dim room."""
+    img = np.full((400, 900, 3), (58, 50, 43), np.uint8)
+    img[60:340, 200:450] = (100, 112, 130)  # cool house
+    img[60:340, 450:700] = (70, 125, 60)  # saturated lawn
+    mask = np.zeros(img.shape[:2], bool)
+    mask[60:340, 200:700] = True
+    return img, mask
+
+
+def test_view_moves_as_one_with_no_gray_patch_against_saturated_areas():
+    """Reviewer finding 1: a house going gray-white beside a green lawn. Every
+    view pixel gets one strength, so the lawn pales with the house."""
+    img, mask = _view_house_and_lawn()
+    out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    plain, _ = finish.balance_exposure(img, scene="interior")
+    strength = report["cool_gate"]["strength"]
+    assert strength > 0.0, "the trigger must fire on this view"
+
+    def _spread(photo, y, x):
+        pixel = photo[y, x].astype(float)
+        return pixel.max() - pixel.min()
+
+    house = _spread(out, 200, 325) / _spread(plain, 200, 325)
+    lawn = _spread(out, 200, 575) / _spread(plain, 200, 575)
+    assert abs(house - lawn) <= 0.05, f"house keeps {house:.2f} of its color, lawn {lawn:.2f}"
+
+
+def test_outside_the_mask_is_identical_with_or_without_it():
+    """Exact zero, down to the byte: the mask cannot move the gain either."""
+    img, mask = _view_house_and_lawn()
+    with_mask, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    without, _ = finish.balance_exposure(img, scene="interior")
+    assert report["cool_gate"]["strength"] > 0.0
+    assert report["cool_gate"]["outside_pct"] == 0.0
+    assert (with_mask[~mask] == without[~mask]).all()
+    assert (with_mask[mask] != without[mask]).any()
+
+
+def test_correction_fades_to_nothing_at_the_mask_edge():
+    """Criterion 14 on the real path: the a* and b* step across the edge is 2 or less."""
+    # At a real frame's scale: the feather is a share of the frame's long side.
+    img, mask = _view_house_and_lawn()
+    img = cv2.resize(img, None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
+    mask = cv2.resize(mask.astype(np.uint8), None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST) > 0
+    _, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    gate = report["cool_gate"]
+    assert gate["strength"] > 0.0
+    ok, reason = checks.check_region_edge(gate["edge_step_a"], gate["edge_step_b"])
+    assert ok, reason
+
+
+def test_edge_step_measure_fails_on_a_hard_edge():
+    """The measure itself: a correction with no feather reads over the limit."""
+    h, w = 300, 300
+    gate = np.zeros((h, w), np.float32)
+    gate[100:200, 100:200] = 0.8
+    delta = np.zeros((h, w, 3), np.float32)
+    delta[:, :, 2] = gate * 30.0  # b* moves 24 at the edge, all at once
+    step_a, step_b = finish.feather_color_step(delta, gate)
+    assert step_a == 0.0
+    assert step_b > 20.0, f"a hard edge must read as a big step, read {step_b:.2f}"
+    assert not checks.check_region_edge(step_a, step_b)[0]
+
+
+def test_masks_never_turn_on_the_trigger_for_a_dim_or_warm_view():
+    """A window that is not cool and bright gets no correction at all."""
+    img = np.full((400, 900, 3), (58, 50, 43), np.uint8)
+    img[60:340, 200:700] = (120, 100, 80)
+    mask = np.zeros(img.shape[:2], bool)
+    mask[60:340, 200:700] = True
+    _, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    assert report["cool_gate"]["strength"] == 0.0

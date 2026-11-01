@@ -203,7 +203,7 @@ def test_replay_loads_saved_rejected_masks(tmp_path, monkeypatch):
 
     tiny = np.full((20, 20, 3), 150, np.uint8)
 
-    def _stub(members, record):
+    def _stub(members, record, **kwargs):
         record["straight_before"] = 200.0
         record["straight_after"] = 200.0
         record["distortion_applied"] = False
@@ -256,7 +256,7 @@ def test_process_set_scales_masks_width_first(tmp_path, monkeypatch):
 
     full = np.full((30, 40, 3), 150, np.uint8)  # non-square: h=30 rows, w=40 cols
 
-    def _stub_inputs(members, record):
+    def _stub_inputs(members, record, **kwargs):
         record["straight_before"] = 200.0
         record["straight_after"] = 200.0
         record["distortion_applied"] = False
@@ -283,6 +283,7 @@ def test_process_set_scales_masks_width_first(tmp_path, monkeypatch):
         return [{"object_id": 0, "box": (0, 0, 5, 8), "mask": sent_mask.copy()}]
 
     monkeypatch.setattr(rf, "build_inputs", _stub_inputs)
+    monkeypatch.setattr(rf, "apply_window_mask", lambda members, record, state, mask: state)
     monkeypatch.setattr(seg, "find_candidates", _stub_find)
     monkeypatch.setattr(seg, "verify_candidates", lambda *a, **k: {0: (True, "sky and trees")})
     dirs = _tail_dirs(tmp_path)
@@ -915,7 +916,7 @@ def test_replay_logs_peak_memory_per_set_and_releases_images(tmp_path, monkeypat
 
     tiny = np.full((20, 20, 3), 150, np.uint8)
 
-    def _stub(members, record):
+    def _stub(members, record, **kwargs):
         record["straight_before"] = 200.0
         record["straight_after"] = 200.0
         record["distortion_applied"] = False
@@ -979,3 +980,63 @@ def test_replay_logs_peak_memory_per_set_and_releases_images(tmp_path, monkeypat
     lines = capsys.readouterr().out.splitlines()
     mem_lines = [line for line in lines if "peak_rss_mb" in line]
     assert len(mem_lines) == 2, f"one peak-memory line per set, got: {lines}"
+
+
+def test_replay_hands_the_saved_window_masks_to_the_balance(tmp_path, monkeypatch):
+    """The cool trigger reads the masks, so replay must load them before balancing."""
+    import cv2
+    from listing_partner import run_finish as rf
+
+    tiny = np.full((20, 20, 3), 120, np.uint8)
+    seen = {}
+
+    def _stub(members, record, window_mask=None, settle_wb=True):
+        seen["mask"] = window_mask
+        record.update(straight_before=200.0, straight_after=200.0, distortion_applied=False)
+        return {
+            "balanced": tiny.copy(),
+            "valid": np.ones((20, 20), bool),
+            "h": 20,
+            "w": 20,
+        }
+
+    monkeypatch.setattr(rf, "build_inputs", _stub)
+    dirs = _tail_dirs(tmp_path)
+    for window_id, rows in ((0, (0, 5)), (2, (10, 15))):
+        saved = np.zeros((20, 20), np.uint8)
+        saved[rows[0] : rows[1], :] = 255
+        cv2.imwrite(str(dirs["masks"] / f"001_window{window_id}.png"), saved)
+    prior = {
+        "index": 1,
+        "name": "001",
+        "notes": [],
+        "windows": [{"id": 0}, {"id": 2}],
+        "candidates_found": 2,
+        "transcript": [],
+        "rejections": [],
+    }
+    record = rf.replay_set(prior, [Path("a.NEF")], dirs)
+    assert record["error"] is None
+    assert seen["mask"].sum() == 200, "the union of both windows reaches the balance"
+
+
+def test_fresh_set_rebalances_inside_the_confirmed_masks_only():
+    """A fresh set's first balance has no masks; the rebalance acts inside them."""
+    from listing_partner import run_finish as rf
+
+    merged = np.full((400, 900, 3), (58, 50, 43), np.uint8)
+    merged[60:340, 200:700] = (100, 112, 130)
+    plain, first = rf.finish.balance_exposure(merged, scene="interior", sky=0.0)
+    mask = np.zeros(merged.shape[:2], bool)
+    mask[60:340, 200:700] = True
+    state = {
+        "balanced": plain.copy(),
+        "merged": merged,
+        "anchor": None,
+        "wb": {"multipliers": None, "scene": "interior", "sky": 0.0},
+    }
+    record = {"balance": first}
+    rf.apply_window_mask([], record, state, mask)
+    assert record["balance"]["cool_gate"]["strength"] > 0.0
+    assert (state["balanced"][~mask] == plain[~mask]).all()
+    assert (state["balanced"][mask] != plain[mask]).any()

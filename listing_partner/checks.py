@@ -11,6 +11,8 @@ EDGE_TOLERANCE = 0.10
 #: Near-white level for the window highlights check. Shared with the
 #: pull-frame choice: the frame is picked on what this check measures.
 CLIP_LEVEL = 250
+#: Largest a* or b* step across a regional correction's edge (criterion 14).
+REGION_EDGE_STEP_LIMIT = 2.0
 
 
 def flat_white_share(rgb) -> float:
@@ -24,6 +26,14 @@ def flat_white_share(rgb) -> float:
     values = np.asarray(rgb).astype(np.int16)
     spread = values.max(axis=-1) - values.min(axis=-1)
     return 100.0 * float(((spread <= 4) & (values.mean(axis=-1) >= 225)).mean())
+
+
+def check_region_edge(step_a: float | None, step_b: float | None) -> tuple[bool, str]:
+    """Criterion 14: the a* and b* step across a regional correction's edge."""
+    if step_a is None or step_b is None:
+        return False, "not measured: no cool correction ran on this photo"
+    ok = step_a <= REGION_EDGE_STEP_LIMIT and step_b <= REGION_EDGE_STEP_LIMIT
+    return ok, f"a* step {step_a:.2f}, b* step {step_b:.2f} (limit {REGION_EDGE_STEP_LIMIT:.0f})"
 
 
 def clipped_fraction(rgb) -> float:

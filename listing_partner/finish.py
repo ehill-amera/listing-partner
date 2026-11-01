@@ -5,12 +5,13 @@ set of multipliers per set (hdr.estimate_set_wb, contract 02, final round
 part three). Balance is one global exposure gain per photo and one shared
 tone pipeline applied to luminance only: every tone step multiplies all
 three channels by the same per-pixel factor derived from luminance, so
-hue and saturation never change with brightness. No regional or
-positional color step exists anywhere (contract 02, final round Oct 31).
-The one brightness-dependent color step allowed (final round part two) is
-a single smooth highlight roll-off toward neutral: pixels clipped in the
-merge, and cool bright pixels in interiors, blend smoothly toward neutral.
-Warm surfaces far from clipping never move.
+hue and saturation never change with brightness. The one color step allowed
+(final round part two) is a smooth highlight roll-off toward neutral, with
+two triggers: pixels clipped in the merge, anywhere; and, in interiors only,
+cool bright window views, inside confirmed window masks and nowhere else.
+That second trigger is the one regional color step: it fades to zero at the
+mask edge, and its color step across that edge is measured per photo
+(contract 02, criterion 14). Outside the masks it never fires.
 Denoise is edge-preserving bilateral on full-res luminance plus light
 chroma smoothing, applied last.
 """
@@ -70,24 +71,33 @@ WB_INTERIOR_TINT_R = 1.08
 WB_INTERIOR_TINT_B = 0.94
 WB_EXTERIOR_STRENGTH = 0.5
 #: Highlight roll-off toward neutral (contract 02, final round part two;
-#: rebuilt after the review of 970ce8f). The old trigger read brightness
-#: after the tone and gain steps, and at gains of 2.2 to 3.5 ordinary walls
-#: crossed it: it painted real patches and bands on them. Now two triggers
-#: only, blended smoothly, and neither can fire on a warm surface far from
-#: clipping:
+#: rebuilt after the reviews of 970ce8f and 7ee0217). Two triggers:
 #: - Clipped in the merge: any hue, read from the merge's own peak channel,
 #:   before tone and gain.
-#: - Cool and bright, interiors only: window views under indoor white
-#:   balance, which reach the same merge levels as walls (measured peak 46
-#:   to 160 on unit-a) and would read cyan. Coolness is (B - R) / peak, the
-#:   brightness is the peak after gain. A truly blue wall this bright rolls
-#:   too: a known limit. Exterior sky is real and keeps its blue.
+#: - Cool and bright, interiors only, inside confirmed window masks only:
+#:   window views under indoor white balance read cyan. Coolness is
+#:   (B - R) / peak and brightness is the peak after gain. The per-pixel
+#:   version of this gate reached floors and baseboards, because merge floors
+#:   and trim sit right at its threshold (7ee0217: up to 7.30% of the frame
+#:   outside windows), and it flipped between neighboring pixels. So the
+#:   per-pixel gate now only votes: its mean over the photo's masks picks one
+#:   strength for every view in the photo, and every view pixel gets it,
+#:   whatever its own color. That leaves no gray-white patch inside a view,
+#:   only a paler view. The strength fades in from zero at the mask edge.
+#:   Cool floors and trim outside the masks keep their cast. Exterior sky is
+#:   real and keeps its blue.
 ROLL_CLIP_START = 235.0
 ROLL_CLIP_FULL = 252.0
 ROLL_COOL_PEAK_START = 200.0
 ROLL_COOL_PEAK_FULL = 280.0
 ROLL_COOL_START = 0.05
 ROLL_COOL_FULL = 0.15
+ROLL_COOL_VIEW_START = 0.02
+ROLL_COOL_VIEW_FULL = 0.10
+ROLL_COOL_STRENGTH = 0.8
+#: Feather width inside the mask, as a fraction of the frame's long side:
+#: about 60 px on these photos.
+ROLL_COOL_FEATHER_FRAC = 0.01
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -130,19 +140,50 @@ def _smoothstep(value: np.ndarray, start: float, full: float) -> np.ndarray:
     return ramp * ramp * (3.0 - 2.0 * ramp)
 
 
+def _mask_feather(window_mask: np.ndarray) -> np.ndarray:
+    """1 well inside the mask, a smooth fade to 0 at its edge, exactly 0 outside."""
+    distance = cv2.distanceTransform(window_mask.astype(np.uint8), cv2.DIST_L2, 5)
+    return _smoothstep(distance, 0.0, ROLL_COOL_FEATHER_FRAC * max(window_mask.shape))
+
+
+def _cool_view_gate(work: np.ndarray, gain: float, window_mask: np.ndarray) -> np.ndarray:
+    """The cool trigger: one strength for the photo's views, feathered, zero outside."""
+    out = work[window_mask] * gain
+    peak = np.maximum(out.max(axis=1), 1e-3)
+    votes = _smoothstep((out[:, 2] - out[:, 0]) / peak, ROLL_COOL_START, ROLL_COOL_FULL)
+    votes = votes * _smoothstep(peak, ROLL_COOL_PEAK_START, ROLL_COOL_PEAK_FULL)
+    view = _smoothstep(np.array(votes.mean()), ROLL_COOL_VIEW_START, ROLL_COOL_VIEW_FULL)
+    return ROLL_COOL_STRENGTH * float(view) * _mask_feather(window_mask)
+
+
+def feather_color_step(delta_lab: np.ndarray, gate: np.ndarray) -> tuple[float, float]:
+    """Largest a* and b* step the regional correction makes across its edge.
+
+    delta_lab is the photo with the correction minus the photo without it. Its
+    mean is read in rings of equal gate strength from outside the mask to its
+    core, so the scene's own detail averages out and only the correction's step
+    remains. A hard edge shows as one big step between the outermost rings.
+    """
+    if not (gate > 0).any():
+        return 0.0, 0.0
+    # Ring zero is every pixel the gate never reaches.
+    rings = np.ceil(gate / max(float(gate.max()), 1e-6) * 40.0).astype(np.int32).ravel()
+    counts = np.bincount(rings, minlength=41).astype(np.float64)
+    present = counts > 0
+    steps = []
+    for channel in (1, 2):
+        total = np.bincount(rings, delta_lab[:, :, channel].ravel(), minlength=41)
+        means = total[present] / counts[present]
+        steps.append(float(np.abs(np.diff(means)).max()))
+    return steps[0], steps[1]
+
+
 def _highlight_tail(
-    work: np.ndarray, clip_gate: np.ndarray, gain: float, roll_cool: bool
+    work: np.ndarray, clip_gate: np.ndarray, gain: float, cool_gate: np.ndarray | None = None
 ) -> np.ndarray:
     """Gain, the roll-off toward neutral, then the shoulder. Returns float RGB."""
     out = work * gain
-    peak = np.maximum(out.max(axis=2), 1e-3)
-    blend = clip_gate
-    if roll_cool:
-        coolness = (out[:, :, 2] - out[:, :, 0]) / peak
-        cool_gate = _smoothstep(coolness, ROLL_COOL_START, ROLL_COOL_FULL) * _smoothstep(
-            peak, ROLL_COOL_PEAK_START, ROLL_COOL_PEAK_FULL
-        )
-        blend = 1.0 - (1.0 - clip_gate) * (1.0 - cool_gate)
+    blend = clip_gate if cool_gate is None else 1.0 - (1.0 - clip_gate) * (1.0 - cool_gate)
     lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
     out = out + blend[:, :, None] * (lum[:, :, None] - out)
     # One factor per pixel from its peak channel: below the knee nothing
@@ -158,14 +199,15 @@ def _highlight_tail(
 def _solve_gain(
     work: np.ndarray,
     clip_gate: np.ndarray,
-    roll_cool: bool,
     target: float,
     anchor_mask: np.ndarray | None,
 ) -> float:
     """The gain that lands the anchor pixels' median luminance on target.
 
     The shoulder moves bright medians, so the anchor reads after it. Solved
-    on a regular sample of the frame; the gain limits still apply.
+    on a regular sample of the frame; the gain limits still apply. The cool
+    trigger stays out of this solve, so the window masks cannot move the gain
+    and every pixel outside them comes out the same with or without them.
     """
     step = max(1, max(work.shape[:2]) // 1000)
     sample = work[::step, ::step]
@@ -174,7 +216,7 @@ def _solve_gain(
     low, high = AUTO_GAIN_LO, AUTO_GAIN_HI
     for _ in range(14):
         gain = (low + high) / 2.0
-        out = np.clip(_highlight_tail(sample, gate, gain, roll_cool), 0.0, 255.0)
+        out = np.clip(_highlight_tail(sample, gate, gain), 0.0, 255.0)
         lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
         median = float(np.median(lum if keep is None else lum[keep]))
         if median < target:
@@ -182,6 +224,27 @@ def _solve_gain(
         else:
             high = gain
     return (low + high) / 2.0
+
+
+def _cool_gate_report(
+    gate: np.ndarray | None, window_mask: np.ndarray | None, plain: np.ndarray, final: np.ndarray
+) -> dict:
+    """The cool trigger's reach, read from the gate this photo really used."""
+    if gate is None:
+        return {"frame_pct": 0.0, "window_pct": 0.0, "outside_pct": 0.0, "strength": 0.0}
+    on = gate > 0.5
+    delta = cv2.cvtColor(
+        np.clip(final, 0, 255).astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB
+    ) - cv2.cvtColor(np.clip(plain, 0, 255).astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    step_a, step_b = feather_color_step(delta, gate)
+    return {
+        "frame_pct": round(100.0 * float(on.mean()), 2),
+        "window_pct": round(100.0 * float(on[window_mask].mean()), 2),
+        "outside_pct": round(100.0 * float((gate[~window_mask] > 0).mean()), 2),
+        "strength": round(float(gate.max()), 3),
+        "edge_step_a": round(step_a, 3),
+        "edge_step_b": round(step_b, 3),
+    }
 
 
 def _apply_luminance_scale(work: np.ndarray, scale: np.ndarray) -> None:
@@ -200,6 +263,7 @@ def balance_exposure(
     anchor_mask: np.ndarray | None = None,
     scene: str | None = None,
     sky: float | None = None,
+    window_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Balance a merged room photo. Returns (photo, report).
 
@@ -208,10 +272,10 @@ def balance_exposure(
     gain toward the shared class target, then a soft highlight shoulder),
     plus the single allowed brightness-dependent color step: a smooth
     highlight roll-off toward neutral (see the ROLL constants). White balance already
-    happened at raw decode; nothing here votes on color. Pixels under
-    protect keep their exact values. No MLS twin is read. No regional or
-    positional color step exists (contract 02 section C and final round,
-    parts two and three).
+    happened at raw decode. Pixels under protect keep their exact values. No MLS
+    twin is read. The only regional color step is the cool trigger, confined to
+    window_mask (the photo's confirmed window glass, all windows together). With
+    no mask, or on an exterior, it does not exist.
 
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
@@ -237,11 +301,17 @@ def balance_exposure(
     # The clip gate reads the merge itself, before any tone step or gain.
     target = target_median(img, scene=scene, sky=sky)
     clip_gate = _smoothstep(img.max(axis=2).astype(np.float32), ROLL_CLIP_START, ROLL_CLIP_FULL)
-    roll_cool = scene == "interior"
-    gain = _solve_gain(work, clip_gate, roll_cool, target, anchor_mask)
+    gain = _solve_gain(work, clip_gate, target, anchor_mask)
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
-    work = _highlight_tail(work, clip_gate, gain, roll_cool)
+    if window_mask is not None and window_mask.shape != img.shape[:2]:
+        raise ValueError(f"window mask is {window_mask.shape}, photo is {img.shape[:2]}")
+    gate = None
+    if scene == "interior" and window_mask is not None and window_mask.any():
+        gate = _cool_view_gate(work, gain, window_mask)
+    plain = _highlight_tail(work, clip_gate, gain)
+    work = plain if gate is None else _highlight_tail(work, clip_gate, gain, gate)
+    report["cool_gate"] = _cool_gate_report(gate, window_mask, plain, work)
     out = np.clip(work, 0, 255).astype(np.uint8)
     if protect is not None:
         out[protect] = img[protect]
