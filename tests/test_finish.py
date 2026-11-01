@@ -554,6 +554,23 @@ def test_edge_step_measure_fails_on_a_hard_edge():
     assert not checks.check_region_edge(step_a, step_b)[0]
 
 
+def test_edge_step_measure_ignores_scene_detail_under_a_feather():
+    """Scene detail is not a correction step. the first ring measure read
+    10.96 b* on 003 by comparing different scene pixels; this fixture does the same:
+    a rim and a core of different color under one smooth gate."""
+    h, w = 400, 400
+    inside = np.zeros((h, w), np.uint8)
+    inside[50:350, 50:350] = 1
+    distance = cv2.distanceTransform(inside, cv2.DIST_L2, 5)
+    gate = 0.8 * np.clip(distance / 60.0, 0.0, 1.0).astype(np.float32)
+    full = np.zeros((h, w, 3), np.float32)
+    full[:, :, 2] = -10.0
+    full[110:290, 110:290, 2] = 5.0  # the core is a different scene
+    delta = full * gate[:, :, None]
+    _, step_b = finish.feather_color_step(delta, gate)
+    assert step_b <= 0.2, f"scene detail read as a correction step: {step_b:.2f}"
+
+
 def test_masks_never_turn_on_the_trigger_for_a_dim_or_warm_view():
     """A window that is not cool and bright gets no correction at all."""
     img = np.full((400, 900, 3), (58, 50, 43), np.uint8)
@@ -562,3 +579,4 @@ def test_masks_never_turn_on_the_trigger_for_a_dim_or_warm_view():
     mask[60:340, 200:700] = True
     _, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
     assert report["cool_gate"]["strength"] == 0.0
+    assert "edge_step_a" not in report["cool_gate"], "no edge exists, so none is measured"

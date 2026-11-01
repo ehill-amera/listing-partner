@@ -157,24 +157,23 @@ def _cool_view_gate(work: np.ndarray, gain: float, window_mask: np.ndarray) -> n
 
 
 def feather_color_step(delta_lab: np.ndarray, gate: np.ndarray) -> tuple[float, float]:
-    """Largest a* and b* step the regional correction makes across its edge.
+    """Largest a* and b* step the regional correction makes between neighbors.
 
-    delta_lab is the photo with the correction minus the photo without it. Its
-    mean is read in rings of equal gate strength from outside the mask to its
-    core, so the scene's own detail averages out and only the correction's step
-    remains. A hard edge shows as one big step between the outermost rings.
+    delta_lab is the photo with the correction minus the photo without it, so
+    delta / gate is what full strength would do to that pixel. The correction's
+    own step between two neighbors is the change in gate times that amount. Scene
+    detail cannot read as a step here, and a hard edge reads as its whole size.
     """
     if not (gate > 0).any():
         return 0.0, 0.0
-    # Ring zero is every pixel the gate never reaches.
-    rings = np.ceil(gate / max(float(gate.max()), 1e-6) * 40.0).astype(np.int32).ravel()
-    counts = np.bincount(rings, minlength=41).astype(np.float64)
-    present = counts > 0
+    usable = gate > 0.02
+    safe = np.where(usable, gate, 1.0)
     steps = []
     for channel in (1, 2):
-        total = np.bincount(rings, delta_lab[:, :, channel].ravel(), minlength=41)
-        means = total[present] / counts[present]
-        steps.append(float(np.abs(np.diff(means)).max()))
+        full = np.where(usable, np.abs(delta_lab[:, :, channel]) / safe, 0.0)
+        across = np.abs(np.diff(gate, axis=1)) * np.maximum(full[:, 1:], full[:, :-1])
+        down = np.abs(np.diff(gate, axis=0)) * np.maximum(full[1:, :], full[:-1, :])
+        steps.append(max(float(across.max()), float(down.max())))
     return steps[0], steps[1]
 
 
@@ -309,6 +308,8 @@ def balance_exposure(
     gate = None
     if scene == "interior" and window_mask is not None and window_mask.any():
         gate = _cool_view_gate(work, gain, window_mask)
+        if not gate.any():
+            gate = None  # did not fire: nothing to report as a measured edge
     plain = _highlight_tail(work, clip_gate, gain)
     work = plain if gate is None else _highlight_tail(work, clip_gate, gain, gate)
     report["cool_gate"] = _cool_gate_report(gate, window_mask, plain, work)
