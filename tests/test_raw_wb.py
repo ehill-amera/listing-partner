@@ -177,3 +177,37 @@ def test_scene_reads_from_the_as_shot_merge(monkeypatch):
     assert record["balance"]["scene"] == "interior"
     gray = cv2.cvtColor(state["balanced"], cv2.COLOR_RGB2GRAY)
     assert float(np.median(gray)) > 170.0, "the room aimed at the exterior target"
+
+
+def test_jpeg_set_stays_as_shot_with_its_reason(tmp_path):
+    """JPEG brackets hold no raw data: real files, as-shot, and it says why."""
+    from PIL import Image
+
+    paths = []
+    for i, shade in enumerate((60, 120, 200)):
+        path = tmp_path / f"frame_{i}.jpg"
+        Image.new("RGB", (64, 48), (shade, shade, shade)).save(path, format="JPEG")
+        paths.append(path)
+    info = hdr.estimate_set_wb(paths)
+    assert info["multipliers"] is None
+    assert "JPEG" in info["as_shot_reason"]
+
+
+def test_too_few_readable_pixels_stays_as_shot_with_its_reason(monkeypatch):
+    """A middle frame with almost nothing unclipped never guesses a balance."""
+    members, _ = _install(monkeypatch, np.full((240, 360, 3), 50.0, np.float32))
+    info = hdr.estimate_set_wb(members)
+    assert info["multipliers"] is None
+    assert "unclipped pixels" in info["as_shot_reason"]
+
+
+def test_real_nef_decoder_honors_the_set_multipliers():
+    """The real decoder, on a real frame: more blue multiplier, more blue."""
+    frames = sorted(Path("inputs/unit-a/raw").glob("*.NEF"))
+    if not frames:
+        pytest.skip("gitignored raw photos absent (fresh clone): real decoder not exercised")
+    low = hdr.decode_raw(frames[0], half_size=True, wb=[2.0, 1.0, 1.2])
+    high = hdr.decode_raw(frames[0], half_size=True, wb=[2.0, 1.0, 2.4])
+    low_ratio = low[:, :, 2].mean() / max(low[:, :, 1].mean(), 1.0)
+    high_ratio = high[:, :, 2].mean() / max(high[:, :, 1].mean(), 1.0)
+    assert high_ratio > low_ratio * 1.1, f"B/G {low_ratio:.3f} -> {high_ratio:.3f}"

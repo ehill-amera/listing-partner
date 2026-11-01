@@ -63,7 +63,7 @@ AUTO_GAIN_HI = 3.5
 #: the camera's as-shot daylight (0) and that neutral estimate (1): grass
 #: and sky are not neutral surfaces, so they only lean toward it.
 WB_INTERIOR_TINT_R = 1.08
-WB_INTERIOR_TINT_B = 0.95
+WB_INTERIOR_TINT_B = 0.94
 WB_EXTERIOR_STRENGTH = 0.5
 #: Highlight roll-off toward neutral white (contract 02, final round
 #: part two): the one brightness-dependent color step allowed. A pixel

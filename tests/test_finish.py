@@ -288,7 +288,7 @@ def test_shared_look_constants_stay_frozen():
     assert finish.SHOULDER_SLOPE == 0.07
     assert (finish.AUTO_GAIN_LO, finish.AUTO_GAIN_HI) == (0.4, 3.5)
     assert finish.WB_INTERIOR_TINT_R == 1.08
-    assert finish.WB_INTERIOR_TINT_B == 0.95
+    assert finish.WB_INTERIOR_TINT_B == 0.94
     assert finish.WB_EXTERIOR_STRENGTH == 0.5
     assert (finish.ROLL_START, finish.ROLL_FULL) == (250.0, 270.0)
     # No WOOD_* constants: the zone wood guard and its tuning are removed
