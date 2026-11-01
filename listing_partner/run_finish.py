@@ -3,7 +3,8 @@
 Per set: estimate one set of white-balance multipliers and decode every
 frame with them (linear light, before anything clips), undistort each
 frame (vendored lens profile, per-photo fitted strength) and correct TCA,
-align, fuse the chosen subset, straighten verticals, balance exposure, SAM windows plus Spark verdicts (found, not
+align, fuse the chosen subset, straighten verticals, balance exposure, SAM
+windows plus Spark verdicts (found, not
 edited: window pulls are off for this unit), denoise last, crop to valid
 pixels plus the dark edge fringe, save. Every Meta call goes through the
 spend-capped client; failures land in plain words and still count.
