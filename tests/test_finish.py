@@ -413,3 +413,65 @@ def test_denoise_drops_noise_keeps_edges():
     assert after_n < before_n * 0.7, "flat noise must drop"
     ratio = finish.edge_strength(out) / finish.edge_strength(noisy)
     assert 0.9 <= ratio <= 1.1, "same-scene edges stay within 10 percent"
+
+
+def _implied_blend(img: np.ndarray, out: np.ndarray) -> np.ndarray:
+    """How far each pixel moved toward neutral, read from input and output.
+
+    Every other step scales the three channels by one factor, so (B - R) / peak
+    only changes by the blend. Three-pixel averaging keeps 8-bit rounding out.
+    """
+    before = img.astype(np.float32)
+    after = out.astype(np.float32)
+    cool_in = (before[:, :, 2] - before[:, :, 0]) / np.maximum(before.max(axis=2), 1.0)
+    cool_out = (after[:, :, 2] - after[:, :, 0]) / np.maximum(after.max(axis=2), 1.0)
+    blend = 1.0 - cool_out / np.where(np.abs(cool_in) < 0.02, np.nan, cool_in)
+    return cv2.blur(np.nan_to_num(blend, nan=0.0), (3, 3))
+
+
+def _noisy_surface_across_the_cool_threshold():
+    """One surface whose coolness walks across the trigger's range, with noise.
+
+    Far from merge clipping, as on the 009 floor (merge peak 66 to 102). A dim
+    majority outside the surface anchors the gain, so the surface lands bright.
+    """
+    rng = np.random.default_rng(9)
+    h, w = 400, 900
+    cool = np.linspace(0.03, 0.17, w)[None, :]
+    surface = np.zeros((h, w, 3), np.float32)
+    surface[:, :, 2] = 120.0
+    surface[:, :, 1] = 120.0 * (1.0 - cool / 2.0)
+    surface[:, :, 0] = 120.0 * (1.0 - cool)
+    surface += rng.normal(0.0, 1.5, (h, w, 3)).astype(np.float32)
+    room = np.full((h, 1400, 3), (58, 50, 43), np.float32)
+    img = np.clip(np.hstack([surface, room]), 0, 255).astype(np.uint8)
+    mask = np.zeros(img.shape[:2], bool)
+    mask[:, :w] = True
+    return img, mask
+
+
+def test_noisy_surface_crossing_the_cool_threshold_changes_color_boundedly():
+    """Reviewer finding 2 on 7ee0217: neighboring pixels of one surface must not
+    flip between rolled and not rolled, however close it sits to the threshold."""
+    img, mask = _noisy_surface_across_the_cool_threshold()
+    out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    assert report["auto_gain"] * 120.0 > finish.ROLL_COOL_PEAK_START, "the surface must land bright"
+    blend = _implied_blend(img, out)[20:-20, 60:840]
+    assert blend.max() > 0.2, "the trigger must act on this surface for the bound to mean anything"
+    step = np.abs(np.diff(blend, axis=1))
+    p99 = float(np.percentile(step, 99))
+    assert p99 <= 0.05, f"blend toward neutral jumps {p99:.3f} between neighbors (limit 0.05)"
+
+
+def test_cool_trigger_is_zero_outside_the_window_mask():
+    """A cool bright floor outside the mask keeps its exact coolness."""
+    img = np.full((400, 900, 3), (58, 50, 43), np.uint8)
+    img[250:, :] = (100, 112, 125)  # cool, bright after gain, far from merge clipping
+    img[40:160, 300:600] = (100, 112, 125)  # the same color, seen through the window
+    mask = np.zeros(img.shape[:2], bool)
+    mask[40:160, 300:600] = True
+    out, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
+    assert report["auto_gain"] * 125.0 > finish.ROLL_COOL_PEAK_FULL, "the gate must be fully open"
+    floor = _implied_blend(img, out)[270:380, 20:880]
+    worst = float(np.abs(floor).max())
+    assert worst <= 0.03, f"the floor outside the mask moved {worst:.3f} toward neutral"
