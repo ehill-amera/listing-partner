@@ -67,6 +67,17 @@ The tone-dependent color steps (blue cap, daylight-spill guard and any other ste
 - Known limits, accepted by Erik for this unit and listed in the report and later the README: no deghost step (016 reads above the ghosting limit and is flagged), window views stay as merged, masks are not glass-only, lit-wall noise is not measured. These are not ship blockers.
 - Ship rule for the next review: SHIP if the hackathon rules, hygiene, cap, honesty rules, the ramp test, criterion 11 and the check all hold, and the finished photos at full resolution show no box, seam, band or patch introduced by the finish. Anything else the reviewer finds goes to Known limits for Erik to see, not another round.
 
+### Final round, part two (navigator clarification, Oct 31, after the sixth review)
+
+The global white balance pushed blue up as far as 4.6 times, so warm bright and blown surfaces came out cyan or blue (7.7% to 26% of each interior frame, against 0% in the unit 1 merges). This part keeps Erik's "simplify and ship" decision and closes the gap:
+
+- Cap the white balance: each channel multiplier stays between 0.80 and 1.25, relative to green.
+- Highlights roll to neutral: pixels approaching clipping blend smoothly toward neutral white, the way a camera does. This single smooth roll-off is the one brightness-dependent step allowed. It must create no band, edge or patch, and nothing else may depend on brightness.
+- A bright-surface check runs per interior photo: the share of bright pixels reading cyan or blue (mean above 170, B at least G, G minus R at least 15, B minus R at least 30) must stay at or below 1% of the frame, or at or below the MLS twin's share, whichever is higher. A test feeds a warm near-clipped patch and a blown patch through the finish and fails on commit 6738bd3.
+- Automatic fallback, so this converges: any photo that still fails the bright-surface check ships with white balance off (exposure gain and the luminance curve only), and the page says "white balance off: <reason>". No further round is needed for those photos.
+- Fresh clone: pytest passes on a clone without the gitignored photos and outputs, because tests that need them skip and print their reason. `./scripts/check` failing loudly on a clone without the private banned list is by design, and the README will say so.
+- Erik accepted, under his ship rule: 013's look miss and the floor FAILs on 001, 006 and 010 are known limits, along with the limits listed above.
+
 ### Window pulls are off for this unit (Erik's decision, Oct 30, after the fourth review)
 
 All 14 pulls failed at full resolution in the fourth review, and the builder's report had called them clean. Erik's decision: window pulls are turned off for unit 2. Remove the pull and its gate from the finish path. Every window keeps the balanced merge's pixels. Section A still runs (SAM finds the windows, Muse Spark confirms or rejects each one with its reason), and the page shows the found, confirmed and rejected windows with their masks, labeled "found, not edited". Section B below and criteria 4, 5, 6 and the pull parts of 13 are paused, not deleted. A later unit may return to the pull only if Erik says so. The builder never states a visual verdict ("clean", "natural", "no halo") in the report or status. It reports measured numbers, and the reviewer and Erik judge how photos look.
