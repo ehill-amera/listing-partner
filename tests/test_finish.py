@@ -19,19 +19,12 @@ def _room_cast():
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def test_white_balance_neutralizes_cast():
-    out, _ = finish.balance_exposure(_room_cast())
-    gray = out[60:140, 20:80].astype(float)
-    assert abs(gray[:, :, 0].mean() - gray[:, :, 2].mean()) < 8, "walls read neutral"
-
-
 def test_tone_changes_no_hue_anywhere():
     """Every tone step below the highlight roll-off is a luminance scale
     shared by all channels.
 
-    Past the reported global white-balance factors, no pixel's
-    chromaticity may move: predicted chromaticity (input times the
-    reported factors) matches the output on every unclipped, unrolled
+    No pixel's chromaticity may move: white balance runs at raw decode,
+    so input chromaticity matches the output on every unclipped, unrolled
     pixel, in dim corners and mid walls alike. Per-channel gamma
     and shoulder, the blue cap and the spill guard all moved
     chromaticity by brightness or region and fail this; clipping is
@@ -39,14 +32,13 @@ def test_tone_changes_no_hue_anywhere():
     and rolled pixels are excluded because the part-two roll-off moves
     them toward neutral by contract.
     """
-    img = np.full((200, 200, 3), (150, 100, 60), np.uint8)  # tungsten-lit room
-    img[:40, :] = (60, 45, 30)  # dim corners
+    img = np.full((200, 200, 3), (140, 118, 100), np.uint8)  # warm room, under the roll-off
+    img[:40, :] = (60, 50, 42)  # dim corners
     img[120:180, 60:140] = (205, 205, 205)  # bright neutral spill on the floor
     before = img.astype(float)
-    out, report = finish.balance_exposure(img)
+    out, _ = finish.balance_exposure(img)
     after = out.astype(float)
-    factors = np.array(report["wb_factors"], float)
-    pred = before * factors
+    pred = before
     # Below the highlight roll-off only: the part-two roll-off moves
     # bright pixels toward neutral by contract, so rolled pixels are
     # out of scope here (the ramp test above covers the boundary's
@@ -59,52 +51,7 @@ def test_tone_changes_no_hue_anywhere():
         actual = after[:, :, channel][keep] / np.maximum(after[:, :, 1][keep], 1.0)
         expected = pred[:, :, channel][keep] / np.maximum(pred[:, :, 1][keep], 1.0)
         gap = float(np.abs(actual - expected).mean())
-        assert gap <= 0.02, f"channel {channel} chromaticity moves {gap:.3f} past the vote"
-
-
-def _cast_room_with_wood_floor():
-    """A realistic room (walls and ceiling dominate) under one warm cast.
-
-    The global room vote reads the whole room below the bright cutoff:
-    walls, ceiling and rug outvote the wood floor, so the cast lifts and
-    the minority wood keeps its warm character. The bright lamp band
-    holds the vote ceiling above walls and floor alike, the way bright
-    fixtures do in real rooms.
-    """
-    img = np.full((200, 200, 3), (200, 160, 115), np.uint8)  # warm beige walls
-    img[:25, :] = (220, 218, 216)  # near-white neutral ceiling
-    img[:10, :] = (245, 245, 245)  # bright lamp band, above the vote
-    img[30:55, 20:180] = (175, 172, 170)  # neutral gray rug on the wall band
-    img[140:, :] = (190, 130, 80)  # saturated wood floor, lower third
-    cast = np.array([1.08, 1.0, 0.92])  # one warm cast over the whole room
-    return np.clip(img.astype(float) * cast, 0, 255).astype(np.uint8)
-
-
-def test_neutral_vote_cools_cast_keeps_wood_warm():
-    """The global room vote lifts the cast and keeps wood warm.
-
-    The warm cast cools on ceiling and walls, while the wood floor keeps
-    its warm character (red above blue, blue at or below green): warm
-    wood must never read blue. One multiplier per channel for the whole
-    photo, so there is no boundary to measure.
-    """
-    img = _cast_room_with_wood_floor()
-    before = img.astype(float)
-    out, report = finish.balance_exposure(img)
-    assert report["white_balanced"] is True
-    # The vote cools in the right direction: the wall band's red/blue gap
-    # shrinks. How far it goes is fitted on real rooms (criterion 11),
-    # not asserted here: a synthetic majority-warm room over-cools by
-    # construction, and real rooms carry the verdict.
-    wall_before = before[60:100, 20:180]
-    wall_after = out[60:100, 20:180].astype(float)
-    gap_before = wall_before[:, :, 0].mean() - wall_before[:, :, 2].mean()
-    gap_after = wall_after[:, :, 0].mean() - wall_after[:, :, 2].mean()
-    assert 0 < gap_after < gap_before, (
-        f"vote cools walls, got R-B {gap_before:.1f} -> {gap_after:.1f}"
-    )
-    floor = out[150:190, 20:180].astype(float)
-    assert (floor[:, :, 0] - floor[:, :, 2]).mean() > 0, "wood stays warm, never flips blue"
+        assert gap <= 0.02, f"channel {channel} chromaticity moves {gap:.3f}"
 
 
 def _exterior_room():
@@ -203,37 +150,29 @@ def _tungsten_room_wood_floor():
     return img
 
 
-def test_vote_reports_its_factors():
-    """The global vote states its per-channel multipliers in the report."""
-    img = _tungsten_room_wood_floor()
-    out, report = finish.balance_exposure(img)
-    assert report["white_balanced"] is True
-    assert len(report["wb_factors"]) == 3, "one multiplier per channel"
-
-
 def test_one_paint_keeps_one_color_across_brightness():
     """One paint keeps one color across its brightness range (contract 02,
-    final round: one global exposure gain and white balance per photo;
-    part two adds the capped vote and the highlight roll-off).
+    final round: one global exposure gain per photo; part two adds the
+    highlight roll-off; part three moves white balance to raw decode).
 
     A single warm paint color under a smooth brightness ramp goes
     through the finish; its chromaticity (R/G and B/G) stays constant
     across the ramp. The pre-final-round steps (blue cap,
     daylight-spill guard) moved chromaticity by brightness and fail
     this (measured on bb5df2b: R/G drift 0.045, B/G drift 0.067).
-    Lab a*/b* are NOT asserted here on purpose: at constant
-    chromaticity Lab chroma still grows with luminance, so the capped
-    vote's residual warmth (blue pinned at 1.25 instead of the 1.6 the
-    vote wants) drifts b* by 3.3 with zero hue shift (new code R/G
-    drift 0.001, B/G drift 0.006). A literal Lab bound on a warm paint
-    demands full neutralization, which the part-two cap forbids.
+    Lab a*/b* are not asserted: at constant chromaticity Lab chroma still
+    grows with luminance, so a warm paint's b* drifts with no hue shift.
     """
     paint = np.array([200.0, 160.0, 115.0])  # one warm wall paint
     ramp = np.linspace(0.35, 1.0, 200)[:, None, None]
     img = np.clip(paint * ramp, 0, 255).astype(np.uint8)
     img = np.repeat(img, 20, axis=1)  # 200 rows of ramp x 20 cols
+    # A bright neutral majority anchors the gain, so the whole ramp stays
+    # under the roll-off, the one color step allowed to depend on brightness.
+    img = np.hstack([img, np.full((200, 40, 3), 195, np.uint8)])
     out, _ = finish.balance_exposure(img)
-    f = out.astype(float)
+    f = out[:, :20].astype(float)
+    assert f.max() < 250, "the ramp must stay under the roll-off to measure the tone steps"
     # Band means, not single rows: 8-bit rounding chatters single rows
     # by ~1 level, while a real hue shift moves whole bands.
     rg = f[:, :, 0] / np.maximum(f[:, :, 1], 1.0)
@@ -249,7 +188,7 @@ def test_one_paint_keeps_one_color_across_brightness():
 def _warm_room_with_hot_patches():
     """Warm tungsten room with a warm near-clipped patch and a blown patch.
 
-    Unit-a 008: the uncapped vote pushed blue up 4.6x, so sunlit shades
+    Unit-a 008: a post-merge vote pushed blue up 4.6x, so sunlit shades
     and blown bulbs came out saturated cyan (mean RGB 127, 220, 255 on
     fully blown pixels). The near-clipped patch is warm lamp-lit white;
     the blown patch is already clipped warm white in the input.
@@ -259,20 +198,6 @@ def _warm_room_with_hot_patches():
     img[120:180, 120:180] = (255, 252, 244)  # blown patch
     img[:8, :] = (245, 245, 245)  # bright lamp band above the vote
     return img
-
-
-def test_white_balance_capped_relative_to_green():
-    """Each white-balance multiplier stays within 0.80-1.25 of green.
-
-    Contract 02, final round part two: the uncapped vote pushed blue to
-    4.6x on real rooms. A strongly warm room must still come out capped.
-    """
-    img = np.full((200, 200, 3), (160, 100, 50), np.uint8)
-    img[:10, :] = (245, 245, 245)  # bright band above the vote
-    _, report = finish.balance_exposure(img)
-    factors = np.array(report["wb_factors"], float)
-    rel = factors / factors[1]
-    assert all(0.80 <= float(x) <= 1.25 for x in rel), f"uncapped vote {rel.round(3)}"
 
 
 def test_warm_bright_and_blown_patches_stay_neutral():
@@ -362,10 +287,9 @@ def test_shared_look_constants_stay_frozen():
     assert finish.LOOK_GAMMA == 0.9
     assert finish.SHOULDER_SLOPE == 0.07
     assert (finish.AUTO_GAIN_LO, finish.AUTO_GAIN_HI) == (0.4, 3.5)
-    assert finish.WB_BRIGHT_PERCENTILE == 90.0
-    assert finish.WB_INTERIOR_STRENGTH == 0.95
-    assert finish.WB_EXTERIOR_STRENGTH == 0.4
-    assert (finish.WB_CAP_LO, finish.WB_CAP_HI) == (0.80, 1.25)
+    assert finish.WB_INTERIOR_TINT_R == 1.08
+    assert finish.WB_INTERIOR_TINT_B == 0.95
+    assert finish.WB_EXTERIOR_STRENGTH == 0.5
     assert (finish.ROLL_START, finish.ROLL_FULL) == (250.0, 270.0)
     # No WOOD_* constants: the zone wood guard and its tuning are removed
     # (finding 2, criterion 14: no spatial box in any color correction).

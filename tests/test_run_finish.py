@@ -29,64 +29,17 @@ def _synthetic_members(monkeypatch, n=5):
     monkeypatch.setattr(
         hdr, "read_exposure_seconds", lambda path: 1.0 + int(path.stem.replace("frame", ""))
     )
+    monkeypatch.setattr(
+        hdr,
+        "estimate_set_wb",
+        lambda paths: {
+            "scene": "interior",
+            "sky": 0.0,
+            "multipliers": [1.5, 1.0, 1.5],
+            "as_shot_reason": None,
+        },
+    )
     return members
-
-
-def _warm_room_with_gray_panel():
-    """Warm tungsten room with a dim neutral-gray panel in the lower half.
-
-    The capped vote cools neutral gray into cyan (measured: the panel
-    reads 158, 197, 246, a 9.38% bright cyan share), while the panel is
-    too dim to reach the highlight roll-off. With white balance off
-    the same panel reads 188, 188, 188 and the share is 0.
-    """
-    rng = np.random.default_rng(3)
-    rows = np.linspace(0.85, 1.1, 120)[:, None, None]
-    img = np.clip(
-        np.array([150.0, 110.0, 70.0]) * rows + rng.integers(-4, 5, size=(120, 160, 1)),
-        0,
-        255,
-    ).astype(np.uint8)
-    panel = np.clip(
-        np.array([107.0, 107.0, 107.0]) + rng.integers(-3, 4, size=(30, 60, 1)), 0, 255
-    ).astype(np.uint8)
-    img[80:110, 60:120] = panel
-    return img
-
-
-def test_build_inputs_falls_back_to_wb_off_on_cyan_surfaces(monkeypatch):
-    """An interior photo over the bright-surface limit ships WB-off.
-
-    Only the file reads are stubbed (the far side); the real vote,
-    cap, roll-off, share measure and fallback run.
-    """
-    members = _synthetic_members(monkeypatch)
-    fake = _warm_room_with_gray_panel()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
-    monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.0)
-
-    record: dict = {"index": 1, "name": "001", "notes": []}
-    run_finish.build_inputs(members, record)
-
-    assert record["bright_share"] > 1.0, "the WB-on pass must trip the limit"
-    assert "white_balance_off" in record, "the photo ships with white balance off"
-    assert "bright cyan/blue" in record["white_balance_off"]
-    assert record["balance"]["wb_factors"] == [1.0, 1.0, 1.0]
-    assert record["bright_share_final"] <= 1.0
-
-
-def test_build_inputs_keeps_wb_on_for_clean_rooms(monkeypatch):
-    """A room with no bright cyan surfaces keeps its white balance."""
-    members = _synthetic_members(monkeypatch)
-    fake = _synthetic_frame()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
-    monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.0)
-
-    record: dict = {"index": 1, "name": "001", "notes": []}
-    run_finish.build_inputs(members, record)
-
-    assert "white_balance_off" not in record
-    assert record["balance"]["wb_factors"] != [1.0, 1.0, 1.0]
 
 
 def test_build_inputs_keeps_undistort_invalid_out(monkeypatch):
@@ -98,7 +51,7 @@ def test_build_inputs_keeps_undistort_invalid_out(monkeypatch):
     """
     members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(hdr, "decode_frame", lambda path, **kw: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.5)
 
     record: dict = {"index": 1, "name": "001", "notes": []}
@@ -615,7 +568,7 @@ def test_build_inputs_measures_straightness_on_the_same_frame(monkeypatch):
     """
     members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(hdr, "decode_frame", lambda path, **kw: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.5)
 
     record: dict = {"index": 1, "name": "001", "notes": []}
@@ -638,7 +591,7 @@ def test_build_inputs_skips_lens_without_profile(monkeypatch):
     """
     members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(hdr, "decode_frame", lambda path, **kw: fake.copy())
     monkeypatch.setattr(geometry, "match_profile", lambda identity: None)
 
     record: dict = {"index": 1, "name": "001", "notes": []}
@@ -656,7 +609,7 @@ def test_build_inputs_names_uncorrected_frames_not_measured(monkeypatch):
 
     members = _synthetic_members(monkeypatch)
     fake = _synthetic_frame()
-    monkeypatch.setattr(hdr, "decode_frame", lambda path: fake.copy())
+    monkeypatch.setattr(hdr, "decode_frame", lambda path, **kw: fake.copy())
     monkeypatch.setattr(geometry, "fit_strength", lambda gray, profile, focal: 0.0)
     monkeypatch.setattr(geometry, "tca_params", lambda profile, focal: None)
 

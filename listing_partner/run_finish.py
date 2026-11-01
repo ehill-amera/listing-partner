@@ -1,8 +1,9 @@
 """Unit 2 pipeline: bracket sets in, finished listing photos out.
 
-Per set: undistort each frame (vendored lens profile, per-photo fitted
-strength) and correct TCA, align, fuse the chosen subset, straighten
-verticals, balance exposure, SAM windows plus Spark verdicts (found, not
+Per set: estimate one set of white-balance multipliers and decode every
+frame with them (linear light, before anything clips), undistort each
+frame (vendored lens profile, per-photo fitted strength) and correct TCA,
+align, fuse the chosen subset, straighten verticals, balance exposure, SAM windows plus Spark verdicts (found, not
 edited: window pulls are off for this unit), denoise last, crop to valid
 pixels plus the dark edge fringe, save. Every Meta call goes through the
 spend-capped client; failures land in plain words and still count.
@@ -35,18 +36,48 @@ def build_inputs(
     members: list[Path],
     record: dict,
 ) -> dict:
-    """Local prep for one set: geometry, merge choice, balance, send size.
+    """Local prep for one set: white balance, geometry, merge, balance, send size.
 
     No Meta calls, and no MLS twin: every decision reads the set's own
     frames through the frozen shared look. Fills record in place (partial
     on failure, like before) and returns the state the Meta step and the
     tail need.
+
+    Bright-surface fallback (contract 02, final round part three): an
+    interior photo whose bright cyan/blue share reads over the limit
+    re-decodes every frame at the camera's as-shot white balance and
+    ships that, labeled. The MLS twin never steers this: a new listing
+    has no twin, so the pipeline falls back on the 1% bar alone and the
+    post-hoc check judges against the twin.
     """
+    wb = hdr.estimate_set_wb(members)
+    record["wb_estimate"] = wb["multipliers"]
+    if wb["multipliers"] is None:
+        record["wb_as_shot"] = wb["as_shot_reason"]
+    state = _prepare(members, record, wb)
+    record["bright_share"] = round(checks.bright_surface_share(state["balanced"]), 2)
+    if (
+        wb["multipliers"] is not None
+        and wb["scene"] == "interior"
+        and record["bright_share"] > checks.BRIGHT_SURFACE_LIMIT_PCT
+    ):
+        record["wb_as_shot"] = (
+            f"bright cyan/blue {record['bright_share']:.2f}% of the frame "
+            f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
+        )
+        del state
+        state = _prepare(members, record, {**wb, "multipliers": None})
+        record["bright_share_final"] = round(checks.bright_surface_share(state["balanced"]), 2)
+    return state
+
+
+def _prepare(members: list[Path], record: dict, wb: dict) -> dict:
+    """Decode every frame with one white balance, then everything downstream."""
     focals = [geometry.read_focal(p) for p in members]
     identity = geometry.read_lens_identity(members[len(members) // 2])
     profile = geometry.match_profile(identity)
     record["focal"] = sorted({f for f in focals if f})
-    decoded = [hdr.decode_frame(p) for p in members]
+    decoded = [hdr.decode_frame(p, wb=wb["multipliers"]) for p in members]
     if profile is None:
         # Contract A0: with no profile the step is skipped for this photo
         # and the page says so. Frames go through uncorrected; every later
@@ -129,7 +160,7 @@ def build_inputs(
     for key, subset in options.items():
         idx = [order[p] for p in subset]
         merges[key] = hdr.fuse_exposures([aligned[i] for i in idx])
-    best_key, best_score, _ = hdr.choose_from_merges(merges)
+    best_key, best_score, _ = hdr.choose_from_merges(merges, scene=wb["scene"], sky=wb["sky"])
     merged = merges[best_key]
     record["frames_used"] = [p.name for p in sorted(options[best_key], key=lambda p: order[p])]
     record["frames_reason"] = f"{best_key}: {best_score}"
@@ -168,28 +199,10 @@ def build_inputs(
     y0, y1, x0, x1 = geometry.crop_valid_rect(valid)
     anchor = np.zeros_like(valid)
     anchor[y0:y1, x0:x1] = True
-    balanced, balance_report = finish.balance_exposure(merged, anchor_mask=anchor)
+    balanced, balance_report = finish.balance_exposure(
+        merged, anchor_mask=anchor, scene=wb["scene"], sky=wb["sky"]
+    )
     record["balance"] = balance_report
-    # Bright-surface fallback (contract 02, final round part two): an
-    # interior photo whose bright cyan/blue share still reads over the
-    # limit ships with white balance off (exposure gain and the
-    # luminance curve only). The MLS twin never steers this: a new
-    # listing has no twin, so the pipeline falls back on the 1% bar
-    # alone and the post-hoc check judges against the twin.
-    record["bright_share"] = round(checks.bright_surface_share(balanced), 2)
-    if balance_report.get("scene") == "interior" and record["bright_share"] > (
-        checks.BRIGHT_SURFACE_LIMIT_PCT
-    ):
-        reason = (
-            f"bright cyan/blue {record['bright_share']:.2f}% of the frame "
-            f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
-        )
-        balanced, balance_report = finish.balance_exposure(
-            merged, anchor_mask=anchor, white_balance=False
-        )
-        record["balance"] = balance_report
-        record["white_balance_off"] = reason
-        record["bright_share_final"] = round(checks.bright_surface_share(balanced), 2)
 
     h, w = balanced.shape[:2]
     scale = SEND_LONG_SIDE / max(h, w)
@@ -591,14 +604,13 @@ def _look_cell(look: dict | None) -> str:
 
 
 def _wb_cell(entry: dict) -> str:
-    """White-balance state: off with its reason, or on with its factors."""
-    off = entry.get("white_balance_off")
-    if off:
-        return f"<p>white balance off: {off}</p>"
-    factors = (entry.get("balance") or {}).get("wb_factors")
-    if factors:
-        capped = " (capped)" if (entry.get("balance") or {}).get("wb_capped") else ""
-        return f"<p>white balance on (R {factors[0]}, G {factors[1]}, B {factors[2]}{capped})</p>"
+    """White-balance state: camera as-shot with its reason, or the set's multipliers."""
+    as_shot = entry.get("wb_as_shot")
+    if as_shot:
+        return f"<p>camera as-shot white balance: {as_shot}</p>"
+    wb = entry.get("wb_estimate")
+    if wb:
+        return f"<p>white balance at raw decode (R {wb[0]}, G {wb[1]}, B {wb[2]}), one per set</p>"
     return "<p>white balance: not recorded</p>"
 
 
@@ -752,15 +764,16 @@ One scale both sides (before from the balanced crop, after from the
 saved file). Window pulls are off, so both sides read the balanced
 merge and no pull changes either.</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
-<p>White balance off (bright-surface fallback) on {top.get("white_balance_off", "?")} photo(s).</p>
+<p>Camera as-shot white balance (fallback) on {top.get("wb_as_shot", "?")} photo(s).</p>
 {pulled_line}
 {ratio_line}
 {commit_line}
-<p>The shared look settings behind these photos were refitted in the final round
-(Oct 31) on these same 16 photos against their MLS twins: the tone-dependent
-color steps are gone, replaced by one global exposure gain and white balance
-per photo plus one luminance-only shared tone curve. They are frozen from this
-round on: unit 5 measures the same settings, unchanged, on a held-out set.</p>
+<p>The shared look settings behind these photos were refitted in the final round,
+part three (Oct 31), on these same 16 photos against their MLS twins: one set of
+raw-decode white-balance multipliers per set, one global exposure gain per photo,
+and one luminance-only shared tone curve. They are frozen from this round on:
+unit 5 measures the same settings, unchanged, on a held-out set. Window verdicts
+and masks are the saved results; replay makes no Meta calls.</p>
 {"".join(rows)}
 <footer><p>{spend_line}</p></footer>
 </body></html>"""
@@ -879,7 +892,7 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "window_pixels": window_pixels,
         "clip_before_pct": 100 * clip_before_n / max(1, window_pixels),
         "clip_after_pct": 100 * clip_after_n / max(1, window_pixels),
-        "white_balance_off": sum(1 for r in finished_records if r.get("white_balance_off")),
+        "wb_as_shot": sum(1 for r in finished_records if r.get("wb_as_shot")),
         "unit_spend_usd": unit_spend_usd,
         "worst_reserve_ratio": worst_ratio,
         "reserve_ratio_calls": ratio_calls,

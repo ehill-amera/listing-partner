@@ -139,11 +139,13 @@ def most_common_size(sets: list[list[Path]]) -> int:
 JPEG_SUFFIXES = (".jpg", ".jpeg")
 
 
-def decode_frame(path: Path, half_size: bool = False) -> np.ndarray:
+def decode_frame(path: Path, half_size: bool = False, wb: list[float] | None = None) -> np.ndarray:
     """Decode one bracket frame to an sRGB uint8 RGB array.
 
     JPEG for units shot that way (PIL), raw decode otherwise. This is the
-    only decode path merge code may use.
+    only decode path merge code may use. wb is the set's channel
+    multipliers (R, G, B) for the raw decoder; a JPEG is already balanced
+    and ignores it.
     """
     if path.suffix.lower() in JPEG_SUFFIXES:
         with Image.open(path) as img:
@@ -152,24 +154,102 @@ def decode_frame(path: Path, half_size: bool = False) -> np.ndarray:
             half = Image.fromarray(frame)
             frame = np.asarray(half.resize((half.width // 2, half.height // 2), Image.BILINEAR))
         return frame
-    return decode_raw(path, half_size=half_size)
+    return decode_raw(path, half_size=half_size, wb=wb)
 
 
-def decode_raw(path: Path, half_size: bool = False) -> np.ndarray:
+def decode_raw(path: Path, half_size: bool = False, wb: list[float] | None = None) -> np.ndarray:
     """Decode a NEF/DNG to an sRGB uint8 RGB array.
 
     Auto-brightening stays off: every frame reaches fusion at its true
     exposure, so the dark brackets keep their window highlights unclipped.
+    wb (R, G, B) applies in linear light inside the decoder, before
+    anything clips; None keeps the camera's as-shot balance.
     """
+    balance = {"use_camera_wb": True} if wb is None else {"user_wb": [wb[0], wb[1], wb[2], wb[1]]}
     with rawpy.imread(str(path)) as raw:
         rgb = raw.postprocess(
-            use_camera_wb=True,
             half_size=half_size,
             no_auto_bright=True,
             output_bps=8,
             output_color=rawpy.ColorSpace.sRGB,
+            **balance,
         )
     return np.asarray(rgb, dtype=np.uint8)
+
+
+#: Linear camera values at or past this share of full scale count as
+#: clipped, and so do green values under the dark floor: neither carries
+#: the color of the light.
+WB_LINEAR_CLIP = 0.92
+WB_LINEAR_DARK = 0.01
+WB_MIN_PIXELS = 1000
+
+
+def _linear_camera_decode(path: Path) -> np.ndarray:
+    """Quick decode in linear camera color, unbalanced, scaled 0 to 1."""
+    with rawpy.imread(str(path)) as raw:
+        rgb = raw.postprocess(
+            user_wb=[1.0, 1.0, 1.0, 1.0],
+            half_size=True,
+            no_auto_bright=True,
+            output_bps=16,
+            gamma=(1, 1),
+            output_color=rawpy.ColorSpace.raw,
+        )
+    return np.asarray(rgb, dtype=np.float32) / 65535.0
+
+
+def _as_shot_multipliers(path: Path) -> np.ndarray:
+    """The camera's as-shot multipliers, relative to green."""
+    with rawpy.imread(str(path)) as raw:
+        values = np.array(list(raw.camera_whitebalance)[:3], dtype=np.float64)
+    if not (values > 0).all():
+        raise ValueError(f"no as-shot white balance in {path.name}")
+    return values / values[1]
+
+
+def estimate_set_wb(frame_paths: list[Path]) -> dict:
+    """One set of raw-decode white-balance multipliers for one bracket set.
+
+    Reads the set's own pixels only, never an MLS twin. A quick as-shot
+    merge names the scene (the sky test reads color, so it must not see a
+    balanced photo). A quick linear decode of the middle exposure votes:
+    the unclipped, not-dark pixels' average is taken as neutral, then the
+    shared look's tint applies. Returns scene, sky, multipliers (None
+    means camera as-shot) and as_shot_reason (why, when it is None).
+    """
+    from listing_partner import finish
+
+    quick = [decode_frame(p, half_size=True) for p in frame_paths]
+    merged = fuse_exposures(align_to_first(quick))
+    info: dict = {
+        "scene": finish.classify_scene(merged),
+        "sky": finish.sky_fraction(merged),
+        "multipliers": None,
+        "as_shot_reason": None,
+    }
+    if any(p.suffix.lower() in JPEG_SUFFIXES for p in frame_paths):
+        info["as_shot_reason"] = "JPEG frames hold no raw data to balance"
+        return info
+    ranked = sorted(frame_paths, key=read_exposure_seconds)
+    middle = ranked[len(ranked) // 2]
+    pixels = _linear_camera_decode(middle).reshape(-1, 3)
+    usable = pixels[(pixels.max(axis=1) < WB_LINEAR_CLIP) & (pixels[:, 1] > WB_LINEAR_DARK)]
+    if len(usable) < WB_MIN_PIXELS:
+        info["as_shot_reason"] = (
+            f"only {len(usable)} unclipped pixels in the middle frame to read the light from"
+        )
+        return info
+    means = usable.mean(axis=0).astype(np.float64)
+    neutral = means[1] / means
+    if info["scene"] == "interior":
+        tint = np.array([finish.WB_INTERIOR_TINT_R, 1.0, finish.WB_INTERIOR_TINT_B])
+        chosen = neutral * tint
+    else:
+        strength = finish.WB_EXTERIOR_STRENGTH
+        chosen = _as_shot_multipliers(middle) ** (1.0 - strength) * neutral**strength
+    info["multipliers"] = [round(float(v), 4) for v in chosen]
+    return info
 
 
 def _largest_tiff_preview(path: Path) -> np.ndarray | None:
@@ -419,11 +499,12 @@ def darkest_for_windows(frame_paths: list[Path]) -> Path:
     return sorted(frame_paths, key=read_exposure_seconds)[0]
 
 
-def score_merge(img: np.ndarray) -> dict:
+def score_merge(img: np.ndarray, scene: str | None = None, sky: float | None = None) -> dict:
     """Measured merge quality: clipped highlights, shadow detail, noise,
     and distance from the shared brightness target for the photo's own
     scene class. Never the MLS twin: the target is the frozen shared
-    look, and the class comes from the merge itself."""
+    look, and the class comes from the set's as-shot merge when given,
+    else from the merge itself."""
     from listing_partner import finish
 
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float64)
@@ -436,14 +517,17 @@ def score_merge(img: np.ndarray) -> dict:
         "shadow_mean": float(dark.mean()),
         "noise": float(lap.std()),
         "median": median,
-        "scene": finish.classify_scene(img),
+        "scene": scene if scene is not None else finish.classify_scene(img),
     }
-    score["target_gap"] = abs(median - finish.target_median(img)) / 255.0
+    target = finish.target_median(img, scene=scene, sky=sky)
+    score["target_gap"] = abs(median - target) / 255.0
     return score
 
 
 def choose_from_merges(
     merges: dict[str, np.ndarray],
+    scene: str | None = None,
+    sky: float | None = None,
 ) -> tuple[str, dict, dict]:
     """Best option key for pre-fused merges, its score, and the full-set
     score for the written reason.
@@ -451,7 +535,7 @@ def choose_from_merges(
     Lexicographic, no tuned weights: fewest clipped highlights wins, then
     closest to the shared brightness target, then lowest noise.
     """
-    scored = [(key, score_merge(img)) for key, img in merges.items()]
+    scored = [(key, score_merge(img, scene=scene, sky=sky)) for key, img in merges.items()]
     scored.sort(
         key=lambda item: (
             round(item[1]["clip_frac"], 4),

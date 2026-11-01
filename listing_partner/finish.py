@@ -1,15 +1,16 @@
 """Exposure balance and denoising (unit 2, steps C and D). Local only.
 
-Balance is one global white balance plus one global exposure gain per
-photo and one shared tone pipeline applied to luminance only: every
-tone step multiplies all three channels by the same per-pixel factor
-derived from luminance, so hue and saturation never change with
-brightness. No regional or positional color step exists anywhere
-(contract 02, final round Oct 31). The one brightness-dependent color
-step allowed (contract 02, final round part two, Oct 31) is a single
-smooth highlight roll-off toward neutral white: pixels approaching
-clipping blend smoothly toward neutral, the way a camera does, so warm
-bright and blown surfaces read neutral instead of cyan or blue.
+White balance is not here: it runs at raw decode, in linear light, one
+set of multipliers per set (hdr.estimate_set_wb, contract 02, final round
+part three). Balance is one global exposure gain per photo and one shared
+tone pipeline applied to luminance only: every tone step multiplies all
+three channels by the same per-pixel factor derived from luminance, so
+hue and saturation never change with brightness. No regional or
+positional color step exists anywhere (contract 02, final round Oct 31).
+The one brightness-dependent color step allowed (final round part two) is
+a single smooth highlight roll-off toward neutral white: pixels
+approaching clipping blend smoothly toward neutral, the way a camera
+does, so warm bright and blown surfaces read neutral.
 Denoise is edge-preserving bilateral on full-res luminance plus light
 chroma smoothing, applied last.
 """
@@ -20,15 +21,15 @@ import cv2
 import numpy as np
 
 #: The one shared look. These constants were refitted in the final
-#: round (Oct 31) on these same 16 unit-a photos against their MLS
-#: twins, and the report says so plainly: the tone-dependent color steps
-#: are gone, replaced by one global exposure gain and white balance per
-#: photo plus one luminance-only shared tone curve. They are frozen from
-#: this round on, and unit 5 measures the same settings, unchanged, on
-#: Erik's home set as the honest held-out test. Every photo gets the
-#: same constants; per-photo automatic exposure and white balance adapt
-#: to the photo's own pixels only. Processing never reads the photo's
-#: MLS twin: a new listing has no MLS photo to copy.
+#: round, part three (Oct 31), on these same 16 unit-a photos against
+#: their MLS twins, and the report says so plainly: one set of raw-decode
+#: white-balance multipliers per set, one global exposure gain per photo,
+#: one luminance-only shared tone curve. They are frozen from this round
+#: on, and unit 5 measures the same settings, unchanged, on Erik's home
+#: set as the honest held-out test. Every photo gets the same constants;
+#: per-set white balance and per-photo exposure adapt to that set's own
+#: pixels only. Processing never reads the photo's MLS twin: a new listing
+#: has no MLS photo to copy.
 #: Interior rooms finish bright and airy; exterior shots finish at their
 #: own lower level, told apart by visible sky (a camera scene mode, not a
 #: twin read).
@@ -55,19 +56,15 @@ LOOK_GAMMA = 0.9
 SHOULDER_SLOPE = 0.07
 AUTO_GAIN_LO = 0.4
 AUTO_GAIN_HI = 3.5
-#: White balance reads the room without its brightest pixels (windows,
-#: lamps), so daylight glass never votes on tungsten walls. Interiors
-#: under artificial light correct hard; daylight exteriors keep their
-#: scene palette with a light touch.
-WB_BRIGHT_PERCENTILE = 90.0
-WB_INTERIOR_STRENGTH = 0.95
-WB_EXTERIOR_STRENGTH = 0.4
-#: The white-balance cap (contract 02, final round part two): each
-#: channel multiplier stays within these bounds, relative to green
-#: (green is the reference at 1.0). The uncapped vote pushed blue to
-#: 4.6x on warm rooms, turning sunlit and blown surfaces cyan.
-WB_CAP_LO = 0.80
-WB_CAP_HI = 1.25
+#: White balance at raw decode (contract 02, final round part three).
+#: Interiors take the room's whole-frame linear average as neutral, then
+#: this one shared tint keeps the slight warmth of Erik's finishes (R up
+#: and B down, multiplying the neutral estimate). Exteriors sit between
+#: the camera's as-shot daylight (0) and that neutral estimate (1): grass
+#: and sky are not neutral surfaces, so they only lean toward it.
+WB_INTERIOR_TINT_R = 1.08
+WB_INTERIOR_TINT_B = 0.95
+WB_EXTERIOR_STRENGTH = 0.5
 #: Highlight roll-off toward neutral white (contract 02, final round
 #: part two): the one brightness-dependent color step allowed. A pixel
 #: whose brightest float channel passes ROLL_START blends smoothly
@@ -98,12 +95,19 @@ def classify_scene(img: np.ndarray) -> str:
     return "exterior" if sky_fraction(img) > SKY_FRACTION_CUT else "interior"
 
 
-def target_median(img: np.ndarray) -> float:
-    """The shared brightness target for this photo's scene class."""
-    if classify_scene(img) == "exterior":
+def target_median(img: np.ndarray, scene: str | None = None, sky: float | None = None) -> float:
+    """The shared brightness target for this photo's scene class.
+
+    scene and sky come from the set's as-shot merge when the caller has
+    them: a white-balanced interior's window reads blue, and reading the
+    sky test off that photo would aim the room at the exterior target.
+    """
+    scene = scene if scene is not None else classify_scene(img)
+    if scene == "exterior":
+        sky = sky if sky is not None else sky_fraction(img)
         return min(
             EXTERIOR_MAX_MEDIAN,
-            max(EXTERIOR_MIN_MEDIAN, EXTERIOR_BASE_MEDIAN + EXTERIOR_SKY_SLOPE * sky_fraction(img)),
+            max(EXTERIOR_MIN_MEDIAN, EXTERIOR_BASE_MEDIAN + EXTERIOR_SKY_SLOPE * sky),
         )
     return INTERIOR_TARGET_MEDIAN
 
@@ -122,64 +126,31 @@ def balance_exposure(
     img: np.ndarray,
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
-    white_balance: bool = True,
+    scene: str | None = None,
+    sky: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Balance a merged room photo. Returns (photo, report).
 
-    One global white balance from the room's own below-bright pixels
-    (each multiplier capped within WB_CAP_LO..WB_CAP_HI relative to
-    green), then one shared tone pipeline applied to luminance only
-    (shadow lift through a blurred luminance mask, a gentle gamma, one
-    global exposure gain toward the shared class target, then a soft
-    highlight shoulder), plus the single allowed brightness-dependent
-    color step: a smooth highlight roll-off toward neutral white.
-    Pixels under protect keep their exact values. No MLS twin is read.
-    No regional or positional color step exists: apart from the global
-    vote and the highlight roll-off, the only per-pixel differences
-    are luminance scales shared by all three channels (contract 02
-    section C and final round, part two).
+    One shared tone pipeline applied to luminance only (shadow lift
+    through a blurred luminance mask, a gentle gamma, one global exposure
+    gain toward the shared class target, then a soft highlight shoulder),
+    plus the single allowed brightness-dependent color step: a smooth
+    highlight roll-off toward neutral white. White balance already
+    happened at raw decode; nothing here votes on color. Pixels under
+    protect keep their exact values. No MLS twin is read. No regional or
+    positional color step exists (contract 02 section C and final round,
+    parts two and three).
 
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
     under the target the shipped file is measured against).
 
-    white_balance=False skips the vote (the bright-surface fallback:
-    exposure gain and the luminance curve only).
+    scene and sky are the set's own, read from its as-shot merge (see
+    target_median); without them the photo itself is read.
     """
-    scene = classify_scene(img)
+    scene = scene if scene is not None else classify_scene(img)
     work = img.astype(np.float32)
-    gray = _luminance(img)
-    ceiling = float(np.percentile(gray, WB_BRIGHT_PERCENTILE))
-    room = gray < ceiling
-    if anchor_mask is not None:
-        room = room & anchor_mask
-    report: dict = {"white_balanced": False}
-    # The vote reads the whole room below the bright cutoff: the
-    # low-saturation subset in real rooms is mid-dark pixels, not neutral
-    # surfaces, and voting from it under-corrects every photo (refit
-    # measurement Oct 31: 0 of 16 looks pass, rooms read far too
-    # yellow). One global multiplier per channel either way, so no
-    # regional or brightness-dependent color step exists.
-    voters = room
-    if white_balance and voters.sum() > 1000:
-        strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
-        means = np.array([work[:, :, c][voters].mean() for c in range(3)])
-        target = float(means.mean())
-        base = target / np.maximum(means, 1e-6)
-        factors = 1.0 + strength * (base - 1.0)
-        # The cap reads relative to green: green is the reference at
-        # 1.0, and red and blue may each move at most to the bounds.
-        # Without it the vote pushed blue past 4x on warm rooms.
-        factors = factors / factors[1]
-        capped = bool((factors < WB_CAP_LO).any() or (factors > WB_CAP_HI).any())
-        factors = np.clip(factors, WB_CAP_LO, WB_CAP_HI)
-        work *= factors
-        report["white_balanced"] = True
-        report["wb_factors"] = [round(float(f), 4) for f in factors]
-        report["wb_capped"] = capped
-    else:
-        report["wb_factors"] = [1.0, 1.0, 1.0]
-        report["wb_capped"] = False
+    report: dict = {}
     lum = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(lum.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
@@ -192,7 +163,7 @@ def balance_exposure(
     # The gain runs after the tone work so the class target is the final
     # anchor: per-photo automatic exposure, still with no twin read.
     post = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    target = target_median(img)
+    target = target_median(img, scene=scene, sky=sky)
     anchor = post[anchor_mask] if anchor_mask is not None else post.ravel()
     gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(anchor)))))
     work *= gain
