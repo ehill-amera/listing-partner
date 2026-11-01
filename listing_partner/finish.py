@@ -4,10 +4,14 @@ Balance is one global white balance plus one global exposure gain per
 photo and one shared tone pipeline applied to luminance only: every
 tone step multiplies all three channels by the same per-pixel factor
 derived from luminance, so hue and saturation never change with
-brightness. No regional, positional or brightness-dependent color step
-exists anywhere (contract 02, final round Oct 31). Denoise is
-edge-preserving bilateral on full-res luminance plus light chroma
-smoothing, applied last.
+brightness. No regional or positional color step exists anywhere
+(contract 02, final round Oct 31). The one brightness-dependent color
+step allowed (contract 02, final round part two, Oct 31) is a single
+smooth highlight roll-off toward neutral white: pixels approaching
+clipping blend smoothly toward neutral, the way a camera does, so warm
+bright and blown surfaces read neutral instead of cyan or blue.
+Denoise is edge-preserving bilateral on full-res luminance plus light
+chroma smoothing, applied last.
 """
 
 from __future__ import annotations
@@ -58,6 +62,22 @@ AUTO_GAIN_HI = 3.5
 WB_BRIGHT_PERCENTILE = 90.0
 WB_INTERIOR_STRENGTH = 0.95
 WB_EXTERIOR_STRENGTH = 0.4
+#: The white-balance cap (contract 02, final round part two): each
+#: channel multiplier stays within these bounds, relative to green
+#: (green is the reference at 1.0). The uncapped vote pushed blue to
+#: 4.6x on warm rooms, turning sunlit and blown surfaces cyan.
+WB_CAP_LO = 0.80
+WB_CAP_HI = 1.25
+#: Highlight roll-off toward neutral white (contract 02, final round
+#: part two): the one brightness-dependent color step allowed. A pixel
+#: whose brightest float channel passes ROLL_START blends smoothly
+#: (smoothstep) toward neutral gray of the same luminance, reaching
+#: full neutral at ROLL_FULL. Below the start nothing moves, so the
+#: ramp test and the no-hue test never see it; far above, blown pixels
+#: clip to white instead of saturated cyan. Wide enough to never bend
+#: into a band or edge.
+ROLL_START = 250.0
+ROLL_FULL = 270.0
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -102,22 +122,29 @@ def balance_exposure(
     img: np.ndarray,
     protect: np.ndarray | None = None,
     anchor_mask: np.ndarray | None = None,
+    white_balance: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Balance a merged room photo. Returns (photo, report).
 
-    One global white balance from the room's own below-bright pixels,
-    then one shared tone pipeline applied to luminance only (shadow
-    lift through a blurred luminance mask, a gentle gamma, one global
-    exposure gain toward the shared class target, then a soft highlight
-    shoulder). Pixels under protect keep their exact values. No MLS
-    twin is read. No regional, positional or brightness-dependent color
-    step exists: the only per-pixel differences are luminance scales
-    shared by all three channels (contract 02 section C and final
-    round).
+    One global white balance from the room's own below-bright pixels
+    (each multiplier capped within WB_CAP_LO..WB_CAP_HI relative to
+    green), then one shared tone pipeline applied to luminance only
+    (shadow lift through a blurred luminance mask, a gentle gamma, one
+    global exposure gain toward the shared class target, then a soft
+    highlight shoulder), plus the single allowed brightness-dependent
+    color step: a smooth highlight roll-off toward neutral white.
+    Pixels under protect keep their exact values. No MLS twin is read.
+    No regional or positional color step exists: apart from the global
+    vote and the highlight roll-off, the only per-pixel differences
+    are luminance scales shared by all three channels (contract 02
+    section C and final round, part two).
 
     anchor_mask limits the gain anchor to the pixels that survive the
     final crop (undistort borders are dark and would drag the median
     under the target the shipped file is measured against).
+
+    white_balance=False skips the vote (the bright-surface fallback:
+    exposure gain and the luminance curve only).
     """
     scene = classify_scene(img)
     work = img.astype(np.float32)
@@ -134,15 +161,25 @@ def balance_exposure(
     # yellow). One global multiplier per channel either way, so no
     # regional or brightness-dependent color step exists.
     voters = room
-    if voters.sum() > 1000:
+    if white_balance and voters.sum() > 1000:
         strength = WB_INTERIOR_STRENGTH if scene == "interior" else WB_EXTERIOR_STRENGTH
         means = np.array([work[:, :, c][voters].mean() for c in range(3)])
         target = float(means.mean())
         base = target / np.maximum(means, 1e-6)
         factors = 1.0 + strength * (base - 1.0)
+        # The cap reads relative to green: green is the reference at
+        # 1.0, and red and blue may each move at most to the bounds.
+        # Without it the vote pushed blue past 4x on warm rooms.
+        factors = factors / factors[1]
+        capped = bool((factors < WB_CAP_LO).any() or (factors > WB_CAP_HI).any())
+        factors = np.clip(factors, WB_CAP_LO, WB_CAP_HI)
         work *= factors
         report["white_balanced"] = True
         report["wb_factors"] = [round(float(f), 4) for f in factors]
+        report["wb_capped"] = capped
+    else:
+        report["wb_factors"] = [1.0, 1.0, 1.0]
+        report["wb_capped"] = False
     lum = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(lum.astype(np.float32), (0, 0), max(img.shape) / 40.0)
     darkness = np.clip((120.0 - blur) / 120.0, 0.0, 1.0)
@@ -161,6 +198,21 @@ def balance_exposure(
     work *= gain
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
+    # Highlight roll-off toward neutral white: the one
+    # brightness-dependent color step allowed (contract 02, final round
+    # part two). A pixel whose brightest float channel approaches
+    # clipping blends smoothly toward neutral gray of the same
+    # luminance, so warm bright surfaces and blown bulbs read neutral
+    # instead of cyan or blue. The smoothstep ramp is the whole curve:
+    # nothing moves below ROLL_START, full neutral at ROLL_FULL, no
+    # band or edge anywhere. Luminance is untouched, so the shoulder
+    # below still compresses exactly what it did.
+    peak = work.max(axis=2).astype(np.float32)
+    blend = np.clip((peak - ROLL_START) / (ROLL_FULL - ROLL_START), 0.0, 1.0)
+    if blend.any():
+        smooth = blend * blend * (3.0 - 2.0 * blend)
+        lum = 0.299 * work[:, :, 0] + 0.587 * work[:, :, 1] + 0.114 * work[:, :, 2]
+        work = (1.0 - smooth[:, :, None]) * work + smooth[:, :, None] * lum[:, :, None]
     # Highlight shoulder runs last so no earlier gain can re-blow whites.
     # Luminance-only like every tone step: over-bright luminance
     # compresses toward 235 while every pixel keeps its chromaticity.
