@@ -942,15 +942,26 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
                 "floor_ok": False,
                 "floor_reason": f"not measured: {exc}",
             }
-        try:
-            record["bright"] = measure.bright_surface_stats(finished_path, mls_path)
-        except ValueError as exc:
+        # The bright-surface check runs per interior photo (contract 02,
+        # final round part two): on exteriors real sky trips the measure,
+        # so those rows report not measured, never pass or fail.
+        if (record.get("balance") or {}).get("scene", "interior") != "interior":
             record["bright"] = {
                 "bright_share": None,
                 "mls_bright_share": None,
                 "bright_ok": False,
-                "bright_reason": f"not measured: {exc}",
+                "bright_reason": "not measured: exterior scene, real sky trips the measure",
             }
+        else:
+            try:
+                record["bright"] = measure.bright_surface_stats(finished_path, mls_path)
+            except ValueError as exc:
+                record["bright"] = {
+                    "bright_share": None,
+                    "mls_bright_share": None,
+                    "bright_ok": False,
+                    "bright_reason": f"not measured: {exc}",
+                }
 
 
 def peak_rss_mb() -> float:

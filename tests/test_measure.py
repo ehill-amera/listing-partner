@@ -29,6 +29,21 @@ def test_look_stats_reads_files_not_arrays(tmp_path):
     assert abs(stats["fin_median"] - 190) < 3
 
 
+def test_bright_surface_stats_judges_against_limit_or_twin(tmp_path):
+    """The finished share passes at/below 1%, or at/below the twin's."""
+    import cv2
+
+    cyan = np.full((60, 80, 3), (180, 230, 240), np.uint8)
+    cyan_path = tmp_path / "cyan.jpg"
+    cv2.imwrite(str(cyan_path), cv2.cvtColor(cyan, cv2.COLOR_RGB2BGR))
+    assert measure.bright_surface_stats(cyan_path, None)["bright_ok"] is False
+    twin_path = tmp_path / "twin.jpg"
+    cv2.imwrite(str(twin_path), cv2.cvtColor(cyan, cv2.COLOR_RGB2BGR))
+    twin_stats = measure.bright_surface_stats(cyan_path, twin_path)
+    assert twin_stats["bright_ok"] is True, "at the twin's share passes"
+    assert twin_stats["mls_bright_share"] == 100.0
+
+
 def test_floor_cast_ignores_white_sun_patches(tmp_path):
     """White reads R == G == B, never purple.
 
