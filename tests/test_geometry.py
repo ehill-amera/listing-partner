@@ -44,9 +44,15 @@ def test_undistort_straightens_synthetic_barrel_grid():
 
 
 def _real_merge_gray(name="001"):
+    import os
+
     import cv2
 
-    img = cv2.imread(f"output/unit-a/merged/{name}.jpg")
+    path = f"output/unit-a/merged/{name}.jpg"
+    if not os.path.exists(path):
+        print(f"SKIP: {path} is gitignored, no merged photo on a fresh clone")
+        pytest.skip(f"no merged photo on a fresh clone (gitignored): {path}")
+    img = cv2.imread(path)
     assert img is not None, "unit 1's merged photo must exist"
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 

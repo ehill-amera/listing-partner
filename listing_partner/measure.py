@@ -107,6 +107,33 @@ def floor_cast_stats(finished_path: Path, mls_path: Path | None, zone_frac: tupl
     }
 
 
+def bright_surface_stats(finished_path: Path, mls_path: Path | None) -> dict:
+    """Criterion bright-surface numbers for one shot, from shipped files.
+
+    The finished photo's bright cyan/blue share against the 1% bar or
+    the MLS twin's share, whichever is higher. Post-hoc only: the
+    pipeline never reads the twin while processing.
+    """
+    fin_bgr = cv2.imread(str(finished_path))
+    if fin_bgr is None:
+        raise ValueError(f"cannot read finished photo {finished_path}")
+    fin_rgb = cv2.cvtColor(fin_bgr, cv2.COLOR_BGR2RGB)
+    share = checks.bright_surface_share(fin_rgb)
+    twin_share = None
+    if mls_path is not None:
+        mls_bgr = cv2.imread(str(mls_path))
+        if mls_bgr is None:
+            raise ValueError(f"cannot read MLS photo {mls_path}")
+        twin_share = checks.bright_surface_share(cv2.cvtColor(mls_bgr, cv2.COLOR_BGR2RGB))
+    ok, reason = checks.check_bright_surfaces(share, twin_share)
+    return {
+        "bright_share": round(share, 2),
+        "mls_bright_share": None if twin_share is None else round(twin_share, 2),
+        "bright_ok": ok,
+        "bright_reason": reason,
+    }
+
+
 def look_stats(finished_path: Path, mls_path: Path) -> dict:
     """Criterion-11 numbers for one shot, from the two shipped files."""
     fin_bgr = cv2.imread(str(finished_path))

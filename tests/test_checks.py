@@ -89,3 +89,22 @@ def test_pull_gain_stays_in_bounds():
     assert checks.check_pull_gain(1.0)[0] is True
     assert checks.check_pull_gain(0.4)[0] is False
     assert checks.check_pull_gain(2.5)[0] is False
+
+
+def test_bright_surface_share_counts_cyan_not_white_or_wood():
+    cyan = np.full((10, 10, 3), (180, 230, 240), np.uint8)
+    assert checks.bright_surface_share(cyan) == 100.0
+    white = np.full((10, 10, 3), 240, np.uint8)
+    assert checks.bright_surface_share(white) == 0.0, "neutral white is not cyan"
+    wood = np.full((10, 10, 3), (190, 130, 80), np.uint8)
+    assert checks.bright_surface_share(wood) == 0.0, "warm wood is not cyan"
+    dim = np.full((10, 10, 3), (60, 120, 130), np.uint8)
+    assert checks.bright_surface_share(dim) == 0.0, "dim teal is not bright"
+
+
+def test_bright_surfaces_pass_at_limit_twin_or_below():
+    assert checks.check_bright_surfaces(0.5)[0] is True
+    assert checks.check_bright_surfaces(1.0)[0] is True
+    assert checks.check_bright_surfaces(1.5)[0] is False
+    assert checks.check_bright_surfaces(2.0, twin_share=2.54)[0] is True
+    assert checks.check_bright_surfaces(3.0, twin_share=2.54)[0] is False

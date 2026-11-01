@@ -170,6 +170,26 @@ def build_inputs(
     anchor[y0:y1, x0:x1] = True
     balanced, balance_report = finish.balance_exposure(merged, anchor_mask=anchor)
     record["balance"] = balance_report
+    # Bright-surface fallback (contract 02, final round part two): an
+    # interior photo whose bright cyan/blue share still reads over the
+    # limit ships with white balance off (exposure gain and the
+    # luminance curve only). The MLS twin never steers this: a new
+    # listing has no twin, so the pipeline falls back on the 1% bar
+    # alone and the post-hoc check judges against the twin.
+    record["bright_share"] = round(checks.bright_surface_share(balanced), 2)
+    if balance_report.get("scene") == "interior" and record["bright_share"] > (
+        checks.BRIGHT_SURFACE_LIMIT_PCT
+    ):
+        reason = (
+            f"bright cyan/blue {record['bright_share']:.2f}% of the frame "
+            f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
+        )
+        balanced, balance_report = finish.balance_exposure(
+            merged, anchor_mask=anchor, white_balance=False
+        )
+        record["balance"] = balance_report
+        record["white_balance_off"] = reason
+        record["bright_share_final"] = round(checks.bright_surface_share(balanced), 2)
 
     h, w = balanced.shape[:2]
     scale = SEND_LONG_SIDE / max(h, w)
@@ -570,6 +590,26 @@ def _look_cell(look: dict | None) -> str:
     return f"<p>{verdict} look: {look.get('look_reason', '')}</p>"
 
 
+def _wb_cell(entry: dict) -> str:
+    """White-balance state: off with its reason, or on with its factors."""
+    off = entry.get("white_balance_off")
+    if off:
+        return f"<p>white balance off: {off}</p>"
+    factors = (entry.get("balance") or {}).get("wb_factors")
+    if factors:
+        capped = " (capped)" if (entry.get("balance") or {}).get("wb_capped") else ""
+        return f"<p>white balance on (R {factors[0]}, G {factors[1]}, B {factors[2]}{capped})</p>"
+    return "<p>white balance: not recorded</p>"
+
+
+def _bright_cell(bright: dict | None) -> str:
+    """Bright-surface numbers with their verdict, or why there is none."""
+    if not bright or bright.get("bright_share") is None:
+        return "<p>bright surfaces: not measured</p>"
+    verdict = "PASS" if bright.get("bright_ok") else "FAIL"
+    return f"<p>{verdict} {bright.get('bright_reason', '')}</p>"
+
+
 def _floor_cell(floor: dict | None) -> str:
     """Floor-cast numbers with their verdict, or why there is none."""
     if not floor:
@@ -629,6 +669,8 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         )
         look_cell = _look_cell(entry.get("look"))
         floor_cell = _floor_cell(entry.get("floor"))
+        wb_cell = _wb_cell(entry)
+        bright_cell = _bright_cell(entry.get("bright"))
         trim = entry.get("edge_trim") or {}
         trim_cell = (
             f"<p>edge trim (px): top {trim.get('top', 0)}, bottom {trim.get('bottom', 0)}, "
@@ -653,7 +695,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')} "
             f"({entry.get('deghost', '')}){_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}{floor_cell}{trim_cell}"
+            f"{clip_cell}{look_cell}{floor_cell}{wb_cell}{bright_cell}{trim_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
@@ -710,6 +752,7 @@ One scale both sides (before from the balanced crop, after from the
 saved file). Window pulls are off, so both sides read the balanced
 merge and no pull changes either.</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
+<p>White balance off (bright-surface fallback) on {top.get("white_balance_off", "?")} photo(s).</p>
 {pulled_line}
 {ratio_line}
 {commit_line}
@@ -836,6 +879,7 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "window_pixels": window_pixels,
         "clip_before_pct": 100 * clip_before_n / max(1, window_pixels),
         "clip_after_pct": 100 * clip_after_n / max(1, window_pixels),
+        "white_balance_off": sum(1 for r in finished_records if r.get("white_balance_off")),
         "unit_spend_usd": unit_spend_usd,
         "worst_reserve_ratio": worst_ratio,
         "reserve_ratio_calls": ratio_calls,
@@ -897,6 +941,15 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
                 "mls_floor_cast": None,
                 "floor_ok": False,
                 "floor_reason": f"not measured: {exc}",
+            }
+        try:
+            record["bright"] = measure.bright_surface_stats(finished_path, mls_path)
+        except ValueError as exc:
+            record["bright"] = {
+                "bright_share": None,
+                "mls_bright_share": None,
+                "bright_ok": False,
+                "bright_reason": f"not measured: {exc}",
             }
 
 
