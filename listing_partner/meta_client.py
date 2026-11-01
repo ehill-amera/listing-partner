@@ -22,9 +22,9 @@ from pathlib import Path
 # Hard cap on lifetime Meta spend, in USD. This is a plain constant on
 # purpose: no environment variable, flag, or config file may raise it.
 # Changing the cap means editing this line (and needs Erik's yes).
-# Lowered from $100 to $40 on 2026-10-29 (Erik's call, contract 02):
-# Muse Code's own building draws on the same free credits.
-SPEND_CAP_USD = 40.0
+# Lowered from $100 in two steps (contract 02, Erik's calls), last on
+# 2026-10-31: total Meta spend must stay inside the free hackathon credits.
+SPEND_CAP_USD = 20.0
 
 # Base URL of the Meta Model API (dev.meta.ai/docs/authentication, read
 # 2026-10-26): every request carries the key as a Bearer token in the
@@ -104,19 +104,19 @@ class LedgerError(MetaRefused):
 
 
 class CapReached(MetaRefused):
-    """The ledger total has already reached the $40 cap."""
+    """The ledger total has already reached the $20 cap."""
 
 
 # The reservation ceiling sits $1 below the lifetime cap. A settled bill
 # can come in above its reservation (the API reports the real cost), so
-# refusing once total + worst case would pass $39 keeps the settled total
-# from ever passing $40. Like the lifetime figure, this headroom is a
+# refusing once total + worst case would pass $19 keeps the settled total
+# from ever passing $20. Like the lifetime figure, this headroom is a
 # plain constant: nothing outside this file may change it.
 RESERVATION_HEADROOM_USD = 1.0
 
 
 class WouldCrossCap(MetaRefused):
-    """This call's worst-case cost would push the total past the $39 ceiling."""
+    """This call's worst-case cost would push the total past the $19 ceiling."""
 
 
 class TransportFailed(MetaRefused):

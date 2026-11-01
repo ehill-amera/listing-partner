@@ -37,16 +37,17 @@ Keep `.navigator/status.md` current. Rewrite it (never append) at every mileston
 
 Any number written into a document, report or README is measured first, and measured again after any change that could move it. If you have not measured it, do not write it.
 
-## Meta API and the $40 spend cap
+## Meta API and the $20 spend cap
 
 - Every Meta call goes through the single function in `listing_partner/meta_client.py`. No other code imports an HTTP client to reach Meta.
-- That function keeps a running total on disk in `.spend/ledger.jsonl`. It reserves the estimated cost before the call, reconciles the real cost after, and refuses any call once the total reaches $40 or the call would push it past $40. If the ledger cannot be read, or a model's price is unknown, it refuses. Fail closed.
-- The $40 cap is a constant in code. Nothing (environment variable, flag, config file) can raise it. Changing it needs Erik's yes.
+- That function keeps a running total on disk in `.spend/ledger.jsonl`. It reserves the estimated cost before the call, reconciles the real cost after, and refuses any call once the total reaches $20 or the call would push it past $20. If the ledger cannot be read, or a model's price is unknown, it refuses. Fail closed.
+- The $20 cap is a constant in code. Nothing (environment variable, flag, config file) can raise it. Changing it needs Erik's yes.
 - Only first-party Meta models on an allowlist in the client: Muse Spark, SAM 3.1, Muse Image. Never a Contributor model. Any other model id is refused.
 - Calls through the capped client, inside the per-unit budget the contract names, are approved. Any other spend is not.
 - Only unit facts (beds, baths, square feet, rent, amenities, public address) and Bokani's photos go to Meta. Never tenant, applicant or owner data.
 - The product reads the key from the environment variable `META_API_KEY` and nowhere else. On Erik's Mac that variable is filled at shell start from the macOS Keychain. Never read Muse Code's own stored credentials (anything under `~/.config/muse/`), never ask Erik to paste the key into a chat, file or prompt, and never write it to a file, a log, the status file, a report, or a commit. Tests run with the variable unset.
 - The ledger counts the product's calls only. Muse Code's own building also spends Erik's Meta credits and is not counted there.
+- No personal money. Total Meta spend must stay inside the free hackathon credits. Muse Code is no longer used to build, because its spend is not capped.
 
 ## Public repo hygiene
 
