@@ -67,6 +67,16 @@ The tone-dependent color steps (blue cap, daylight-spill guard and any other ste
 - Known limits, accepted by Erik for this unit and listed in the report and later the README: no deghost step (016 reads above the ghosting limit and is flagged), window views stay as merged, masks are not glass-only, lit-wall noise is not measured. These are not ship blockers.
 - Ship rule for the next review: SHIP if the hackathon rules, hygiene, cap, honesty rules, the ramp test, criterion 11 and the check all hold, and the finished photos at full resolution show no box, seam, band or patch introduced by the finish. Anything else the reviewer finds goes to Known limits for Erik to see, not another round.
 
+### Final round, part three (navigator, Oct 31, after part two measured 12 of 12 interiors too yellow)
+
+Part two's cap stopped the cyan but left every interior pinned at the cap and far too warm (b* +22 to +44 against Erik's +5 to +13). The root cause is order: white balance was applied to the 8-bit merged JPEG, after highlights had already clipped, so a strong correction tints clipped areas and a weak one leaves the room yellow. Fix the order, not the strength:
+
+- White balance moves to raw decode, in linear light, before anything clips. Each set gets one set of channel multipliers (estimated from neutral surfaces on a quick linear decode, or the camera's as-shot value as the starting point), passed to the raw decoder for every frame of the set, then the frames merge as now.
+- Remove the post-merge white-balance step and its 0.80 to 1.25 cap. Keep the luminance-only tone curve, the highlight roll-off to neutral, lens, verticals, trim and denoise.
+- Keep the bright-surface check and its fallback. A photo that fails it ships with the camera's as-shot white balance, labeled on the page.
+- Criterion 11 is part of the ship rule: interiors must land within 5 b* units of their MLS twin, or the report says plainly which miss and by how much. The look may be refitted once more on the same 16 photos and pinned again.
+- Builder from here on is Claude Code (Erik's decision, Oct 31, to stop spending Meta credits on building). Every commit it makes carries the trailer "Built-by: Claude Code (Opus 5.5)".
+
 ### Final round, part two (navigator clarification, Oct 31, after the sixth review)
 
 The global white balance pushed blue up as far as 4.6 times, so warm bright and blown surfaces came out cyan or blue (7.7% to 26% of each interior frame, against 0% in the unit 1 merges). This part keeps Erik's "simplify and ship" decision and closes the gap:
