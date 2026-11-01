@@ -27,9 +27,7 @@ def test_tone_changes_no_hue_anywhere():
     pixel, in dim corners and mid walls alike. Per-channel gamma
     and shoulder, the blue cap and the spill guard all moved
     chromaticity by brightness or region and fail this; clipping is
-    excluded on both sides because a clipped channel carries no hue,
-    and rolled pixels are excluded because the part-two roll-off moves
-    them toward neutral by contract.
+    excluded because a clipped channel carries no hue.
     """
     img = np.full((200, 200, 3), (140, 118, 100), np.uint8)  # warm room, under the roll-off
     img[:40, :] = (60, 50, 42)  # dim corners
@@ -87,10 +85,9 @@ def test_shadow_lift_opens_corners_without_haze():
 
 def test_highlights_held_and_mls_matched():
     out, report = finish.balance_exposure(_room_cast())
-    # Highlights hold in luminance and read neutral: the part-two
-    # roll-off blends near-clipped pixels toward neutral gray of the
-    # same luminance, then the shoulder compresses over-bright
-    # luminance toward 235. The old code clipped the blue channel at
+    # Highlights hold and read neutral: the roll-off blends pixels near
+    # clipping in the merge toward neutral gray of the same luminance,
+    # then the shoulder compresses the peak channel. The old code clipped the blue channel at
     # 255 instead, which hid luminance (it read 239) while painting
     # the hot patch cyan (it read 216, 247, 255, spread 39): that
     # tint fails the spread bound below. No per-channel clamp hides

@@ -785,7 +785,9 @@ merge and no pull changes either.</p>
 <p>The shared look settings behind these photos were refitted in the final round,
 part three (Oct 31), on these same 16 photos against their MLS twins: one set of
 raw-decode white-balance multipliers per set, one global exposure gain per photo,
-and one luminance-only shared tone curve. They are frozen from this round on:
+and one luminance-only shared tone curve. The highlight roll-off and shoulder were
+rebuilt after the review of commit 970ce8f; the other settings did not change.
+They are frozen from this round on:
 unit 5 measures the same settings, unchanged, on a held-out set. Window verdicts
 and masks are the saved results; replay makes no Meta calls.</p>
 {"".join(rows)}
