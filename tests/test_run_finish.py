@@ -301,7 +301,7 @@ def test_process_set_scales_masks_width_first(tmp_path, monkeypatch):
         return [{"object_id": 0, "box": (0, 0, 5, 8), "mask": sent_mask.copy()}]
 
     monkeypatch.setattr(rf, "build_inputs", _stub_inputs)
-    monkeypatch.setattr(rf, "apply_window_mask", lambda members, record, state, mask: state)
+    monkeypatch.setattr(rf, "apply_window_mask", lambda record, state, mask: state)
     monkeypatch.setattr(seg, "find_candidates", _stub_find)
     monkeypatch.setattr(seg, "verify_candidates", lambda *a, **k: {0: (True, "sky and trees")})
     dirs = _tail_dirs(tmp_path)
@@ -1008,7 +1008,7 @@ def test_replay_hands_the_saved_window_masks_to_the_balance(tmp_path, monkeypatc
     tiny = np.full((20, 20, 3), 120, np.uint8)
     seen = {}
 
-    def _stub(members, record, window_mask=None, settle_wb=True):
+    def _stub(members, record, window_mask=None):
         seen["mask"] = window_mask
         record.update(straight_before=200.0, straight_after=200.0, distortion_applied=False)
         return {
@@ -1054,7 +1054,42 @@ def test_fresh_set_rebalances_inside_the_confirmed_masks_only():
         "wb": {"multipliers": None, "scene": "interior", "sky": 0.0},
     }
     record = {"balance": first}
-    rf.apply_window_mask([], record, state, mask)
+    rf.apply_window_mask(record, state, mask)
     assert record["balance"]["cool_gate"]["strength"] > 0.0
     assert (state["balanced"][~mask] == plain[~mask]).all()
     assert (state["balanced"][mask] != plain[mask]).any()
+
+
+def _bright_photo(name, outside, limit):
+    return {
+        "index": int(name),
+        "name": name,
+        "bright": {
+            "bright_share": outside,
+            "bright_share_outside": outside,
+            "known_limit": limit,
+            "bright_ok": True,
+            "bright_reason": "r",
+        },
+    }
+
+
+def test_summary_lists_only_photos_over_the_bright_limit():
+    """Only photos over the limit are listed, with their numbers; exteriors never are."""
+    from listing_partner import run_finish as rf
+
+    exterior = {"index": 3, "name": "003", "bright": {"bright_share": None, "bright_ok": False}}
+    records = [_bright_photo("001", 0.5, False), _bright_photo("002", 1.67, True), exterior]
+    summary = rf._summarize(records, 1.0, 0.0)
+    assert summary.get("bright_known_limit") == [{"name": "002", "outside": 1.67}]
+
+
+def test_page_lists_bright_known_limits_and_never_invents_none():
+    from listing_partner import run_finish as rf
+
+    assert "known limit" in rf._bright_cell(_bright_photo("002", 1.67, True)["bright"])
+    assert "known limit" not in rf._bright_cell(_bright_photo("001", 0.5, False)["bright"])
+    line = rf._known_limits_line([{"name": "002", "outside": 1.67}])
+    assert "Known limit" in line and "002 (1.67%)" in line
+    assert "none" in rf._known_limits_line([])
+    assert "not recorded" in rf._known_limits_line(None), "a missing list never reads as none"

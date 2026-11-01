@@ -37,7 +37,6 @@ def build_inputs(
     members: list[Path],
     record: dict,
     window_mask: np.ndarray | None = None,
-    settle_wb: bool = True,
 ) -> dict:
     """Local prep for one set: white balance, geometry, merge, balance, send size.
 
@@ -47,8 +46,8 @@ def build_inputs(
     tail need.
 
     window_mask is the union of the set's confirmed window masks: the only
-    place the cool trigger can act. A fresh set has none yet, so it builds with
-    settle_wb=False, asks Meta, then calls apply_window_mask.
+    place the cool trigger can act. A fresh set has none yet, so it builds without
+    one, asks Meta, then calls apply_window_mask.
     """
     wb = hdr.estimate_set_wb(members)
     record["wb_estimate"] = wb["multipliers"]
@@ -56,13 +55,12 @@ def build_inputs(
         record["wb_as_shot"] = wb["as_shot_reason"]
     state = _prepare(members, record, wb, window_mask)
     state["wb"] = wb
-    return _settle_white_balance(members, record, state, window_mask) if settle_wb else state
+    _read_bright_surfaces(record, state, window_mask)
+    return state
 
 
-def apply_window_mask(
-    members: list[Path], record: dict, state: dict, window_mask: np.ndarray
-) -> dict:
-    """Rebalance a fresh set once its windows are known, then settle white balance."""
+def apply_window_mask(record: dict, state: dict, window_mask: np.ndarray) -> dict:
+    """Rebalance a fresh set once its windows are known, then read its bright surfaces."""
     wb = state["wb"]
     state["balanced"], record["balance"] = finish.balance_exposure(
         state["merged"],
@@ -71,41 +69,21 @@ def apply_window_mask(
         sky=wb["sky"],
         window_mask=window_mask,
     )
-    return _settle_white_balance(members, record, state, window_mask)
-
-
-def _settle_white_balance(
-    members: list[Path], record: dict, state: dict, window_mask: np.ndarray | None
-) -> dict:
-    """Bright-surface fallback (contract 02, final round part three).
-
-    An interior photo whose bright cyan/blue share outside its windows (masks
-    grown by the feather width; views have their own handling) reads over the
-    limit re-decodes every frame at the camera's as-shot white balance and
-    ships that, labeled. The MLS twin never steers this: a new listing
-    has no twin, so the pipeline falls back on the 1% bar alone and the
-    post-hoc check judges against the twin.
-    """
-    wb = state["wb"]
-    excluded = None if window_mask is None else finish.grown_window_mask(window_mask)
-    outside = checks.bright_surface_share(state["balanced"], exclude=excluded)
-    record["bright_share"] = round(checks.bright_surface_share(state["balanced"]), 2)
-    record["bright_share_outside"] = round(outside, 2)
-    if (
-        wb["multipliers"] is not None
-        and wb["scene"] == "interior"
-        and outside > checks.BRIGHT_SURFACE_LIMIT_PCT
-    ):
-        record["wb_as_shot"] = (
-            f"bright cyan/blue {outside:.2f}% of the frame outside the windows "
-            f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
-        )
-        del state
-        as_shot = {**wb, "multipliers": None}
-        state = _prepare(members, record, as_shot, window_mask)
-        state["wb"] = as_shot
-        record["bright_share_final"] = round(checks.bright_surface_share(state["balanced"]), 2)
+    _read_bright_surfaces(record, state, window_mask)
     return state
+
+
+def _read_bright_surfaces(record: dict, state: dict, window_mask: np.ndarray | None) -> None:
+    """Bright cyan/blue share before the tail, whole frame and outside the windows.
+
+    Measured only. The share never changes the white balance (contract 02,
+    navigator decision of Nov 1): a photo over the limit is a known limit.
+    """
+    excluded = None if window_mask is None else finish.grown_window_mask(window_mask)
+    record["bright_share"] = round(checks.bright_surface_share(state["balanced"]), 2)
+    record["bright_share_outside"] = round(
+        checks.bright_surface_share(state["balanced"], exclude=excluded), 2
+    )
 
 
 def _prepare(
@@ -533,7 +511,7 @@ def process_set(
     transcript: list = []
     try:
         # No cool trigger on what Meta sees: the masks do not exist yet.
-        state = build_inputs(members, record, settle_wb=False)
+        state = build_inputs(members, record)
         h, w = state["h"], state["w"]
         candidates = []
         for prompt in SAM_PROMPTS:
@@ -587,7 +565,7 @@ def process_set(
                 c["mask"],
                 dirs["masks"] / f"{name}_rejected{c['object_id']}.png",
             )
-        state = apply_window_mask(members, record, state, union)
+        state = apply_window_mask(record, state, union)
         finish_tail(record, state, dirs, masks, union, rej_masks=rej_masks)
         record["error"] = None
     except Exception as exc:  # noqa: BLE001 - every failure lands in plain words
@@ -657,7 +635,7 @@ def _look_cell(look: dict | None) -> str:
 
 
 def _wb_cell(entry: dict) -> str:
-    """White-balance state: camera as-shot with its reason, or the set's multipliers."""
+    """White-balance state: the set's multipliers, or as-shot and why no estimate exists."""
     as_shot = entry.get("wb_as_shot")
     if as_shot:
         return f"<p>camera as-shot white balance: {as_shot}</p>"
@@ -672,7 +650,36 @@ def _bright_cell(bright: dict | None) -> str:
     if not bright or bright.get("bright_share") is None:
         return "<p>bright surfaces: not measured</p>"
     verdict = "PASS" if bright.get("bright_ok") else "FAIL"
-    return f"<p>{verdict} {bright.get('bright_reason', '')}</p>"
+    limit = (
+        "; known limit: over the limit outside windows, not changed"
+        if bright.get("known_limit")
+        else ""
+    )
+    return f"<p>{verdict} {bright.get('bright_reason', '')}{limit}</p>"
+
+
+def _known_limits_line(limits: list[dict] | None) -> str:
+    """Photos over the bright-surface limit outside their windows, for the page top."""
+    if limits is None:
+        listed = "not recorded"
+    elif limits:
+        listed = ", ".join(f"{item['name']} ({item['outside']:.2f}%)" for item in limits)
+    else:
+        listed = "none"
+    return (
+        f"<p>Known limit, bright cyan/blue over {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% "
+        f"of the frame outside the windows on the saved file: {listed}. "
+        "Listed, not changed.</p>"
+    )
+
+
+def _bright_known_limits(records: list[dict]) -> list[dict]:
+    """Every measured photo whose saved file reads over the limit outside its windows."""
+    return [
+        {"name": r.get("name"), "outside": r["bright"]["bright_share_outside"]}
+        for r in records
+        if (r.get("bright") or {}).get("known_limit")
+    ]
 
 
 def _flat_white_cell(flat: dict | None) -> str:
@@ -845,9 +852,12 @@ One scale both sides (before from the balanced crop, after from the
 saved file). Window pulls are off, so both sides read the balanced
 merge and no pull changes either.</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
-<p>Camera as-shot white balance (fallback) on {top.get("wb_as_shot", "?")} photo(s).
-The bright-surface check counts pixels outside the confirmed window masks, with the masks
+<p>White balance is estimated from each set's own pixels at raw decode. The bright-surface
+reading never changes it. Camera as-shot only where no estimate exists (JPEG frames, or too few
+readable pixels): {top.get("wb_as_shot", "?")} photo(s).
+The bright-surface share counts pixels outside the confirmed window masks, with the masks
 grown by the cool trigger's feather width.</p>
+{_known_limits_line(top.get("bright_known_limit"))}
 {pulled_line}
 {ratio_line}
 {commit_line}
@@ -980,6 +990,7 @@ def _summarize(records: list[dict], elapsed: float, unit_spend_usd: float) -> di
         "clip_before_pct": 100 * clip_before_n / max(1, window_pixels),
         "clip_after_pct": 100 * clip_after_n / max(1, window_pixels),
         "wb_as_shot": sum(1 for r in finished_records if r.get("wb_as_shot")),
+        "bright_known_limit": _bright_known_limits(finished_records),
         "unit_spend_usd": unit_spend_usd,
         "worst_reserve_ratio": worst_ratio,
         "reserve_ratio_calls": ratio_calls,

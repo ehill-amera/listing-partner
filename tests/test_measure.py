@@ -58,6 +58,21 @@ def test_bright_surface_stats_judges_the_share_outside_the_windows(tmp_path):
     assert measure.bright_surface_stats(path, None, outside_share=1.2)["bright_ok"] is False
 
 
+def test_known_limit_is_over_1_percent_outside_even_when_the_twin_passes_it(tmp_path):
+    """Over 1% outside the windows is listed whatever the twin reads; at 1% is not."""
+    import cv2
+
+    cyan = np.full((50, 50, 3), (240, 230, 190), np.uint8)  # BGR: bright cyan-blue
+    path = tmp_path / "cyan.jpg"
+    cv2.imwrite(str(path), cyan)
+    twin = tmp_path / "twin.jpg"
+    cv2.imwrite(str(twin), cyan)
+    over = measure.bright_surface_stats(path, twin, outside_share=1.01)
+    assert over["bright_ok"] is True, "the twin rule passes this photo"
+    assert over.get("known_limit") is True, "over the limit must be listed"
+    assert measure.bright_surface_stats(path, None, outside_share=1.0).get("known_limit") is False
+
+
 def test_floor_cast_ignores_white_sun_patches(tmp_path):
     """White reads R == G == B, never purple.
 

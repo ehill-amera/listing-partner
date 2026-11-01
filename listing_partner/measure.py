@@ -128,9 +128,11 @@ def bright_surface_stats(
             raise ValueError(f"cannot read MLS photo {mls_path}")
         twin_share = checks.bright_surface_share(cv2.cvtColor(mls_bgr, cv2.COLOR_BGR2RGB))
     ok, reason = checks.check_bright_surfaces(share, twin_share, outside_share)
+    outside = share if outside_share is None else outside_share
     return {
         "bright_share": round(share, 2),
-        "bright_share_outside": None if outside_share is None else round(outside_share, 2),
+        "bright_share_outside": round(outside, 2),
+        "known_limit": outside > checks.BRIGHT_SURFACE_LIMIT_PCT,
         "mls_bright_share": None if twin_share is None else round(twin_share, 2),
         "bright_ok": ok,
         "bright_reason": reason,

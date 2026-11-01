@@ -67,6 +67,10 @@ The tone-dependent color steps (blue cap, daylight-spill guard and any other ste
 - Known limits, accepted by Erik for this unit and listed in the report and later the README: no deghost step (016 reads above the ghosting limit and is flagged), window views stay as merged, masks are not glass-only, lit-wall noise is not measured. These are not ship blockers.
 - Ship rule for the next review: SHIP if the hackathon rules, hygiene, cap, honesty rules, the ramp test, criterion 11 and the check all hold, and the finished photos at full resolution show no box, seam, band or patch introduced by the finish. Anything else the reviewer finds goes to Known limits for Erik to see, not another round.
 
+### Camera white-balance fallback removed (navigator decision, Nov 1, after the replay of a4f4ffd)
+
+The bright-surface fallback is gone. Every photo uses the estimated white balance at raw decode, whatever its bright-surface reading. The bright-surface share outside the windows stays measured and shown on the page. Any photo over 1% is listed as a known limit and is not changed. Where this differs from the sections below, this wins: the fallback sentences in the Nov 1 section, part three and part two no longer apply.
+
 ### Bright-surface check outside the windows (navigator decision, Nov 1, after the replay of cecc70d)
 
 The bright-surface check counts only pixels outside the confirmed window masks, with the masks grown by the cool trigger's feather width, because window views have their own handling. A photo falls back to the camera's white balance only when the share outside the windows exceeds the rule. Where this differs from part two and part three below, this wins.
