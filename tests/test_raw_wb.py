@@ -211,3 +211,71 @@ def test_real_nef_decoder_honors_the_set_multipliers():
     low_ratio = low[:, :, 2].mean() / max(low[:, :, 1].mean(), 1.0)
     high_ratio = high[:, :, 2].mean() / max(high[:, :, 1].mean(), 1.0)
     assert high_ratio > low_ratio * 1.1, f"B/G {low_ratio:.3f} -> {high_ratio:.3f}"
+
+
+def _panel_mask():
+    """The confirmed window: exactly the panel _cyan_trap paints."""
+    mask = np.zeros((240, 360), bool)
+    mask[60:130, 60:300] = True
+    return mask
+
+
+def _far_mask():
+    """A confirmed window that sits nowhere near the panel."""
+    mask = np.zeros((240, 360), bool)
+    mask[180:230, 10:50] = True
+    return mask
+
+
+def _install_uncorrected_trap(monkeypatch):
+    """The trap with the cool trigger off, so a panel in a mask stays cyan.
+
+    The trigger pales a view enough to hide the panel from the fallback, and these
+    tests are about what the fallback counts.
+    """
+    monkeypatch.setattr(finish, "ROLL_COOL_STRENGTH", 0.0)
+    return _install(monkeypatch, _cyan_trap())
+
+
+def test_excess_inside_the_windows_does_not_fall_back(monkeypatch):
+    """The same cyan panel, called a window: the set's balance ships, not as-shot."""
+    members, log = _install_uncorrected_trap(monkeypatch)
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    run_finish.build_inputs(members, record, window_mask=_panel_mask())
+    assert record["bright_share"] > checks.BRIGHT_SURFACE_LIMIT_PCT, "the frame must trip the rule"
+    assert not record.get("wb_as_shot"), f"fell back: {record.get('wb_as_shot')}"
+    final = _full_decodes(log)[-len(members) :]
+    assert all(kw.get("user_wb") and not kw.get("use_camera_wb") for kw in final)
+
+
+def test_excess_in_the_grown_ring_does_not_count(monkeypatch):
+    """A mask one feather width short of the panel on each side still covers it."""
+    width = int(finish.ROLL_COOL_FEATHER_FRAC * 360)
+    mask = np.zeros((240, 360), bool)
+    mask[60 + width : 130 - width, 60 + width : 300 - width] = True
+    members, _ = _install_uncorrected_trap(monkeypatch)
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    run_finish.build_inputs(members, record, window_mask=mask)
+    assert record["bright_share_outside"] <= checks.BRIGHT_SURFACE_LIMIT_PCT
+    assert not record.get("wb_as_shot"), f"fell back: {record.get('wb_as_shot')}"
+
+
+def test_excess_outside_the_windows_still_falls_back(monkeypatch):
+    """A window elsewhere excuses nothing: the panel still trips the rule."""
+    members, log = _install_uncorrected_trap(monkeypatch)
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    run_finish.build_inputs(members, record, window_mask=_far_mask())
+    assert record.get("wb_as_shot"), "the excess outside the windows must fall back"
+    final = _full_decodes(log)[-len(members) :]
+    assert all(kw.get("use_camera_wb") and not kw.get("user_wb") for kw in final)
+
+
+def test_fresh_set_settles_on_the_share_outside_its_windows(monkeypatch):
+    """The Meta path: first balance has no masks, then the windows decide."""
+    members, _ = _install_uncorrected_trap(monkeypatch)
+    record: dict = {"index": 1, "name": "001", "notes": []}
+    state = run_finish.build_inputs(members, record, settle_wb=False)
+    assert not record.get("wb_as_shot"), "no decision before the windows are known"
+    run_finish.apply_window_mask(members, record, state, _panel_mask())
+    assert record["bright_share"] > checks.BRIGHT_SURFACE_LIMIT_PCT, "the frame must trip the rule"
+    assert not record.get("wb_as_shot"), f"fell back: {record.get('wb_as_shot')}"

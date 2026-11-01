@@ -580,3 +580,14 @@ def test_masks_never_turn_on_the_trigger_for_a_dim_or_warm_view():
     _, report = finish.balance_exposure(img, scene="interior", window_mask=mask)
     assert report["cool_gate"]["strength"] == 0.0
     assert "edge_step_a" not in report["cool_gate"], "no edge exists, so none is measured"
+
+
+def test_grown_window_mask_reaches_exactly_the_feather_width():
+    mask = np.zeros((100, 1000), bool)
+    mask[40:60, 400:500] = True
+    width = int(finish.ROLL_COOL_FEATHER_FRAC * 1000)
+    grown = finish.grown_window_mask(mask)
+    assert grown[mask].all()
+    assert grown[50, 500 - 1 + width], "the feather width is inside"
+    assert not grown[50, 500 - 1 + width + 1], "one pixel past it is outside"
+    assert not finish.grown_window_mask(np.zeros((100, 1000), bool)).any()

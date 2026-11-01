@@ -44,6 +44,20 @@ def test_bright_surface_stats_judges_against_limit_or_twin(tmp_path):
     assert twin_stats["mls_bright_share"] == 100.0
 
 
+def test_bright_surface_stats_judges_the_share_outside_the_windows(tmp_path):
+    """A cyan frame passes when the shipped share outside the windows is under the bar."""
+    import cv2
+
+    cyan = np.full((60, 80, 3), (180, 230, 240), np.uint8)
+    path = tmp_path / "cyan.jpg"
+    cv2.imwrite(str(path), cv2.cvtColor(cyan, cv2.COLOR_RGB2BGR))
+    stats = measure.bright_surface_stats(path, None, outside_share=0.4)
+    assert stats["bright_ok"] is True
+    assert stats["bright_share"] == 100.0, "the whole-frame reading stays on the record"
+    assert stats["bright_share_outside"] == 0.4
+    assert measure.bright_surface_stats(path, None, outside_share=1.2)["bright_ok"] is False
+
+
 def test_floor_cast_ignores_white_sun_patches(tmp_path):
     """White reads R == G == B, never purple.
 

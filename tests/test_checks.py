@@ -108,3 +108,20 @@ def test_bright_surfaces_pass_at_limit_twin_or_below():
     assert checks.check_bright_surfaces(1.5)[0] is False
     assert checks.check_bright_surfaces(2.0, twin_share=2.54)[0] is True
     assert checks.check_bright_surfaces(3.0, twin_share=2.54)[0] is False
+
+
+def test_bright_surface_share_excludes_masked_pixels_over_the_whole_frame():
+    cyan = np.full((10, 10, 3), (180, 230, 240), np.uint8)
+    exclude = np.zeros((10, 10), bool)
+    exclude[:9] = True
+    assert checks.bright_surface_share(cyan) == 100.0
+    assert checks.bright_surface_share(cyan, exclude=exclude) == 10.0, "of the frame, not the rest"
+
+
+def test_bright_surfaces_compare_like_for_like():
+    """Outside share against the 1% bar, whole frame against the twin's whole frame."""
+    assert checks.check_bright_surfaces(3.0, outside_share=0.5)[0] is True
+    assert checks.check_bright_surfaces(3.0, outside_share=1.5)[0] is False
+    assert checks.check_bright_surfaces(2.0, twin_share=2.54, outside_share=1.5)[0] is True
+    # A share outside the windows never gets compared to the twin's whole frame.
+    assert checks.check_bright_surfaces(3.0, twin_share=2.54, outside_share=1.5)[0] is False

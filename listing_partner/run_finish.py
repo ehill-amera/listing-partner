@@ -79,21 +79,25 @@ def _settle_white_balance(
 ) -> dict:
     """Bright-surface fallback (contract 02, final round part three).
 
-    An interior photo whose bright cyan/blue share reads over the limit
-    re-decodes every frame at the camera's as-shot white balance and
+    An interior photo whose bright cyan/blue share outside its windows (masks
+    grown by the feather width; views have their own handling) reads over the
+    limit re-decodes every frame at the camera's as-shot white balance and
     ships that, labeled. The MLS twin never steers this: a new listing
     has no twin, so the pipeline falls back on the 1% bar alone and the
     post-hoc check judges against the twin.
     """
     wb = state["wb"]
+    excluded = None if window_mask is None else finish.grown_window_mask(window_mask)
+    outside = checks.bright_surface_share(state["balanced"], exclude=excluded)
     record["bright_share"] = round(checks.bright_surface_share(state["balanced"]), 2)
+    record["bright_share_outside"] = round(outside, 2)
     if (
         wb["multipliers"] is not None
         and wb["scene"] == "interior"
-        and record["bright_share"] > checks.BRIGHT_SURFACE_LIMIT_PCT
+        and outside > checks.BRIGHT_SURFACE_LIMIT_PCT
     ):
         record["wb_as_shot"] = (
-            f"bright cyan/blue {record['bright_share']:.2f}% of the frame "
+            f"bright cyan/blue {outside:.2f}% of the frame outside the windows "
             f"over the {checks.BRIGHT_SURFACE_LIMIT_PCT:.0f}% limit"
         )
         del state
@@ -374,6 +378,9 @@ def finish_tail(
     record["clip_after_n"] = clip_after_n
     clip_after_raw = clip_after_n / max(1, window_pixels)
     record["clip_after"] = round(clip_after_raw, 4)
+    record["bright_outside_file"] = checks.bright_surface_share(
+        reread_rgb, exclude=_crop(finish.grown_window_mask(union))
+    )
     # Verticals on the finished file itself: the merge-time residual
     # below is the before story, this is what shipped.
     vertical_final = geometry.dominant_vertical_angle(cv2.cvtColor(reread_rgb, cv2.COLOR_RGB2GRAY))
@@ -838,7 +845,9 @@ One scale both sides (before from the balanced crop, after from the
 saved file). Window pulls are off, so both sides read the balanced
 merge and no pull changes either.</p>
 <p>Unit Meta spend ${top["unit_spend_usd"]:.4f} of $2.00.</p>
-<p>Camera as-shot white balance (fallback) on {top.get("wb_as_shot", "?")} photo(s).</p>
+<p>Camera as-shot white balance (fallback) on {top.get("wb_as_shot", "?")} photo(s).
+The bright-surface check counts pixels outside the confirmed window masks, with the masks
+grown by the cool trigger's feather width.</p>
 {pulled_line}
 {ratio_line}
 {commit_line}
@@ -1050,7 +1059,9 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
             }
         else:
             try:
-                record["bright"] = measure.bright_surface_stats(finished_path, mls_path)
+                record["bright"] = measure.bright_surface_stats(
+                    finished_path, mls_path, record.get("bright_outside_file")
+                )
             except ValueError as exc:
                 record["bright"] = {
                     "bright_share": None,

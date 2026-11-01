@@ -67,6 +67,10 @@ The tone-dependent color steps (blue cap, daylight-spill guard and any other ste
 - Known limits, accepted by Erik for this unit and listed in the report and later the README: no deghost step (016 reads above the ghosting limit and is flagged), window views stay as merged, masks are not glass-only, lit-wall noise is not measured. These are not ship blockers.
 - Ship rule for the next review: SHIP if the hackathon rules, hygiene, cap, honesty rules, the ramp test, criterion 11 and the check all hold, and the finished photos at full resolution show no box, seam, band or patch introduced by the finish. Anything else the reviewer finds goes to Known limits for Erik to see, not another round.
 
+### Bright-surface check outside the windows (navigator decision, Nov 1, after the replay of cecc70d)
+
+The bright-surface check counts only pixels outside the confirmed window masks, with the masks grown by the cool trigger's feather width, because window views have their own handling. A photo falls back to the camera's white balance only when the share outside the windows exceeds the rule. Where this differs from part two and part three below, this wins.
+
 ### Final round, part three (navigator, Oct 31, after part two measured 12 of 12 interiors too yellow)
 
 Part two's cap stopped the cyan but left every interior pinned at the cap and far too warm (b* +22 to +44 against Erik's +5 to +13). The root cause is order: white balance was applied to the 8-bit merged JPEG, after highlights had already clipped, so a strong correction tints clipped areas and a weak one leaves the room yellow. Fix the order, not the strength:

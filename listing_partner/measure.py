@@ -107,12 +107,14 @@ def floor_cast_stats(finished_path: Path, mls_path: Path | None, zone_frac: tupl
     }
 
 
-def bright_surface_stats(finished_path: Path, mls_path: Path | None) -> dict:
+def bright_surface_stats(
+    finished_path: Path, mls_path: Path | None, outside_share: float | None = None
+) -> dict:
     """Criterion bright-surface numbers for one shot, from shipped files.
 
-    The finished photo's bright cyan/blue share against the 1% bar or
-    the MLS twin's share, whichever is higher. Post-hoc only: the
-    pipeline never reads the twin while processing.
+    outside_share is the shipped file's share outside the windows, read where the
+    masks are still in hand; see checks.check_bright_surfaces for the verdict.
+    Post-hoc only: the pipeline never reads the twin while processing.
     """
     fin_bgr = cv2.imread(str(finished_path))
     if fin_bgr is None:
@@ -125,9 +127,10 @@ def bright_surface_stats(finished_path: Path, mls_path: Path | None) -> dict:
         if mls_bgr is None:
             raise ValueError(f"cannot read MLS photo {mls_path}")
         twin_share = checks.bright_surface_share(cv2.cvtColor(mls_bgr, cv2.COLOR_BGR2RGB))
-    ok, reason = checks.check_bright_surfaces(share, twin_share)
+    ok, reason = checks.check_bright_surfaces(share, twin_share, outside_share)
     return {
         "bright_share": round(share, 2),
+        "bright_share_outside": None if outside_share is None else round(outside_share, 2),
         "mls_bright_share": None if twin_share is None else round(twin_share, 2),
         "bright_ok": ok,
         "bright_reason": reason,

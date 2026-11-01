@@ -184,11 +184,13 @@ def check_pull_gain(gain: float) -> tuple[bool, str]:
 BRIGHT_SURFACE_LIMIT_PCT = 1.0
 
 
-def bright_surface_share(rgb) -> float:
+def bright_surface_share(rgb, exclude=None) -> float:
     """Share (%) of the frame reading bright cyan or blue.
 
     Bright means mean above 170; cyan or blue means B at least G, G
     minus R at least 15, B minus R at least 30. Takes an RGB array.
+    Pixels in the exclude mask are not counted; the share stays a share of
+    the whole frame, because that is what the 1% rule is written against.
     """
     import numpy as np
 
@@ -196,17 +198,28 @@ def bright_surface_share(rgb) -> float:
     mean = a.mean(axis=2)
     r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
     bad = (mean > 170) & (b >= g) & (g - r >= 15) & (b - r >= 30)
+    if exclude is not None:
+        bad = bad & ~exclude
     return float(bad.mean() * 100.0)
 
 
-def check_bright_surfaces(share: float, twin_share: float | None = None) -> tuple[bool, str]:
-    """Bright surfaces stay neutral: the cyan/blue share stays at or below
-    1% of the frame, or at or below the MLS twin's share, whichever is
-    higher."""
-    limit = max(BRIGHT_SURFACE_LIMIT_PCT, twin_share or 0.0)
-    ok = share <= limit
-    twin = f", twin {twin_share:.2f}%" if twin_share is not None else ""
-    return ok, f"bright cyan/blue {share:.2f}% of frame (limit {limit:.2f}%{twin})"
+def check_bright_surfaces(
+    share: float, twin_share: float | None = None, outside_share: float | None = None
+) -> tuple[bool, str]:
+    """Bright surfaces stay neutral, each comparison like for like.
+
+    The share outside the windows stays at or below 1% of the frame, or the
+    whole-frame share stays at or below the MLS twin's whole-frame share. The twin
+    has no window masks, so its share can only be compared to a whole frame.
+    Without an outside share, the whole frame is what counts for both.
+    """
+    outside = share if outside_share is None else outside_share
+    ok = outside <= BRIGHT_SURFACE_LIMIT_PCT or (twin_share is not None and share <= twin_share)
+    twin = f", or twin {twin_share:.2f}% whole frame" if twin_share is not None else ""
+    return ok, (
+        f"bright cyan/blue {outside:.2f}% outside windows, {share:.2f}% whole frame "
+        f"(limit {BRIGHT_SURFACE_LIMIT_PCT:.2f}% outside windows{twin})"
+    )
 
 
 def check_spend(unit_spend_usd: float) -> tuple[bool, str]:

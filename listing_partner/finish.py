@@ -146,6 +146,16 @@ def _mask_feather(window_mask: np.ndarray) -> np.ndarray:
     return _smoothstep(distance, 0.0, ROLL_COOL_FEATHER_FRAC * max(window_mask.shape))
 
 
+def grown_window_mask(window_mask: np.ndarray) -> np.ndarray:
+    """The window masks grown outward by the trigger's feather width.
+
+    Window views have their own handling, so the bright-surface check counts only
+    the pixels outside this.
+    """
+    distance = cv2.distanceTransform((~window_mask).astype(np.uint8), cv2.DIST_L2, 5)
+    return distance <= ROLL_COOL_FEATHER_FRAC * max(window_mask.shape)
+
+
 def _cool_view_gate(work: np.ndarray, gain: float, window_mask: np.ndarray) -> np.ndarray:
     """The cool trigger: one strength for the photo's views, feathered, zero outside."""
     out = work[window_mask] * gain

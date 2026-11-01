@@ -123,6 +123,24 @@ def test_finish_tail_reads_clip_on_one_scale(tmp_path):
     assert record["clip_after_n"] == expected_after, "after reads the saved file"
 
 
+def test_finish_tail_reads_the_shipped_share_outside_the_windows(tmp_path):
+    """Read back from the saved file, with the masks cropped the way the file is."""
+    from listing_partner import run_finish as rf
+
+    state, _ = _tail_state()
+    state["balanced"][20:60, 20:60] = (180, 230, 240)
+    union = np.zeros((100, 100), bool)
+    union[20:60, 20:60] = True
+    base = {"straight_before": 200.0, "straight_after": 210.0, "vertical_residual": 0.0}
+    record = {"index": 1, "name": "001", "notes": [], **base}
+    dirs = _tail_dirs(tmp_path)
+    rf.finish_tail(record, state, dirs, {0: union}, union)
+    assert record["bright_outside_file"] <= 1.0
+    other = {"index": 2, "name": "002", "notes": [], **base}
+    rf.finish_tail(other, state, dirs, {}, np.zeros((100, 100), bool))
+    assert other["bright_outside_file"] > 10.0, "with no window the panel counts"
+
+
 def test_finish_tail_saves_rejected_thumbs(tmp_path):
     """Every rejected candidate gets its mask saved and a review thumb."""
     from listing_partner import run_finish as rf
