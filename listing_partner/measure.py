@@ -134,6 +134,20 @@ def bright_surface_stats(finished_path: Path, mls_path: Path | None) -> dict:
     }
 
 
+def flat_white_stats(finished_path: Path, mls_path: Path | None) -> dict:
+    """Flat white share of the finished photo and its MLS twin, from shipped files."""
+    fin_bgr = cv2.imread(str(finished_path))
+    if fin_bgr is None:
+        raise ValueError(f"cannot read finished photo {finished_path}")
+    twin_share = None
+    if mls_path is not None:
+        mls_bgr = cv2.imread(str(mls_path))
+        if mls_bgr is None:
+            raise ValueError(f"cannot read MLS photo {mls_path}")
+        twin_share = round(checks.flat_white_share(mls_bgr), 1)
+    return {"flat_white": round(checks.flat_white_share(fin_bgr), 1), "mls_flat_white": twin_share}
+
+
 def look_stats(finished_path: Path, mls_path: Path) -> dict:
     """Criterion-11 numbers for one shot, from the two shipped files."""
     fin_bgr = cv2.imread(str(finished_path))

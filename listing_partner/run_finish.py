@@ -623,6 +623,18 @@ def _bright_cell(bright: dict | None) -> str:
     return f"<p>{verdict} {bright.get('bright_reason', '')}</p>"
 
 
+def _flat_white_cell(flat: dict | None) -> str:
+    """Flat white share next to the MLS twin's, or why there is none."""
+    if not flat or flat.get("flat_white") is None:
+        return "<p>flat white share: not measured</p>"
+    twin = flat.get("mls_flat_white")
+    twin_text = "no MLS twin" if twin is None else f"MLS twin {twin:.1f}%"
+    return (
+        f"<p>flat white share {flat['flat_white']:.1f}% of the frame, {twin_text} "
+        "(channel spread 4 or less, mean 225 or more)</p>"
+    )
+
+
 def _floor_cell(floor: dict | None) -> str:
     """Floor-cast numbers with their verdict, or why there is none."""
     if not floor:
@@ -684,6 +696,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
         floor_cell = _floor_cell(entry.get("floor"))
         wb_cell = _wb_cell(entry)
         bright_cell = _bright_cell(entry.get("bright"))
+        flat_cell = _flat_white_cell(entry.get("flat_white"))
         trim = entry.get("edge_trim") or {}
         trim_cell = (
             f"<p>edge trim (px): top {trim.get('top', 0)}, bottom {trim.get('bottom', 0)}, "
@@ -708,7 +721,7 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f"{entry.get('verticals', '')}, {entry.get('vignetting', '')}, "
             f"ghosting {entry.get('ghosting', '')} "
             f"({entry.get('deghost', '')}){_lens_note(entry)}</p>"
-            f"{clip_cell}{look_cell}{floor_cell}{wb_cell}{bright_cell}{trim_cell}"
+            f"{clip_cell}{look_cell}{floor_cell}{wb_cell}{bright_cell}{flat_cell}{trim_cell}"
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
@@ -956,6 +969,11 @@ def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_di
                 "floor_ok": False,
                 "floor_reason": f"not measured: {exc}",
             }
+        try:
+            record["flat_white"] = measure.flat_white_stats(finished_path, mls_path)
+        except ValueError as exc:
+            record["flat_white"] = None
+            record.setdefault("notes", []).append(f"flat white not measured: {exc}")
         # The bright-surface check runs per interior photo (contract 02,
         # final round part two): on exteriors real sky trips the measure,
         # so those rows report not measured, never pass or fail.

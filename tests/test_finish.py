@@ -20,8 +20,7 @@ def _room_cast():
 
 
 def test_tone_changes_no_hue_anywhere():
-    """Every tone step below the highlight roll-off is a luminance scale
-    shared by all channels.
+    """Every tone step is one scale shared by all channels.
 
     No pixel's chromaticity may move: white balance runs at raw decode,
     so input chromaticity matches the output on every unclipped, unrolled
@@ -39,14 +38,11 @@ def test_tone_changes_no_hue_anywhere():
     out, _ = finish.balance_exposure(img)
     after = out.astype(float)
     pred = before
-    # Below the highlight roll-off only: the part-two roll-off moves
-    # bright pixels toward neutral by contract, so rolled pixels are
-    # out of scope here (the ramp test above covers the boundary's
-    # smoothness). Rolled pixels leave the shoulder at or above 235,
-    # so below-235 output pixels provably never rolled.
-    keep = (before.max(axis=2) < 250) & (after.max(axis=2) < 250) & (after.max(axis=2) < 235)
-    assert keep.sum() > 1000, "the comparison needs unclipped, unrolled pixels"
-    assert (after.max(axis=2) >= 235).sum() > 1000, "the roll-off must fire on the spill"
+    # Every pixel here is under both roll-off triggers: warm or neutral,
+    # and far from clipping in the merge. Only channel clipping is excluded.
+    keep = after.max(axis=2) < 250
+    assert keep.mean() > 0.99, "the comparison needs unclipped pixels"
+    assert (after.max(axis=2) > finish.SHOULDER_KNEE).sum() > 1000, "the shoulder must act"
     for channel in (0, 2):
         actual = after[:, :, channel][keep] / np.maximum(after[:, :, 1][keep], 1.0)
         expected = pred[:, :, channel][keep] / np.maximum(pred[:, :, 1][keep], 1.0)
@@ -159,7 +155,7 @@ def test_one_paint_keeps_one_color_across_brightness():
     through the finish; its chromaticity (R/G and B/G) stays constant
     across the ramp. The pre-final-round steps (blue cap,
     daylight-spill guard) moved chromaticity by brightness and fail
-    this (measured on bb5df2b: R/G drift 0.045, B/G drift 0.067).
+    this (measured on bb5df2b: R/G drift 0.062, B/G drift 0.072).
     Lab a*/b* are not asserted: at constant chromaticity Lab chroma still
     grows with luminance, so a warm paint's b* drifts with no hue shift.
     """
@@ -183,6 +179,109 @@ def test_one_paint_keeps_one_color_across_brightness():
     drift_bg = float(bands_bg.max() - bands_bg.min())
     assert drift_rg <= 0.02, f"R/G drifts {drift_rg:.3f} across one paint's ramp (limit 0.02)"
     assert drift_bg <= 0.02, f"B/G drifts {drift_bg:.3f} across one paint's ramp (limit 0.02)"
+
+
+def _wall_ramp_far_from_clipping():
+    """One wall paint under a smooth brightness ramp, far from merge clipping.
+
+    Reviewer's unit-a 005 reading: the merge held RGB 89, 76, 65 where the
+    finished wall read flat white. A dim majority anchors the gain high, so
+    the wall's brightest rows pass the old roll-off's float trigger with
+    every merge channel still far under clipping.
+    """
+    paint = np.array([89.0, 76.0, 65.0])  # the 005 wall, read from the merge
+    ramp = np.linspace(0.55, 1.6, 400)[:, None, None]
+    wall = np.repeat(np.clip(paint * ramp, 0, 255).astype(np.uint8), 20, axis=1)
+    room = np.full((400, 60, 3), (58, 50, 43), np.uint8)
+    return np.hstack([wall, room])
+
+
+def test_one_wall_keeps_one_color_through_the_highlight_range():
+    """A wall far from merge clipping keeps its color however bright it lands.
+
+    Reviewer finding 2 on 970ce8f: the old ramp test stopped under the
+    roll-off, and this one crosses it. Chromaticity must stay bounded from
+    one row to the next, so the finish paints no edge on the wall, and across
+    the whole ramp, so the wall reads one color.
+    """
+    img = _wall_ramp_far_from_clipping()
+    assert img[:, :20].max() < 150, "the wall must be far from clipping in the merge"
+    out, report = finish.balance_exposure(img)
+    # 270 is where 970ce8f's float trigger went fully neutral.
+    assert img[:, :20].max() * report["auto_gain"] > 270.0, (
+        "the gain must carry the wall past where the old trigger went fully neutral"
+    )
+    f = out[:, :20].astype(float).mean(axis=1)
+    rg = f[:, 0] / np.maximum(f[:, 1], 1.0)
+    bg = f[:, 2] / np.maximum(f[:, 1], 1.0)
+    # Eight-row bands: 8-bit rounding chatters single rows by a level, while
+    # a real color step moves whole bands.
+    bands_rg = rg[:400].reshape(50, 8).mean(axis=1)
+    bands_bg = bg[:400].reshape(50, 8).mean(axis=1)
+    step = max(np.abs(np.diff(bands_rg)).max(), np.abs(np.diff(bands_bg)).max())
+    assert step <= 0.01, f"wall color steps {step:.3f} between neighboring bands (limit 0.01)"
+    drift_rg = float(bands_rg.max() - bands_rg.min())
+    drift_bg = float(bands_bg.max() - bands_bg.min())
+    assert drift_rg <= 0.03, f"wall R/G drifts {drift_rg:.3f} across its ramp (limit 0.03)"
+    assert drift_bg <= 0.03, f"wall B/G drifts {drift_bg:.3f} across its ramp (limit 0.03)"
+
+
+def _room_with_window_view():
+    """Warm dim room with a cool window view at wall-level merge brightness."""
+    img = np.full((200, 200, 3), (60, 52, 45), np.uint8)
+    img[40:120, 40:120] = (70, 105, 135)  # view, far from clipping in the merge
+    return img
+
+
+def test_cool_window_view_does_not_read_cyan():
+    """The roll-off's cool trigger, in isolation from the clip trigger."""
+    img = _room_with_window_view()
+    assert img.max() < finish.ROLL_CLIP_START, "this case must not reach the clip trigger"
+    out, _ = finish.balance_exposure(img, scene="interior")
+    view = out[40:120, 40:120]
+    assert view.mean() > 170, "the view must land bright enough for the check to apply"
+    assert checks.bright_surface_share(out) == 0.0
+    spread = float((view.astype(float).max(axis=2) - view.astype(float).min(axis=2)).mean())
+    assert spread <= 15.0, f"window view reads tinted, mean channel spread {spread:.0f}"
+
+
+def test_exterior_sky_keeps_its_blue():
+    """The cool trigger is interior only: real sky is not a color error."""
+    img = _room_with_window_view()
+    out, _ = finish.balance_exposure(img, scene="exterior", sky=0.1)
+    view = out[40:120, 40:120].astype(float)
+    assert float((view[:, :, 2] - view[:, :, 0]).mean()) > 40.0
+
+
+def test_clip_trigger_reads_the_merge_at_any_hue():
+    """A warm pixel clipped in the merge rolls neutral; the same hue a little
+    dimmer in the merge keeps its color under the same gain."""
+    img = np.full((200, 300, 3), (70, 60, 52), np.uint8)
+    img[20:80, 20:80] = (255, 215, 170)  # clipped in the merge
+    img[120:180, 20:80] = (150, 126, 100)  # same hue family, far from clipping
+    out, _ = finish.balance_exposure(img, scene="interior")
+    clipped = out[20:80, 20:80].astype(float).mean(axis=(0, 1))
+    assert clipped.max() - clipped.min() <= 3.0, f"clipped patch reads {clipped}"
+    held = out[120:180, 20:80].astype(float).mean(axis=(0, 1))
+    assert held[0] / held[2] > 1.3, f"unclipped warm patch lost its color: {held}"
+
+
+def test_wall_detail_survives_the_shoulder():
+    """A darker band on a bright wall keeps its contrast and the wall its color.
+
+    Measured on this fixture: 970ce8f reads the wall neutral (242, 242, 242)
+    with the band 4.0 levels under it; the rebuilt shoulder reads about
+    (245, 210, 179) with the band 5.1 levels under.
+    """
+    img = np.full((200, 200, 3), (58, 50, 43), np.uint8)
+    img[60:140, 60:140] = (130, 111, 95)
+    img[95:105, 60:140] = (100, 85, 73)
+    out, _ = finish.balance_exposure(img)
+    wall = out[70:90, 70:130].astype(float).mean(axis=(0, 1))
+    band = out[97:103, 70:130].astype(float).mean(axis=(0, 1))
+    gap = float(wall.mean() - band.mean())
+    assert gap >= 4.5, f"the band reads only {gap:.1f} levels under the wall"
+    assert wall[0] - wall[2] >= 40.0, f"the bright wall lost its color: {wall}"
 
 
 def _warm_room_with_hot_patches():
@@ -285,12 +384,14 @@ def test_shared_look_constants_stay_frozen():
     assert finish.EXTERIOR_MAX_MEDIAN == 144.0
     assert finish.SHADOW_LIFT == 0.4
     assert finish.LOOK_GAMMA == 0.9
-    assert finish.SHOULDER_SLOPE == 0.07
+    assert (finish.SHOULDER_KNEE, finish.SHOULDER_CEILING) == (190.0, 265.0)
     assert (finish.AUTO_GAIN_LO, finish.AUTO_GAIN_HI) == (0.4, 3.5)
     assert finish.WB_INTERIOR_TINT_R == 1.08
     assert finish.WB_INTERIOR_TINT_B == 0.94
     assert finish.WB_EXTERIOR_STRENGTH == 0.5
-    assert (finish.ROLL_START, finish.ROLL_FULL) == (250.0, 270.0)
+    assert (finish.ROLL_CLIP_START, finish.ROLL_CLIP_FULL) == (235.0, 252.0)
+    assert (finish.ROLL_COOL_PEAK_START, finish.ROLL_COOL_PEAK_FULL) == (200.0, 280.0)
+    assert (finish.ROLL_COOL_START, finish.ROLL_COOL_FULL) == (0.05, 0.15)
     # No WOOD_* constants: the zone wood guard and its tuning are removed
     # (finding 2, criterion 14: no spatial box in any color correction).
     # No WB_BLUE_CAP_* or WB_NEUTRAL_SAT constants: the blue cap, the

@@ -8,9 +8,9 @@ three channels by the same per-pixel factor derived from luminance, so
 hue and saturation never change with brightness. No regional or
 positional color step exists anywhere (contract 02, final round Oct 31).
 The one brightness-dependent color step allowed (final round part two) is
-a single smooth highlight roll-off toward neutral white: pixels
-approaching clipping blend smoothly toward neutral, the way a camera
-does, so warm bright and blown surfaces read neutral.
+a single smooth highlight roll-off toward neutral: pixels clipped in the
+merge, and cool bright pixels in interiors, blend smoothly toward neutral.
+Warm surfaces far from clipping never move.
 Denoise is edge-preserving bilateral on full-res luminance plus light
 chroma smoothing, applied last.
 """
@@ -48,12 +48,16 @@ EXTERIOR_MIN_MEDIAN = 108.0
 EXTERIOR_MAX_MEDIAN = 144.0
 #: Shadow lift through a blurred luminance mask, plus a gentle gamma for
 #: the low-contrast HDR look. The automatic gain runs after the lift so
-#: the class target is the final anchor. The highlight shoulder
-#: compresses but never hides real clipping: a gain-scaled blown window
-#: still reads at or above 250.
+#: the class target is the final anchor. The highlight shoulder acts on
+#: each pixel's peak channel and scales all three channels by one factor,
+#: so no channel clips alone and a wall keeps its chromaticity: linear up
+#: to the knee, then a smooth approach to the ceiling (rebuilt after the
+#: review of 970ce8f, whose near-flat luminance shoulder wiped wall detail).
+#: A gain-scaled blown window still reads at or above 250.
 SHADOW_LIFT = 0.4
 LOOK_GAMMA = 0.9
-SHOULDER_SLOPE = 0.07
+SHOULDER_KNEE = 190.0
+SHOULDER_CEILING = 265.0
 AUTO_GAIN_LO = 0.4
 AUTO_GAIN_HI = 3.5
 #: White balance at raw decode (contract 02, final round part three).
@@ -65,16 +69,25 @@ AUTO_GAIN_HI = 3.5
 WB_INTERIOR_TINT_R = 1.08
 WB_INTERIOR_TINT_B = 0.94
 WB_EXTERIOR_STRENGTH = 0.5
-#: Highlight roll-off toward neutral white (contract 02, final round
-#: part two): the one brightness-dependent color step allowed. A pixel
-#: whose brightest float channel passes ROLL_START blends smoothly
-#: (smoothstep) toward neutral gray of the same luminance, reaching
-#: full neutral at ROLL_FULL. Below the start nothing moves, so the
-#: ramp test and the no-hue test never see it; far above, blown pixels
-#: clip to white instead of saturated cyan. Wide enough to never bend
-#: into a band or edge.
-ROLL_START = 250.0
-ROLL_FULL = 270.0
+#: Highlight roll-off toward neutral (contract 02, final round part two;
+#: rebuilt after the review of 970ce8f). The old trigger read brightness
+#: after the tone and gain steps, and at gains of 2.2 to 3.5 ordinary walls
+#: crossed it: it painted real patches and bands on them. Now two triggers
+#: only, blended smoothly, and neither can fire on a warm surface far from
+#: clipping:
+#: - Clipped in the merge: any hue, read from the merge's own peak channel,
+#:   before tone and gain.
+#: - Cool and bright, interiors only: window views under indoor white
+#:   balance, which reach the same merge levels as walls (measured peak 46
+#:   to 160 on unit-a) and would read cyan. Coolness is (B - R) / peak, the
+#:   brightness is the peak after gain. A truly blue wall this bright rolls
+#:   too: a known limit. Exterior sky is real and keeps its blue.
+ROLL_CLIP_START = 235.0
+ROLL_CLIP_FULL = 252.0
+ROLL_COOL_PEAK_START = 200.0
+ROLL_COOL_PEAK_FULL = 280.0
+ROLL_COOL_START = 0.05
+ROLL_COOL_FULL = 0.15
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -112,6 +125,65 @@ def target_median(img: np.ndarray, scene: str | None = None, sky: float | None =
     return INTERIOR_TARGET_MEDIAN
 
 
+def _smoothstep(value: np.ndarray, start: float, full: float) -> np.ndarray:
+    ramp = np.clip((value - start) / (full - start), 0.0, 1.0)
+    return ramp * ramp * (3.0 - 2.0 * ramp)
+
+
+def _highlight_tail(
+    work: np.ndarray, clip_gate: np.ndarray, gain: float, roll_cool: bool
+) -> np.ndarray:
+    """Gain, the roll-off toward neutral, then the shoulder. Returns float RGB."""
+    out = work * gain
+    peak = np.maximum(out.max(axis=2), 1e-3)
+    blend = clip_gate
+    if roll_cool:
+        coolness = (out[:, :, 2] - out[:, :, 0]) / peak
+        cool_gate = _smoothstep(coolness, ROLL_COOL_START, ROLL_COOL_FULL) * _smoothstep(
+            peak, ROLL_COOL_PEAK_START, ROLL_COOL_PEAK_FULL
+        )
+        blend = 1.0 - (1.0 - clip_gate) * (1.0 - cool_gate)
+    lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
+    out = out + blend[:, :, None] * (lum[:, :, None] - out)
+    # One factor per pixel from its peak channel: below the knee nothing
+    # moves, above it the curve meets the knee with slope 1 and flattens
+    # gradually, so no edge and no channel clipping alone.
+    peak = np.maximum(out.max(axis=2), 1e-3)
+    span = SHOULDER_CEILING - SHOULDER_KNEE
+    excess = np.maximum(peak - SHOULDER_KNEE, 0.0) / span
+    mapped = SHOULDER_KNEE + span * excess / (1.0 + excess)
+    return out * (np.where(peak > SHOULDER_KNEE, mapped, peak) / peak)[:, :, None]
+
+
+def _solve_gain(
+    work: np.ndarray,
+    clip_gate: np.ndarray,
+    roll_cool: bool,
+    target: float,
+    anchor_mask: np.ndarray | None,
+) -> float:
+    """The gain that lands the anchor pixels' median luminance on target.
+
+    The shoulder moves bright medians, so the anchor reads after it. Solved
+    on a regular sample of the frame; the gain limits still apply.
+    """
+    step = max(1, max(work.shape[:2]) // 1000)
+    sample = work[::step, ::step]
+    gate = clip_gate[::step, ::step]
+    keep = None if anchor_mask is None else anchor_mask[::step, ::step]
+    low, high = AUTO_GAIN_LO, AUTO_GAIN_HI
+    for _ in range(14):
+        gain = (low + high) / 2.0
+        out = np.clip(_highlight_tail(sample, gate, gain, roll_cool), 0.0, 255.0)
+        lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
+        median = float(np.median(lum if keep is None else lum[keep]))
+        if median < target:
+            low = gain
+        else:
+            high = gain
+    return (low + high) / 2.0
+
+
 def _apply_luminance_scale(work: np.ndarray, scale: np.ndarray) -> None:
     """Multiply every channel by one per-pixel factor, in place.
 
@@ -135,7 +207,7 @@ def balance_exposure(
     through a blurred luminance mask, a gentle gamma, one global exposure
     gain toward the shared class target, then a soft highlight shoulder),
     plus the single allowed brightness-dependent color step: a smooth
-    highlight roll-off toward neutral white. White balance already
+    highlight roll-off toward neutral (see the ROLL constants). White balance already
     happened at raw decode; nothing here votes on color. Pixels under
     protect keep their exact values. No MLS twin is read. No regional or
     positional color step exists (contract 02 section C and final round,
@@ -162,41 +234,14 @@ def balance_exposure(
         _apply_luminance_scale(work, np.power(np.clip(lum / 255.0, 0.0, 1.0), LOOK_GAMMA - 1.0))
     # The gain runs after the tone work so the class target is the final
     # anchor: per-photo automatic exposure, still with no twin read.
-    post = cv2.cvtColor(np.clip(work, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    # The clip gate reads the merge itself, before any tone step or gain.
     target = target_median(img, scene=scene, sky=sky)
-    anchor = post[anchor_mask] if anchor_mask is not None else post.ravel()
-    gain = min(AUTO_GAIN_HI, max(AUTO_GAIN_LO, target / max(1.0, float(np.median(anchor)))))
-    work *= gain
+    clip_gate = _smoothstep(img.max(axis=2).astype(np.float32), ROLL_CLIP_START, ROLL_CLIP_FULL)
+    roll_cool = scene == "interior"
+    gain = _solve_gain(work, clip_gate, roll_cool, target, anchor_mask)
     report["auto_gain"] = round(gain, 4)
     report["scene"] = scene
-    # Highlight roll-off toward neutral white: the one
-    # brightness-dependent color step allowed (contract 02, final round
-    # part two). A pixel whose brightest float channel approaches
-    # clipping blends smoothly toward neutral gray of the same
-    # luminance, so warm bright surfaces and blown bulbs read neutral
-    # instead of cyan or blue. The smoothstep ramp is the whole curve:
-    # nothing moves below ROLL_START, full neutral at ROLL_FULL, no
-    # band or edge anywhere. Luminance is untouched, so the shoulder
-    # below still compresses exactly what it did.
-    peak = work.max(axis=2).astype(np.float32)
-    blend = np.clip((peak - ROLL_START) / (ROLL_FULL - ROLL_START), 0.0, 1.0)
-    if blend.any():
-        smooth = blend * blend * (3.0 - 2.0 * blend)
-        lum = 0.299 * work[:, :, 0] + 0.587 * work[:, :, 1] + 0.114 * work[:, :, 2]
-        work = (1.0 - smooth[:, :, None]) * work + smooth[:, :, None] * lum[:, :, None]
-    # Highlight shoulder runs last so no earlier gain can re-blow whites.
-    # Luminance-only like every tone step: over-bright luminance
-    # compresses toward 235 while every pixel keeps its chromaticity.
-    # Luminance reads the unclipped float work: the uint8 frame hides
-    # real blowout in the hundreds, and a scale built from it would
-    # leave those pixels blown.
-    lum = (0.299 * work[:, :, 0] + 0.587 * work[:, :, 1] + 0.114 * work[:, :, 2]).astype(np.float32)
-    over = lum > 235.0
-    if over.any():
-        compressed = 235.0 + (lum - 235.0) * SHOULDER_SLOPE
-        scale = np.ones_like(lum)
-        scale[over] = compressed[over] / np.maximum(lum[over], 1.0)
-        _apply_luminance_scale(work, scale)
+    work = _highlight_tail(work, clip_gate, gain, roll_cool)
     out = np.clip(work, 0, 255).astype(np.uint8)
     if protect is not None:
         out[protect] = img[protect]

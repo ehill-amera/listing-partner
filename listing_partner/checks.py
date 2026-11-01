@@ -13,6 +13,19 @@ EDGE_TOLERANCE = 0.10
 CLIP_LEVEL = 250
 
 
+def flat_white_share(rgb) -> float:
+    """Percent of the frame reading flat neutral white.
+
+    Channel spread 4 or less and mean 225 or more. Real white trim and blown
+    windows count too, so this shows scale, it does not isolate a defect.
+    """
+    import numpy as np
+
+    values = np.asarray(rgb).astype(np.int16)
+    spread = values.max(axis=-1) - values.min(axis=-1)
+    return 100.0 * float(((spread <= 4) & (values.mean(axis=-1) >= 225)).mean())
+
+
 def clipped_fraction(rgb) -> float:
     """Fraction of pixels near-white on any channel at the clipped level.
 
