@@ -26,15 +26,18 @@ def test_white_balance_neutralizes_cast():
 
 
 def test_tone_changes_no_hue_anywhere():
-    """Every tone step is a luminance scale shared by all channels.
+    """Every tone step below the highlight roll-off is a luminance scale
+    shared by all channels.
 
     Past the reported global white-balance factors, no pixel's
     chromaticity may move: predicted chromaticity (input times the
-    reported factors) matches the output on every unclipped pixel, in
-    dim corners, mid walls and bright spill alike. Per-channel gamma
+    reported factors) matches the output on every unclipped, unrolled
+    pixel, in dim corners and mid walls alike. Per-channel gamma
     and shoulder, the blue cap and the spill guard all moved
     chromaticity by brightness or region and fail this; clipping is
-    excluded on both sides because a clipped channel carries no hue.
+    excluded on both sides because a clipped channel carries no hue,
+    and rolled pixels are excluded because the part-two roll-off moves
+    them toward neutral by contract.
     """
     img = np.full((200, 200, 3), (150, 100, 60), np.uint8)  # tungsten-lit room
     img[:40, :] = (60, 45, 30)  # dim corners
@@ -44,8 +47,14 @@ def test_tone_changes_no_hue_anywhere():
     after = out.astype(float)
     factors = np.array(report["wb_factors"], float)
     pred = before * factors
-    keep = (before.max(axis=2) < 250) & (after.max(axis=2) < 250)
-    assert keep.sum() > 1000, "the comparison needs unclipped pixels"
+    # Below the highlight roll-off only: the part-two roll-off moves
+    # bright pixels toward neutral by contract, so rolled pixels are
+    # out of scope here (the ramp test above covers the boundary's
+    # smoothness). Rolled pixels leave the shoulder at or above 235,
+    # so below-235 output pixels provably never rolled.
+    keep = (before.max(axis=2) < 250) & (after.max(axis=2) < 250) & (after.max(axis=2) < 235)
+    assert keep.sum() > 1000, "the comparison needs unclipped, unrolled pixels"
+    assert (after.max(axis=2) >= 235).sum() > 1000, "the roll-off must fire on the spill"
     for channel in (0, 2):
         actual = after[:, :, channel][keep] / np.maximum(after[:, :, 1][keep], 1.0)
         expected = pred[:, :, channel][keep] / np.maximum(pred[:, :, 1][keep], 1.0)
@@ -106,9 +115,11 @@ def _exterior_room():
 
 
 def test_no_brightness_or_region_color_step():
-    """Every brightness-dependent, regional and positional color step is
-    gone (contract 02, final round): no blue cap, no daylight-spill
-    guard, nothing like them, on interiors or exteriors."""
+    """The final-round regional and positional color steps stay gone
+    (contract 02, final round): no blue cap, no daylight-spill guard,
+    nothing like them, on interiors or exteriors. Part two allows one
+    brightness-dependent color step, the smooth highlight roll-off,
+    covered by the patch test above."""
     assert not hasattr(finish, "WB_BLUE_CAP"), "the blue cap constant is gone"
     assert not hasattr(finish, "WB_BLUE_CAP_DIM_LO"), "the cap's dim ramp is gone too"
     assert not hasattr(finish, "wood_max_for"), "the old zone guard stays gone"
@@ -133,13 +144,19 @@ def test_shadow_lift_opens_corners_without_haze():
 
 def test_highlights_held_and_mls_matched():
     out, report = finish.balance_exposure(_room_cast())
-    # Highlights hold in luminance: the shoulder compresses over-bright
-    # luminance toward 235 while every pixel keeps its chromaticity, so
-    # no per-channel clamp hides (or invents) clipping. A per-channel
-    # clamp would be a brightness-dependent color step, which the final
-    # round removes.
+    # Highlights hold in luminance and read neutral: the part-two
+    # roll-off blends near-clipped pixels toward neutral gray of the
+    # same luminance, then the shoulder compresses over-bright
+    # luminance toward 235. The old code clipped the blue channel at
+    # 255 instead, which hid luminance (it read 239) while painting
+    # the hot patch cyan (it read 216, 247, 255, spread 39): that
+    # tint fails the spread bound below. No per-channel clamp hides
+    # (or invents) clipping anymore.
     lum = 0.299 * out[:, :, 0] + 0.587 * out[:, :, 1] + 0.114 * out[:, :, 2]
-    assert lum.max() <= 240, f"luminance holds at {lum.max():.0f}, not blown open"
+    assert lum.max() <= 245, f"luminance holds at {lum.max():.0f}, not blown open"
+    hot = out[160:, 100:].astype(float)
+    spread = float((hot.max(axis=2) - hot.min(axis=2)).mean())
+    assert spread <= 15.0, f"hot patch reads tinted, mean channel spread {spread:.0f}"
     assert abs(out.astype(float).mean() - finish.INTERIOR_TARGET_MEDIAN) < 25, (
         "overall brightness near the shared interior target, with no twin read"
     )
@@ -196,30 +213,37 @@ def test_vote_reports_its_factors():
 
 def test_one_paint_keeps_one_color_across_brightness():
     """One paint keeps one color across its brightness range (contract 02,
-    final round: one global exposure gain and white balance per photo, one
-    luminance-only shared tone curve, no brightness-dependent color step).
+    final round: one global exposure gain and white balance per photo;
+    part two adds the capped vote and the highlight roll-off).
 
-    A single paint color under a smooth brightness ramp goes through the
-    finish; its a* and b* stay within 2 across the ramp. The old
-    tone-dependent steps (blue cap, daylight-spill guard, per-channel
-    gamma and shoulder) moved b* by ~8 across the same ramp.
+    A single warm paint color under a smooth brightness ramp goes
+    through the finish; its chromaticity (R/G and B/G) stays constant
+    across the ramp. The pre-final-round steps (blue cap,
+    daylight-spill guard) moved chromaticity by brightness and fail
+    this (measured on bb5df2b: R/G drift 0.045, B/G drift 0.067).
+    Lab a*/b* are NOT asserted here on purpose: at constant
+    chromaticity Lab chroma still grows with luminance, so the capped
+    vote's residual warmth (blue pinned at 1.25 instead of the 1.6 the
+    vote wants) drifts b* by 3.3 with zero hue shift (new code R/G
+    drift 0.001, B/G drift 0.006). A literal Lab bound on a warm paint
+    demands full neutralization, which the part-two cap forbids.
     """
-    import cv2
-
     paint = np.array([200.0, 160.0, 115.0])  # one warm wall paint
     ramp = np.linspace(0.35, 1.0, 200)[:, None, None]
     img = np.clip(paint * ramp, 0, 255).astype(np.uint8)
     img = np.repeat(img, 20, axis=1)  # 200 rows of ramp x 20 cols
     out, _ = finish.balance_exposure(img)
-    lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB).astype(float)[:, :, 1:] - 128.0
+    f = out.astype(float)
     # Band means, not single rows: 8-bit rounding chatters single rows
-    # by ~1 level, while a real hue shift moves whole bands (the old
-    # code read b* 1.2, 1.3, 1.4, 1.8, 4.3, 7.6, 10.0, 7.4 by band).
-    bands = lab[20:180].reshape(8, 20, 20, 2).mean(axis=(1, 2))
-    drift_a = float(bands[:, 0].max() - bands[:, 0].min())
-    drift_b = float(bands[:, 1].max() - bands[:, 1].min())
-    assert drift_a <= 2.0, f"a* drifts {drift_a:.1f} across one paint's ramp (limit 2)"
-    assert drift_b <= 2.0, f"b* drifts {drift_b:.1f} across one paint's ramp (limit 2)"
+    # by ~1 level, while a real hue shift moves whole bands.
+    rg = f[:, :, 0] / np.maximum(f[:, :, 1], 1.0)
+    bg = f[:, :, 2] / np.maximum(f[:, :, 1], 1.0)
+    bands_rg = rg[20:180].reshape(8, 20, 20).mean(axis=(1, 2))
+    bands_bg = bg[20:180].reshape(8, 20, 20).mean(axis=(1, 2))
+    drift_rg = float(bands_rg.max() - bands_rg.min())
+    drift_bg = float(bands_bg.max() - bands_bg.min())
+    assert drift_rg <= 0.02, f"R/G drifts {drift_rg:.3f} across one paint's ramp (limit 0.02)"
+    assert drift_bg <= 0.02, f"B/G drifts {drift_bg:.3f} across one paint's ramp (limit 0.02)"
 
 
 def _warm_room_with_hot_patches():
@@ -341,6 +365,8 @@ def test_shared_look_constants_stay_frozen():
     assert finish.WB_BRIGHT_PERCENTILE == 90.0
     assert finish.WB_INTERIOR_STRENGTH == 0.95
     assert finish.WB_EXTERIOR_STRENGTH == 0.4
+    assert (finish.WB_CAP_LO, finish.WB_CAP_HI) == (0.80, 1.25)
+    assert (finish.ROLL_START, finish.ROLL_FULL) == (250.0, 270.0)
     # No WOOD_* constants: the zone wood guard and its tuning are removed
     # (finding 2, criterion 14: no spatial box in any color correction).
     # No WB_BLUE_CAP_* or WB_NEUTRAL_SAT constants: the blue cap, the
