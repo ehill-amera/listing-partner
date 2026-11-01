@@ -155,6 +155,37 @@ def check_pull_gain(gain: float) -> tuple[bool, str]:
     return ok, f"view-to-room light ratio {gain:.2f} (bounds {PULL_GAIN_LO}-{PULL_GAIN_HI})"
 
 
+#: Bright-surface limit for the finish (contract 02, final round part
+#: two): at most this share of a finished interior frame may read cyan
+#: or blue, unless the photo's MLS twin reads higher.
+BRIGHT_SURFACE_LIMIT_PCT = 1.0
+
+
+def bright_surface_share(rgb) -> float:
+    """Share (%) of the frame reading bright cyan or blue.
+
+    Bright means mean above 170; cyan or blue means B at least G, G
+    minus R at least 15, B minus R at least 30. Takes an RGB array.
+    """
+    import numpy as np
+
+    a = np.asarray(rgb).astype(float)
+    mean = a.mean(axis=2)
+    r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    bad = (mean > 170) & (b >= g) & (g - r >= 15) & (b - r >= 30)
+    return float(bad.mean() * 100.0)
+
+
+def check_bright_surfaces(share: float, twin_share: float | None = None) -> tuple[bool, str]:
+    """Bright surfaces stay neutral: the cyan/blue share stays at or below
+    1% of the frame, or at or below the MLS twin's share, whichever is
+    higher."""
+    limit = max(BRIGHT_SURFACE_LIMIT_PCT, twin_share or 0.0)
+    ok = share <= limit
+    twin = f", twin {twin_share:.2f}%" if twin_share is not None else ""
+    return ok, f"bright cyan/blue {share:.2f}% of frame (limit {limit:.2f}%{twin})"
+
+
 def check_spend(unit_spend_usd: float) -> tuple[bool, str]:
     """Unit spend stays under budget."""
     ok = unit_spend_usd < UNIT_SPEND_BUDGET_USD

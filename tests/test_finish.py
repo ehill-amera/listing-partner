@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from listing_partner import finish
+from listing_partner import checks, finish
 
 
 def _room_cast():
@@ -220,6 +220,51 @@ def test_one_paint_keeps_one_color_across_brightness():
     drift_b = float(bands[:, 1].max() - bands[:, 1].min())
     assert drift_a <= 2.0, f"a* drifts {drift_a:.1f} across one paint's ramp (limit 2)"
     assert drift_b <= 2.0, f"b* drifts {drift_b:.1f} across one paint's ramp (limit 2)"
+
+
+def _warm_room_with_hot_patches():
+    """Warm tungsten room with a warm near-clipped patch and a blown patch.
+
+    Unit-a 008: the uncapped vote pushed blue up 4.6x, so sunlit shades
+    and blown bulbs came out saturated cyan (mean RGB 127, 220, 255 on
+    fully blown pixels). The near-clipped patch is warm lamp-lit white;
+    the blown patch is already clipped warm white in the input.
+    """
+    img = np.full((200, 200, 3), (150, 110, 70), np.uint8)  # warm room
+    img[20:80, 20:80] = (252, 214, 160)  # warm near-clipped patch
+    img[120:180, 120:180] = (255, 252, 244)  # blown patch
+    img[:8, :] = (245, 245, 245)  # bright lamp band above the vote
+    return img
+
+
+def test_white_balance_capped_relative_to_green():
+    """Each white-balance multiplier stays within 0.80-1.25 of green.
+
+    Contract 02, final round part two: the uncapped vote pushed blue to
+    4.6x on real rooms. A strongly warm room must still come out capped.
+    """
+    img = np.full((200, 200, 3), (160, 100, 50), np.uint8)
+    img[:10, :] = (245, 245, 245)  # bright band above the vote
+    _, report = finish.balance_exposure(img)
+    factors = np.array(report["wb_factors"], float)
+    rel = factors / factors[1]
+    assert all(0.80 <= float(x) <= 1.25 for x in rel), f"uncapped vote {rel.round(3)}"
+
+
+def test_warm_bright_and_blown_patches_stay_neutral():
+    """Warm near-clipped and blown patches never read cyan or blue.
+
+    Contract 02, final round part two: the bright-surface share (mean
+    above 170, B at least G, G minus R at least 15, B minus R at least
+    30) stays at or below 1% of the frame, and the blown patch reads
+    neutral white, not cyan.
+    """
+    out, _ = finish.balance_exposure(_warm_room_with_hot_patches())
+    share = checks.bright_surface_share(out)
+    assert share <= 1.0, f"bright cyan/blue covers {share:.1f}% of the frame (limit 1%)"
+    blown = out[120:180, 120:180].astype(float)
+    spread = float((blown.max(axis=2) - blown.min(axis=2)).mean())
+    assert spread <= 15.0, f"blown patch reads tinted, mean channel spread {spread:.0f}"
 
 
 def test_balance_does_not_hide_real_clipping():
