@@ -50,7 +50,8 @@ output/
 outputs/
 
 # Unit facts pulled from AppFolio
-facts/
+facts/*
+!facts/sample.json
 
 # Python
 __pycache__/
