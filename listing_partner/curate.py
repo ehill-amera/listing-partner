@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -11,6 +12,11 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from listing_partner.segment import jpeg_bytes
+
+
+class SavedCurationInvalid(ValueError):
+    """Saved curation is missing, or was made for other photos."""
+
 
 ROOMS = (
     "front exterior",
@@ -216,3 +222,27 @@ def run_curation(finished_dir: Path, spark) -> dict:
     if len(result["kept"]) + len(result["dropped"]) != len(paths):
         raise ValueError("kept plus dropped does not equal the finished photos")
     return result
+
+
+def photo_hashes(finished_dir: Path) -> dict[str, str]:
+    return {
+        p.stem: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(Path(finished_dir).glob("*.jpg"))
+    }
+
+
+def load_saved(path: Path, finished_dir: Path) -> dict:
+    """The saved result, only if it was made for exactly these photos and says
+    what it cost. Anything else raises: a reuse never falls back to spending."""
+    try:
+        saved = json.loads(Path(path).read_text())
+        recorded, kept, dropped = saved["photos"], saved["kept"], saved["dropped"]
+        cost = saved["cost"]
+        calls_and_usd = (int(cost["calls"]), float(cost["usd"]))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SavedCurationInvalid(f"saved curation unusable: {type(exc).__name__}") from exc
+    if recorded != photo_hashes(finished_dir):
+        raise SavedCurationInvalid("saved curation was made for different photos")
+    if {p["id"] for p in [*kept, *dropped]} != set(recorded) or calls_and_usd[0] < 1:
+        raise SavedCurationInvalid("saved curation does not cover every photo")
+    return saved

@@ -176,6 +176,11 @@ def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchma
         ("Meta", "SAM 3.1", costs["meta"]["sam-3.1"]),
         ("Baseten", "Muse Spark Open", next(iter(costs["baseten"].values()))),
     ]
+    if costs.get("curation_saved"):
+        # This run reused photo decisions it did not pay for; a listing still costs them.
+        rows.append(
+            ("Meta", "Muse Spark, saved curation from an earlier run", costs["curation_saved"])
+        )
     for provider, model, c in rows:
         parts.append(
             f"<tr><td>{provider}</td><td>{model}</td><td>{c['calls']}</td><td>${c['usd']:.4f}</td></tr>"

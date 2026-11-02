@@ -111,6 +111,7 @@ def run_listing(
     mls_positions=None,
     meta_budget_usd=META_BUDGET_USD,
     baseten_budget_usd=BASETEN_BUDGET_USD,
+    reuse_curation=False,
 ) -> dict:
     output_dir = Path(output_dir)
     facts = load_facts(facts_path)
@@ -160,7 +161,14 @@ def run_listing(
     def spark(prompt, images, max_tokens=SPARK_MAX_TOKENS):
         return meta(prompt, max_tokens, images=images)["text"]
 
-    curation = curate.run_curation(output_dir / "finished", spark)
+    curation_path = output_dir / "curation.json"
+    if reuse_curation:
+        curation = curate.load_saved(curation_path, output_dir / "finished")
+    else:
+        curation = curate.run_curation(output_dir / "finished", spark)
+        curation["photos"] = curate.photo_hashes(output_dir / "finished")
+        curation["cost"] = ledger_by_model(meta_path, started)[SPARK]
+        curation_path.write_text(json.dumps(curation, indent=1))
     kept, dropped = curation["kept"], curation["dropped"]
     rows = coverage.check_coverage(facts, kept)
     rooms = [f"{n} {room}" for room, n in Counter(p["room"] for p in kept).items()]
@@ -191,6 +199,7 @@ def run_listing(
         "meta": {SPARK: meta_costs.get(SPARK, zero), "sam-3.1": meta_costs.get("sam-3.1", zero)},
         "baseten": {baseten_client.MODEL: base_costs.get(baseten_client.MODEL, zero)},
         "sam_all_runs_usd": ledger_by_model(meta_path, "").get("sam-3.1", zero)["usd"],
+        "curation_saved": curation["cost"] if reuse_curation else None,
     }
     listing_page.build_page(
         output_dir / "listing.html",
@@ -203,6 +212,7 @@ def run_listing(
     )
     summary = {
         "started": started,
+        "curation_source": "saved" if reuse_curation else "fresh",
         "kept": len(kept),
         "dropped": len(dropped),
         "benchmark": bench,
@@ -220,7 +230,6 @@ def run_listing(
         "kept_order": [p["id"] for p in kept],
         "dropped_ids": [p["id"] for p in dropped],
     }
-    (output_dir / "curation.json").write_text(json.dumps(curation, indent=1))
     (output_dir / "listing_summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 
@@ -241,6 +250,11 @@ def _mls_positions(unit_inputs: Path, output_dir: Path) -> dict | None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--unit", default="unit-a")
+    parser.add_argument(
+        "--reuse-curation",
+        action="store_true",
+        help="use output/<unit>/curation.json if it was made for these exact photos",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     facts_path = root / "facts" / f"{args.unit}.json"
@@ -248,7 +262,12 @@ def main() -> None:
         raise SystemExit(f"facts file missing: facts/{args.unit}.json")
     output_dir = root / "output" / args.unit
     positions = _mls_positions(root / "inputs" / args.unit, output_dir)
-    summary = run_listing(output_dir=output_dir, facts_path=facts_path, mls_positions=positions)
+    summary = run_listing(
+        output_dir=output_dir,
+        facts_path=facts_path,
+        mls_positions=positions,
+        reuse_curation=args.reuse_curation,
+    )
     print(f"done: {summary['kept']} kept, {summary['dropped']} dropped")
 
 

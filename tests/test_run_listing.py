@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from listing_partner import baseten_client, meta_client
+from listing_partner import baseten_client, curate, meta_client
 from listing_partner.facts import SAMPLE_FACTS_PATH
 from listing_partner.run_listing import BudgetExceeded, ledger_by_model, run_listing
 
@@ -168,3 +168,57 @@ def test_ordering_call_gets_room_to_think_after_a_live_cutoff(env):
     env["meta_transport"] = spy
     run_listing(**env)
     assert seen["limit"] >= 16000
+
+
+def test_reuse_makes_no_curation_calls_and_keeps_the_saved_result(env):
+    first = run_listing(**env)
+    saved = json.loads((env["output_dir"] / "curation.json").read_text())
+    seen = []
+
+    def counting(url, headers, body):
+        seen.append(isinstance(json.loads(body)["input"], str))
+        return _meta(url, headers, body)
+
+    env["meta_transport"] = counting
+    second = run_listing(**env, reuse_curation=True)
+    assert seen and all(seen), "a photo went to the model during a reuse run"
+    assert second["kept_order"] == first["kept_order"]
+    assert second["curation_source"] == "saved"
+    assert first["curation_source"] == "fresh"
+    assert json.loads((env["output_dir"] / "curation.json").read_text())["kept"] == saved["kept"]
+
+
+def test_reuse_counts_the_saved_curation_cost_in_the_listing_total(env):
+    run_listing(**env)
+    saved = json.loads((env["output_dir"] / "curation.json").read_text())["cost"]
+    assert saved["calls"] == 8 and saved["usd"] > 0
+    summary = run_listing(**env, reuse_curation=True)
+    assert summary["costs"]["curation_saved"] == saved
+    page = (env["output_dir"] / "listing.html").read_text()
+    assert "saved curation" in page.lower()
+    spark = summary["costs"]["meta"]["muse-spark-1.3"]["usd"]
+    base = summary["costs"]["baseten"][baseten_client.MODEL]["usd"]
+    assert f"${spark + base + saved['usd']:.4f}" in page
+
+
+def test_reuse_refuses_when_a_photo_changed(env):
+    run_listing(**env)
+    Image.fromarray(np.full((60, 90, 3), 99, dtype=np.uint8)).save(
+        env["output_dir"] / "finished" / "001.jpg"
+    )
+    with pytest.raises(curate.SavedCurationInvalid):
+        run_listing(**env, reuse_curation=True)
+
+
+def test_reuse_refuses_when_a_photo_is_added(env):
+    run_listing(**env)
+    Image.fromarray(np.zeros((60, 90, 3), dtype=np.uint8)).save(
+        env["output_dir"] / "finished" / "008.jpg"
+    )
+    with pytest.raises(curate.SavedCurationInvalid):
+        run_listing(**env, reuse_curation=True)
+
+
+def test_reuse_refuses_when_nothing_is_saved(env):
+    with pytest.raises(curate.SavedCurationInvalid):
+        run_listing(**env, reuse_curation=True)
