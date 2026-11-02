@@ -629,7 +629,7 @@ def _window_lines(windows: list[dict]) -> str:
 def _look_cell(look: dict | None) -> str:
     """Look numbers with their verdict: every row shows pass or fail."""
     if not look:
-        return "<p>look: no MLS photo</p>"
+        return "<p>look: not measured, no MLS photo</p>"
     verdict = "PASS" if look.get("look_ok") else "FAIL"
     return f"<p>{verdict} look: {look.get('look_reason', '')}</p>"
 
@@ -892,6 +892,16 @@ def _median(values: list[float]) -> float:
 #: of Oct 26 ($0.000988; every later line is this unit's). Measured from
 #: the ledger, 2026-10-30, not estimated.
 UNIT2_SPEND_BASELINE_USD = 0.000988
+
+
+def _starting_baseline(manifest_path: Path) -> float:
+    """A set's first run counts from the ledger as it stands now, so a new set
+    never reports what other sets spent. A rerun keeps the set's first baseline."""
+    if manifest_path.exists():
+        saved = json.loads(manifest_path.read_text())
+        if "spend_baseline_usd" in saved:
+            return saved["spend_baseline_usd"]
+    return read_spend_total()
 
 
 def _unit_spend_usd(prior: dict | None, ledger_path=None) -> tuple[float, float]:
@@ -1172,6 +1182,7 @@ def run_finish(
     manifest_path = output_dir / "finish_manifest.json"
     if only is not None and manifest_path.exists():
         prior_manifest = json.loads(manifest_path.read_text())
+    start_baseline = _starting_baseline(manifest_path)
     records = []
     started = time.perf_counter()
     for number, members in enumerate(sets, 1):
@@ -1191,7 +1202,7 @@ def run_finish(
                 fresh if fresh is not None else prior.get(number, {"index": number})
             )
         records = merged_records
-    baseline, unit_spend = _unit_spend_usd(prior_manifest)
+    baseline, unit_spend = _unit_spend_usd(prior_manifest or {"spend_baseline_usd": start_baseline})
     summary = _summarize(records, elapsed, unit_spend)
     attach_look(records, mls_matches, mls_dir, output_dir)
     manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}

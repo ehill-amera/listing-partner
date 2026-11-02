@@ -73,6 +73,8 @@ def _tidied(photo: dict) -> str:
 {numbers["damage_overlap_pixels"]} damage pixels under the mask,
 {numbers["mask_pixels"]} pixels in the mask.</p>
 <p>Muse Spark self-check: {"pass" if check["pass"] else "fail"}. {escape(check["reason"])}</p>
+<p>SAM 3.1 re-check: pass. Asked again on the tidied photo, it finds none of the removed
+items inside the mask.</p>
 """
 
 
@@ -87,9 +89,9 @@ def _photo(photo: dict) -> str:
         if photo["selfcheck"]:
             body += f"<p>Muse Spark self-check: {escape(photo['selfcheck']['reason'])}</p>"
         body += f'<p><a href="finished/{pid}.jpg">Untidied photo</a></p>'
-    body += (
-        f"<h3>Removed</h3><ul>{_rows(photo['removed'] if photo['status'] == 'tidied' else [])}</ul>"
-    )
+    body += f"<h3>Removed</h3><ul>{_rows(photo['removed'])}</ul>"
+    if photo["not_removed"]:
+        body += f"<h3>Tried, not removed</h3><ul>{_rows(photo['not_removed'])}</ul>"
     body += f"<h3>Rejected by Muse Spark</h3><ul>{_rows(photo['rejected'])}</ul>"
     body += f"<h3>Left in place</h3><ul>{_rows(photo['left_in_place'])}</ul>"
     return f"<section>{body}{_damage(photo)}</section>"

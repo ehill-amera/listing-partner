@@ -1093,3 +1093,47 @@ def test_page_lists_bright_known_limits_and_never_invents_none():
     assert "Known limit" in line and "002 (1.67%)" in line
     assert "none" in rf._known_limits_line([])
     assert "not recorded" in rf._known_limits_line(None), "a missing list never reads as none"
+
+
+def _one_set_finish(tmp_path, monkeypatch, spend):
+    """run_finish on one fake set; the set itself moves the ledger total."""
+    from listing_partner import run_finish as rf
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "a.NEF").write_bytes(b"")
+    monkeypatch.setattr(rf.hdr, "group_frames", lambda frames: [frames])
+    monkeypatch.setattr(rf.run_merge, "match_mls", lambda *a: {})
+    monkeypatch.setattr(rf, "ensure_merge_thumbs", lambda *a: None)
+    monkeypatch.setattr(rf, "build_finish_review", lambda *a: None)
+    monkeypatch.setattr(rf, "read_spend_total", lambda *a: spend["total"])
+
+    def fake_set(members, dirs, number):
+        spend["total"] += 0.5
+        return {"index": number, "name": f"{number:03d}", "error": "fake"}
+
+    monkeypatch.setattr(rf, "process_set", fake_set)
+    return rf.run_finish(raw, tmp_path / "mls", tmp_path / "out")
+
+
+def test_a_new_set_counts_only_its_own_spend(tmp_path, monkeypatch):
+    spend = {"total": 3.0}
+    manifest = _one_set_finish(tmp_path, monkeypatch, spend)
+    assert manifest["summary"]["unit_spend_usd"] == 0.5
+    assert manifest["spend_baseline_usd"] == 3.0
+
+
+def test_rerunning_a_set_keeps_its_first_baseline(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "finish_manifest.json").write_text('{"spend_baseline_usd": 1.0}')
+    spend = {"total": 3.0}
+    manifest = _one_set_finish(tmp_path, monkeypatch, spend)
+    assert manifest["spend_baseline_usd"] == 1.0
+    assert manifest["summary"]["unit_spend_usd"] == 2.5
+
+
+def test_look_with_no_mls_twin_reads_not_measured():
+    from listing_partner import run_finish as rf
+
+    assert "not measured" in rf._look_cell(None)

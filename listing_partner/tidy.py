@@ -281,7 +281,10 @@ def pixels_pass(numbers: dict) -> bool:
     )
 
 
-def ship_decision(pixels_ok: bool, spark_ok: bool) -> tuple[str, str]:
+def ship_decision(pixels_ok: bool, spark_ok: bool, recheck: dict) -> tuple[str, str]:
+    """All three must pass. The re-check's reason comes first when it fails."""
+    if not recheck["pass"]:
+        return "untidied", recheck["reason"]
     if pixels_ok and spark_ok:
         return "tidied", ""
     if pixels_ok:
@@ -581,6 +584,43 @@ def _self_check(
     }
 
 
+def recheck_fill(tidied: np.ndarray, mask: np.ndarray, removed: list[dict], meta: _Meta) -> dict:
+    """SAM again on the tidied pixels, with the prompt that found each item.
+
+    The view is built the way the finding's was, so only the fill differs from
+    what SAM saw then. Any overlap with the mask, one pixel included, fails: a
+    fill is only proven by SAM no longer finding the item there. A prompt that
+    cannot be asked also fails, because an unasked question proves nothing.
+    """
+    jpeg = segment.jpeg_bytes(tidied)
+    h, w = mask.shape
+    found_by_label: dict[str, int] = {}
+    errors = []
+    for label in dict.fromkeys(item["label"] for item in removed):
+        for attempt in (1, 2):
+            try:
+                candidates = meta.sam(label, jpeg)
+            except (*_RECOVERABLE, ValueError) as exc:
+                if attempt == 2:
+                    errors.append(f"{label}: {exc}")
+                continue
+            hit = np.zeros((h, w), bool)
+            for candidate in candidates:
+                hit |= cv2.resize(
+                    candidate["mask"].astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+                ).astype(bool)
+            found_by_label[label] = int((hit & mask).sum())
+            break
+    items = [
+        {"label": item["label"], "found_pixels": found_by_label.get(item["label"])}
+        for item in removed
+    ]
+    still = [label for label, pixels in found_by_label.items() if pixels]
+    reasons = [f"SAM 3.1 still finds {label} in the filled area" for label in still]
+    reasons += [f"SAM 3.1 re-check could not run on {error}" for error in errors]
+    return {"pass": not reasons, "items": items, "reason": "; ".join(reasons)}
+
+
 def _save_page_images(
     before: np.ndarray, after: np.ndarray, mask: np.ndarray, folder: Path
 ) -> None:
@@ -623,13 +663,16 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
         "reason": "",
         "damage": [],
         "removed": [],
+        "not_removed": [],
         "rejected": [],
         "left_in_place": [],
         "selfcheck": None,
+        "recheck": None,
         "measure": None,
     }
     finished = _load(source)
     h, w = finished.shape[:2]
+    removed: list[dict] = []
     try:
         damage, found = _findings(finished, digest, folder, meta)
         _save_damage_crops(finished, damage, folder)
@@ -647,7 +690,7 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
                     {"label": candidate["label"], "reason": candidate["reason"], "mask": mask}
                 )
         final, removed, left = build_final_mask(confirmed, damage, finished.shape)
-        record["removed"], record["left_in_place"] = removed, left
+        record["left_in_place"] = left
         if not final.any():
             return record
         spots = regions(final)
@@ -657,6 +700,7 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
             generated[top:bottom, x0:x1] = _fill_region(finished, final, spot["box"], meta)
     except PhotoFailed as exc:
         record["status"], record["reason"] = "untidied", str(exc)
+        record["not_removed"] = [{"label": item["label"], "reason": str(exc)} for item in removed]
         return record
 
     tidied = composite(finished, generated, final)
@@ -668,11 +712,17 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
     record["selfcheck"] = _self_check(
         finished, tidied, spots, meta, [item["label"] for item in removed]
     )
-    status, reason = ship_decision(pixels_pass(record["measure"]), record["selfcheck"]["pass"])
+    record["recheck"] = recheck_fill(_load(folder / "tidied.png"), final, removed, meta)
+    status, reason = ship_decision(
+        pixels_pass(record["measure"]), record["selfcheck"]["pass"], record["recheck"]
+    )
     record["status"], record["reason"] = status, reason
     if status == "tidied":
+        # The only place an item becomes removed: every check on the fill passed.
+        record["removed"] = removed
         _save_page_images(finished, tidied, final, folder)
     else:
+        record["not_removed"] = [{"label": i["label"], "reason": reason} for i in removed]
         (folder / "tidied.png").rename(folder / "rejected.png")
     return record
 
@@ -713,6 +763,13 @@ def run_tidy(
         "tidied": tidied,
         "untidied": untidied,
         "nothing_to_tidy": sum(p["status"] == "nothing to tidy" for p in photos),
+        "items_removed": sum(len(p["removed"]) for p in photos),
+        "items_failed_recheck": sum(
+            item["found_pixels"] != 0
+            for p in photos
+            if p["recheck"]
+            for item in p["recheck"]["items"]
+        ),
         "unit_meta_usd": round(meta.spent(), 6),
         "budget_usd": budget_usd,
         "this_run": ledger_by_model(ledger, started),
@@ -731,7 +788,10 @@ def main() -> None:
     summary = run_tidy(output_dir=root / "output" / args.unit)
     print(
         f"{summary['result']}: {summary['tidied']} tidied, {summary['untidied']} untidied, "
-        f"{summary['nothing_to_tidy']} nothing to tidy, ${summary['unit_meta_usd']:.4f}"
+        f"{summary['nothing_to_tidy']} nothing to tidy, "
+        f"{summary['items_removed']} items removed, "
+        f"{summary['items_failed_recheck']} items failed the re-check, "
+        f"${summary['unit_meta_usd']:.4f}"
     )
 
 

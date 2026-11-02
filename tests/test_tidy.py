@@ -43,6 +43,10 @@ class World:
 
     def __init__(self):
         self.sam = {"cardboard box": [ITEM_BOX]}
+        # What SAM finds once a fill has been made: by default, nothing.
+        self.recheck = {}
+        self.recheck_error = None
+        self.recheck_seen = []
         self.damage = []
         self.damage_reply = None
         self.confirm = {}
@@ -70,7 +74,13 @@ class World:
         self.sent_jpegs += 1
         if data["model"] == "sam-3.1":
             self.calls["sam"] += 1
-            reply = json.dumps(self.sam.get(text, []))
+            if self.calls["edit"]:
+                self.recheck_seen.append((text, content[1]["image_url"]))
+                if self.recheck_error:
+                    raise OSError(self.recheck_error)
+                reply = json.dumps(self.recheck.get(text, []))
+            else:
+                reply = json.dumps(self.sam.get(text, []))
         elif text.startswith(tidy.DAMAGE_PROMPT[:40]):
             self.calls["damage"] += 1
             first = self.calls["damage"] % 5 == 1
@@ -210,7 +220,9 @@ def test_sam_is_asked_only_for_the_fixed_list(unit, world):
         ledger_path=unit / "ledger.jsonl",
         baseline_path=unit / "baseline.json",
     )
-    assert tuple(seen) == tidy.CLUTTER_LIST
+    # The fixed list once to find, then only the removed item's prompt to re-check.
+    assert tuple(seen[:13]) == tidy.CLUTTER_LIST
+    assert seen[13:] == ["cardboard box"]
 
 
 def test_build_mask_refuses_a_label_off_the_list():
@@ -349,17 +361,30 @@ def test_measure_raises_on_a_size_mismatch(tmp_path):
         tidy.measure(fin, tid, msk, [])
 
 
+CLEAR = {"pass": True, "reason": ""}
+FOUND = {"pass": False, "reason": "SAM 3.1 still finds hose in the filled area"}
+
+
 @pytest.mark.parametrize(
-    ("pixels_ok", "spark_ok", "ships"),
-    [(True, True, "tidied"), (True, False, "untidied"), (False, True, "untidied")],
+    ("pixels_ok", "spark_ok", "recheck", "ships"),
+    [
+        (True, True, CLEAR, "tidied"),
+        (True, False, CLEAR, "untidied"),
+        (False, True, CLEAR, "untidied"),
+        (True, True, FOUND, "untidied"),
+    ],
 )
-def test_ship_decision_needs_both_to_pass(pixels_ok, spark_ok, ships):
-    assert tidy.ship_decision(pixels_ok, spark_ok)[0] == ships
+def test_ship_decision_needs_all_three_to_pass(pixels_ok, spark_ok, recheck, ships):
+    assert tidy.ship_decision(pixels_ok, spark_ok, recheck)[0] == ships
 
 
 def test_ship_decision_names_a_disagreement():
-    assert "disagree" in tidy.ship_decision(True, False)[1]
-    assert "disagree" in tidy.ship_decision(False, True)[1]
+    assert "disagree" in tidy.ship_decision(True, False, CLEAR)[1]
+    assert "disagree" in tidy.ship_decision(False, True, CLEAR)[1]
+
+
+def test_ship_decision_gives_the_recheck_reason_first():
+    assert tidy.ship_decision(True, False, FOUND)[1].startswith(FOUND["reason"])
 
 
 # --- the whole run, on the real ledger code and real files
@@ -551,7 +576,8 @@ def test_second_run_reuses_the_saved_findings_without_paying_again(unit, world):
     first = dict(world.calls)
     _run(unit, world)
     assert world.calls["damage"] == first["damage"]
-    assert world.calls["sam"] == first["sam"]
+    # Findings are reused. The re-check looks at the new fill, so it is never reused.
+    assert world.calls["sam"] == first["sam"] + 1
     assert world.calls["confirm"] == first["confirm"]
     assert world.calls["edit"] == first["edit"] + 1
 
@@ -573,6 +599,91 @@ def test_tidy_works_for_any_set_name(tmp_path, world):
     )
     summary = _run(out, world)
     assert summary["photos"][0]["id"] == "009"
+
+
+# --- the SAM re-check on the tidied photo
+
+
+def test_recheck_finding_the_item_in_the_mask_ships_untidied_with_the_reason(unit, world):
+    world.recheck = {"cardboard box": [(120, 120, 180, 180)]}
+    summary = _run(unit, world)
+    photo = summary["photos"][0]
+    assert photo["status"] == "untidied"
+    assert "SAM 3.1" in photo["reason"] and "cardboard box" in photo["reason"]
+    assert photo["removed"] == []
+    assert photo["not_removed"] == [{"label": "cardboard box", "reason": photo["reason"]}]
+    assert photo["recheck"]["items"][0]["found_pixels"] == 3600
+    assert summary["items_removed"] == 0 and summary["items_failed_recheck"] == 1
+    assert not (unit / "tidy" / "001" / "tidied.png").exists()
+    assert (unit / "tidy" / "001" / "rejected.png").exists()
+
+
+def test_recheck_one_pixel_of_overlap_with_the_mask_still_fails(unit, world):
+    # The grown mask ends a fixed margin past the item: touch its last column.
+    margin = tidy.grow_px((H, W))
+    right = ITEM_BOX[2] + margin - 1
+    world.recheck = {"cardboard box": [(right, 150, right + 40, 151)]}
+    photo = _run(unit, world)["photos"][0]
+    assert photo["status"] == "untidied"
+    assert photo["recheck"]["items"][0]["found_pixels"] == 1
+
+
+def test_recheck_finding_something_outside_the_mask_does_not_count(unit, world):
+    world.recheck = {"cardboard box": [BIN_BOX]}
+    summary = _run(unit, world)
+    photo = summary["photos"][0]
+    assert photo["status"] == "tidied"
+    assert [item["label"] for item in photo["removed"]] == ["cardboard box"]
+    assert photo["recheck"]["items"][0]["found_pixels"] == 0
+    assert summary["items_removed"] == 1 and summary["items_failed_recheck"] == 0
+
+
+def test_recheck_looks_at_the_saved_tidied_pixels_not_the_finished_photo(unit, world):
+    _run(unit, world)
+    prompt, sent = world.recheck_seen[0]
+    assert prompt == "cardboard box"
+    expected = segment.jpeg_bytes(_tidied(unit))
+    assert sent == "data:image/jpeg;base64," + base64.b64encode(expected).decode()
+
+
+def test_recheck_that_cannot_run_ships_untidied(unit, world):
+    world.recheck_error = "backend down"
+    summary = _run(unit, world)
+    photo = summary["photos"][0]
+    assert photo["status"] == "untidied"
+    assert "re-check" in photo["reason"]
+    assert photo["removed"] == []
+    assert summary["items_failed_recheck"] == 1
+
+
+def test_recheck_runs_once_per_label_and_covers_every_removed_item(unit, world):
+    world.sam = {"cardboard box": [ITEM_BOX, BIN_BOX]}
+    photo = _run(unit, world)["photos"][0]
+    assert [text for text, _ in world.recheck_seen] == ["cardboard box"]
+    assert [item["label"] for item in photo["recheck"]["items"]] == ["cardboard box"] * 2
+
+
+def test_failed_fill_lists_nothing_as_removed(unit, world):
+    world.image_error = "backend down"
+    photo = _run(unit, world)["photos"][0]
+    assert photo["status"] == "untidied"
+    assert photo["removed"] == []
+    assert photo["not_removed"][0]["label"] == "cardboard box"
+
+
+def test_page_never_lists_an_item_as_removed_when_the_recheck_failed(unit, world):
+    world.recheck = {"cardboard box": [(120, 120, 180, 180)]}
+    summary = _run(unit, world)
+    html = (unit / "tidy.html").read_text()
+    removed_block = html.split("<h3>Removed</h3>")[1].split("</ul>")[0]
+    assert "cardboard box" not in removed_block and "none" in removed_block
+    assert "Edited: clutter removed" not in html
+    assert "Tried, not removed" in html and summary["photos"][0]["reason"] in html
+
+
+def test_page_shows_the_recheck_result_on_a_tidied_photo(unit, world):
+    _run(unit, world)
+    assert "SAM 3.1 re-check: pass" in (unit / "tidy.html").read_text()
 
 
 # --- the page
