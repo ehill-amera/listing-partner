@@ -7,6 +7,7 @@ from html import escape
 from pathlib import Path
 
 from listing_partner.facts import is_sample, prompt_facts
+from listing_partner.scoring import AMENITY_GROUPS
 
 NAMES = {"meta": "Muse Spark", "baseten": "Muse Spark Open"}
 TITLES = {
@@ -50,7 +51,7 @@ def _photo(p: dict, position: int | None) -> str:
 
 def _status(text: dict) -> str:
     words = {
-        "pass": "Passed every check",
+        "pass": "Passed the automatic checks",
         "failed": "FAILED. Do not post",
         "flagged": "FLAGGED for a person. The models did not agree",
     }
@@ -73,8 +74,14 @@ def _card(label: str, text: dict, reviewers: dict) -> str:
             f"<details><summary>First version, rewritten once</summary><p>{escape(first['text'])}"
             f"</p><p>Failed: {named}</p></details>"
         )
+    flag = (
+        '<p class="flagged"><strong>The first version was FLAGGED: the models did not agree. '
+        "A person decides.</strong></p>"
+        if text.get("first_version_flagged")
+        else ""
+    )
     return (
-        f'<div class="card"><h4>{label}{_who(text["provider"])}</h4>{_status(text)}'
+        f'<div class="card"><h4>{label}{_who(text["provider"])}</h4>{_status(text)}{flag}'
         f'<p style="white-space:pre-wrap">{escape(text["final"])}</p>'
         f"<p>Checks on the text shown:</p><ul>{checks}</ul>"
         f"<p>Fair housing review:</p><ul>{reviews}</ul>{earlier}</div>"
@@ -142,7 +149,14 @@ def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchma
     rng.shuffle(review_order)
     reviewers = dict(zip(review_order, "AB"))
     by_id = {(t["id"], t["provider"]): t for t in writing["texts"]}
-    parts.append("<h2>Writing</h2>")
+    parts.append(
+        "<h2>Writing</h2><p>What the automatic checks can and cannot see: bed, bath, rent, deposit "
+        "and square-foot numbers are compared to the fact they sit next to. Amenities are checked "
+        f"against a fixed list of {len(AMENITY_GROUPS)} known amenity groups. An amenity outside "
+        "those groups cannot be detected, nor can an invented neighborhood detail or a word like "
+        '"second floor". The fair housing list is a screen, not legal advice. A person approves '
+        "every text before posting.</p>"
+    )
     for job in ("description", "caption_social", "caption_video"):
         order = ["meta", "baseten"]
         rng.shuffle(order)
