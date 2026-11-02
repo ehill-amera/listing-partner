@@ -61,3 +61,7 @@ Finder, Shift+Cmd+G, `~/projects/listing-partner/output/unit-a`, then open `tidy
 ## Out of scope
 
 Sky replacement, brush touch-up, virtual staging, export sizing and naming, the agent and drop folder, posting anywhere.
+
+## Navigator note (Nov 2)
+
+The "Built-by" commit trailer rule is retired project-wide. It no longer applies to any unit's commits, including the rule's mention in contract 02. The `muse-code-built` tag and a who-built-what page will show the split between builders.
