@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import cv2
@@ -499,6 +500,22 @@ def _findings(rgb: np.ndarray, digest: str, folder: Path, meta: _Meta) -> tuple:
     return damage, found
 
 
+def blend_fill(crop: np.ndarray, fill: np.ndarray, inside: np.ndarray) -> np.ndarray:
+    """Fit the fill to the photo at the mask's edge, so a brightness slope
+    between the generated picture and the photo leaves no visible patch. The
+    composite still takes only masked pixels from this result."""
+    if not inside.any():
+        return fill
+    pad = 4
+    wrap = partial(cv2.copyMakeBorder, top=pad, bottom=pad, left=pad, right=pad)
+    source = wrap(fill, borderType=cv2.BORDER_REPLICATE)
+    target = wrap(crop, borderType=cv2.BORDER_REPLICATE)
+    area = wrap((inside * 255).astype(np.uint8), borderType=cv2.BORDER_CONSTANT, value=0)
+    x, y, w, h = cv2.boundingRect(area)
+    out = cv2.seamlessClone(source, target, area, (x + w // 2, y + h // 2), cv2.NORMAL_CLONE)
+    return out[pad:-pad, pad:-pad]
+
+
 def _fill_region(finished: np.ndarray, mask: np.ndarray, box: tuple, meta: _Meta) -> np.ndarray:
     """Generated pixels for one crop, refit, toned to the ring, and checked."""
     left, top, right, bottom = box
@@ -538,7 +555,7 @@ def _fill_region(finished: np.ndarray, mask: np.ndarray, box: tuple, meta: _Meta
     left_over = float(is_paint(fill)[inside].mean()) if inside.any() else 0.0
     if left_over > PAINT_LEFT_MAX:
         raise PhotoFailed(f"Muse Image left {left_over:.1%} of the mask unpainted")
-    return fill
+    return blend_fill(crop, fill, inside)
 
 
 def _self_check(

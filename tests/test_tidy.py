@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -297,6 +298,23 @@ def test_composite_copies_every_outside_pixel_from_the_finished_photo():
     out = tidy.composite(finished, generated, mask)
     assert (out[~mask] == finished[~mask]).all()
     assert (out[150, 150] == 7).all()
+
+
+def test_blend_fill_removes_a_brightness_slope_at_the_mask_edge():
+    crop = np.full((200, 300, 3), 120, np.uint8)
+    slope = np.linspace(-40, 40, 300)[None, :, None]
+    fill = np.clip(crop + slope, 0, 255).astype(np.uint8)
+    inside = _rect((100, 50, 200, 150), (200, 300))
+    out = tidy.blend_fill(crop, fill, inside)
+    edge = inside & ~cv2.erode(inside.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    assert np.abs(out[edge].astype(float) - 120).max() <= 4
+
+
+def test_blend_fill_handles_a_mask_on_the_crop_edge():
+    crop = np.full((100, 100, 3), 120, np.uint8)
+    fill = np.full((100, 100, 3), 90, np.uint8)
+    inside = _rect((0, 0, 40, 40), (100, 100))
+    assert tidy.blend_fill(crop, fill, inside).shape == crop.shape
 
 
 def test_measure_counts_one_changed_pixel_outside_the_mask(tmp_path):
