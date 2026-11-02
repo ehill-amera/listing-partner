@@ -96,7 +96,8 @@ def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchma
         "<!doctype html><meta charset=utf-8><title>Listing Package</title>",
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         f"<style>{CSS}</style><h1>Listing package</h1>",
-        "<p><button onclick=\"document.body.classList.toggle('show')\">show which model</button></p>",
+        "<p><button onclick=\"document.body.classList.toggle('show')\">",
+        "show which model</button></p>",
     ]
     origin = (
         "Sample data: a fictional unit."
