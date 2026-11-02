@@ -50,6 +50,103 @@ def test_invented_number_fails(text, facts):
     assert any("number" in f for f in check_facts(text, facts)), text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The first review's probes, moved onto the sample's 2 bed, 1 bath, 900 sq ft, $1,400.
+        "1 bedroom and 2 baths",
+        "$900 a month and 1,400 sq ft",
+        "2 bedrooms and 2 baths",
+        # The same mistake in other forms.
+        "1,400 square feet",
+        "900 a month",
+        "Rent of $900",
+        "$900 rent",
+        "Bedrooms: 1",
+        "two baths",
+        "one bedroom",
+        "nine hundred dollars a month",
+        "fourteen hundred square feet",
+        "2 sunny baths",
+        "#1BR",
+    ],
+)
+def test_a_real_number_next_to_the_wrong_fact_fails(text, facts):
+    assert any("next to" in f for f in check_facts(text, facts)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Two bedrooms and one bath",
+        "nine hundred square feet",
+        "fourteen hundred dollars a month",
+        "$1,400",
+        "2 sunny bedrooms",
+        "2BR/1BA",
+        "two-bedroom, one-bath",
+        "Rent: $1,400",
+        "Bedrooms: 2",
+        "900-square-foot home",
+        "$1,400 deposit",
+        "Available 2030-01-15",
+        "One of the best streets.",
+    ],
+)
+def test_numbers_next_to_their_own_fact_pass(text, facts):
+    assert check_facts(text, facts) == [], text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Forty feet of frontage",
+        "Sixty windows",
+        "Fifteen closets",
+        "Ninety steps to the door",
+        "Two closets",
+        "2 parking spaces near the bedrooms",
+        "900 feet of frontage",
+        "A one-car driveway",
+    ],
+)
+def test_a_number_beside_no_fact_is_invented(text, facts):
+    failures = check_facts(text, {**facts, "amenities": [*facts["amenities"], "Driveway"]})
+    assert any(f.startswith("number not in the facts") for f in failures), text
+
+
+@pytest.mark.parametrize("text", ["Available January 15, 2030", "Available Jan 15", "Open 1/15"])
+def test_the_available_date_in_common_forms_passes(text, facts):
+    assert check_facts(text, facts) == [], text
+
+
+def test_the_wrong_available_day_fails(facts):
+    assert check_facts("Available January 16", facts)
+
+
+def test_a_deposit_figure_fails_when_the_facts_have_no_deposit(facts):
+    assert check_facts("$1,400 deposit", {**facts, "deposit_usd": None})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sauna, hot tub and rooftop terrace",
+        "A sauna.",
+        "A hot tub.",
+        "A rooftop terrace.",
+    ],
+)
+def test_invented_amenity_from_the_review_fails(text, facts):
+    assert any("amenity" in f for f in check_facts(text, facts)), text
+
+
+def test_detached_garage_fails_when_the_facts_only_say_garage(facts):
+    with_garage = {**facts, "amenities": [*facts["amenities"], "Garage"]}
+    assert check_facts("A garage.", with_garage) == []
+    assert any("amenity" in f for f in check_facts("A detached garage.", with_garage))
+
+
 def test_true_amenity_passes(facts):
     assert check_facts("Hardwood floors, a dishwasher and central air.", facts) == []
 
