@@ -75,20 +75,28 @@ CONFIRM_PROMPT = (
     "removed only if a person could carry it out in a day and it is not part of the "
     "property. Reject anything that is a fixture, part of the building, wired or "
     "plumbed in, furniture or an appliance that conveys with the unit, or damage. "
-    'Reply with JSON only: {"confirm": true or false, "reason": "plain words"}.'
+    "Say whether it truly is the kind of item the finder named. Say whether it is "
+    "attached at either end: a cord plugged into an outlet or a device, a blind's "
+    "pull cord, a hose on a spigot. Attached things stay. Reply with JSON only: "
+    '{"confirm": true or false, "is_that_item": true or false, '
+    '"attached": true or false, "reason": "plain words"}.'
 )
 SELFCHECK_PROMPT = (
     "These two images show the same area of a rental listing photo, before and then "
     "after an edit meant to remove only carry-out clutter. Judge three things: is the "
     "listed item gone, did anything that is part of the property change, was any "
-    "damage softened or hidden. Reply with JSON only: "
+    "damage softened or hidden, was any object or detail added that the first image "
+    "does not show (an outlet, a pipe, a mark), does any part of the listed item "
+    "remain, and is the filled area smeared. Be strict. A smear counts as the property "
+    "changing. Reply with JSON only: "
     '{"item_gone": true or false, "property_changed": true or false, '
-    '"damage_softened": true or false, "reason": "plain words"}.'
+    '"damage_softened": true or false, "object_added": true or false, '
+    '"item_remains": true or false, "reason": "plain words"}.'
 )
 EDIT_PROMPT = (
     "The flat magenta area marks where a loose object was removed from this photo. "
     "Paint only that area, continuing the surfaces around it naturally: same floor, "
-    "wall or ground, same light. Do not add any object. Change nothing else, and do "
+    "wall or ground, same light. Do not add any object, outlet, pipe, mark or detail. Change nothing else, and do "
     "not move, crop or reframe the picture. No magenta may remain."
 )
 
@@ -166,7 +174,12 @@ def parse_confirm(text: str) -> tuple[bool, str]:
     reason = data.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         return False, "Muse Spark gave no reason, so it stays"
-    return data.get("confirm") is True, reason.strip()
+    good = (
+        data.get("confirm") is True
+        and data.get("is_that_item") is True
+        and data.get("attached") is False
+    )
+    return good, reason.strip()
 
 
 def parse_selfcheck(text: str) -> dict:
@@ -179,12 +192,16 @@ def parse_selfcheck(text: str) -> dict:
         data.get("item_gone") is True
         and data.get("property_changed") is False
         and data.get("damage_softened") is False
+        and data.get("object_added") is False
+        and data.get("item_remains") is False
     )
     return {
         "pass": good,
         "item_gone": data.get("item_gone"),
         "property_changed": data.get("property_changed"),
         "damage_softened": data.get("damage_softened"),
+        "object_added": data.get("object_added"),
+        "item_remains": data.get("item_remains"),
         "reason": str(data.get("reason") or "no reason given"),
     }
 

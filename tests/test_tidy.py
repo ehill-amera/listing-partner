@@ -34,6 +34,9 @@ def _rect(box, shape=(H, W)):
     return mask
 
 
+GOOD_CONFIRM = {"confirm": True, "is_that_item": True, "attached": False, "reason": "loose item"}
+
+
 class World:
     """The far side of the capped client: Spark, SAM and Muse Image."""
 
@@ -46,6 +49,8 @@ class World:
             "item_gone": True,
             "property_changed": False,
             "damage_softened": False,
+            "object_added": False,
+            "item_remains": False,
             "reason": "the box is gone and the wall is the same",
         }
         self.image_error = None
@@ -74,7 +79,7 @@ class World:
         elif text.startswith(tidy.CONFIRM_PROMPT[:40]):
             self.calls["confirm"] += 1
             label = next(x for x in tidy.CLUTTER_LIST if f'"{x}"' in text)
-            reply = json.dumps(self.confirm.get(label, {"confirm": True, "reason": "loose item"}))
+            reply = json.dumps(self.confirm.get(label, GOOD_CONFIRM))
         elif text.startswith(tidy.SELFCHECK_PROMPT[:40]):
             self.calls["selfcheck"] += 1
             reply = json.dumps(self.selfcheck)
@@ -407,13 +412,32 @@ def test_rejection_keeps_the_item_and_carries_the_reason(unit, world):
     assert world.calls["edit"] == 0
 
 
-@pytest.mark.parametrize("verdict", [{"confirm": True}, {"confirm": True, "reason": " "}, {}])
+@pytest.mark.parametrize(
+    "verdict",
+    [{**GOOD_CONFIRM, "reason": ""}, {**GOOD_CONFIRM, "reason": " "}, {}],
+)
 def test_confirm_without_a_reason_never_removes(unit, world, verdict):
     world.confirm["cardboard box"] = verdict
     photo = _run(unit, world)["photos"][0]
     assert photo["status"] == "nothing to tidy"
     assert photo["removed"] == []
     assert photo["rejected"][0]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"is_that_item": False}, "a lawn spreader, not a laundry basket"),
+        ({"attached": True}, "still plugged into the outlet"),
+        ({"attached": None}, "no answer on attachment"),
+    ],
+)
+def test_confirmed_item_off_the_list_or_attached_is_never_removed(unit, world, change, reason):
+    world.confirm["cardboard box"] = {**GOOD_CONFIRM, **change, "reason": reason}
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == []
+    assert photo["rejected"] == [{"label": "cardboard box", "reason": reason}]
+    assert world.calls["edit"] == 0
 
 
 def test_damage_box_is_protected_through_the_whole_run(unit, world):
@@ -451,6 +475,17 @@ def test_self_check_failure_is_a_disagreement_and_ships_untidied(unit, world):
     assert "disagree" in photo["reason"]
     assert photo["selfcheck"]["reason"] == "the baseboard changed"
     assert photo["selfcheck"]["pass"] is False
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"object_added": True}, {"item_remains": True}, {"object_added": None}],
+)
+def test_self_check_naming_an_added_object_or_a_remnant_ships_untidied(unit, world, change):
+    world.selfcheck.update(change)
+    photo = _run(unit, world)["photos"][0]
+    assert photo["status"] == "untidied"
+    assert "disagree" in photo["reason"]
 
 
 def test_tidied_photo_has_a_passing_self_check_verdict(unit, world):
