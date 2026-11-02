@@ -9,7 +9,8 @@ import re
 from listing_partner import fair_housing, scoring
 from listing_partner.facts import prompt_facts
 
-MAX_TOKENS = 8192
+# A live run on the longer prompt spent all 8192 output tokens on reasoning, four times of four.
+MAX_TOKENS = 16000
 _RULES = (
     "Use only these facts and these photo notes. Every number and every amenity you state must "
     "be in the facts. Do not state one that is not, even if a room label or a photo note "

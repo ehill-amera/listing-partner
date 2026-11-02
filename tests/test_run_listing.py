@@ -256,3 +256,23 @@ def test_both_models_get_muse_sparks_notes_and_the_new_description_rules(env):
     assert "90 to 200 words" in prompt and "120" not in prompt
     assert "State each fact once" in prompt
     assert "Then describe the rooms" in prompt
+
+
+def test_writing_calls_get_room_to_think_after_a_live_cutoff(env):
+    limits = []
+
+    def spy(url, headers, body):
+        data = json.loads(body)
+        if isinstance(data["input"], str) and data["input"].startswith("DESCRIPTION"):
+            limits.append(data["max_output_tokens"])
+        return _meta(url, headers, body)
+
+    def baseten_spy(url, headers, body):
+        data = json.loads(body)
+        if data["messages"][0]["content"].startswith("DESCRIPTION"):
+            limits.append(data["max_tokens"])
+        return _baseten(url, headers, body)
+
+    env["meta_transport"], env["baseten_transport"] = spy, baseten_spy
+    run_listing(**env)
+    assert len(limits) == 2 and all(limit >= 16000 for limit in limits), limits
