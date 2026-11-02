@@ -71,6 +71,9 @@ MODEL_ALLOWLIST = (
 # Text models bill per token; these ids take token usage.
 _TOKEN_MODELS = ("muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1")
 
+IMAGE_MODEL = "muse-image-1.0"
+IMAGE_TIMEOUT_S = 300
+
 # Name of the only environment variable the key is ever read from.
 KEY_ENV_VAR = "META_API_KEY"
 
@@ -284,6 +287,11 @@ def reserve_segment_usd() -> float:
     return RESERVATION_MULTIPLIER * PRICES["sam-3.1"]["image_usd"]
 
 
+def reserve_image_usd() -> float:
+    """Worst-case USD for one image edit: flat price times the multiplier."""
+    return RESERVATION_MULTIPLIER * PRICES[IMAGE_MODEL]["image_usd"]
+
+
 def _open_ledger(ledger_path: Path | None):
     path = Path(ledger_path) if ledger_path is not None else default_ledger_path()
     try:
@@ -301,6 +309,9 @@ def _guarded_post(
     reconcile,
     transport,
     ledger_path,
+    *,
+    path: str = "responses",
+    read=None,
 ) -> tuple[dict, float, str | None]:
     """Reserve, POST, and settle one call. Shared by text and segment calls.
 
@@ -345,7 +356,7 @@ def _guarded_post(
         except OSError as exc:
             raise LedgerError(f"ledger write failed: {exc}") from exc
 
-        url = f"{API_BASE_URL}/responses"
+        url = f"{API_BASE_URL}/{path}"
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
@@ -375,7 +386,7 @@ def _guarded_post(
                 request_id=request_id,
             ) from exc
         try:
-            text = _response_text(response)
+            text = (read or _response_text)(response)
         except Exception as exc:  # noqa: BLE001 - billed already; any unreadable shape counts
             raise ResponseUnreadable(
                 f"call was billed ${actual:.6f} (request {request_id}); "
@@ -470,6 +481,80 @@ def call_meta_segment(
         "utf-8"
     )
     return _guarded_post(model, estimated, body, _reconcile_segment, transport, ledger_path)
+
+
+def _long_transport(url: str, headers: dict, body: bytes) -> dict:
+    """Real HTTPS transport for image edits, which take longer than text."""
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=IMAGE_TIMEOUT_S) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _reconcile_image(response: dict) -> tuple[float, str | None]:
+    """Real cost for an image edit: flat price per image returned. The images
+    endpoint reports no cost and no id (docs, read 2026-11-02). Zero images
+    settles at the reservation in _guarded_post, the conservative side."""
+    data = response.get("data")
+    count = len(data) if isinstance(data, list) else 0
+    return count * PRICES[IMAGE_MODEL]["image_usd"], response.get("id")
+
+
+def _image_bytes(response: dict) -> bytes:
+    data = response.get("data") or []
+    if not data or not isinstance(data[0].get("b64_json"), str):
+        raise KeyError("no image in reply")
+    return base64.b64decode(data[0]["b64_json"])
+
+
+def call_meta_image_edit(
+    model: str,
+    prompt: str,
+    image_jpeg: bytes,
+    *,
+    size: str,
+    transport=None,
+    ledger_path: Path | None = None,
+) -> dict:
+    """Edit one image through the spend cap (Muse Image).
+
+    Docs (dev.meta.ai image generation and edit reference, read 2026-11-02):
+    no mask input exists and a mask field is rejected, so the caller's own
+    compositing is what confines the edit. Tools stay off so the edit can
+    reach nothing but this image. Same refusal and ledger rules as the rest.
+    Returns the decoded image bytes under "image".
+    """
+    if model not in MODEL_ALLOWLIST:
+        raise ModelNotAllowed(f"model {model!r} is not on the first-party allowlist")
+    if model != IMAGE_MODEL:
+        raise ModelNotAllowed(f"image edits take {IMAGE_MODEL}, not {model!r}")
+    encoded = base64.b64encode(image_jpeg).decode("ascii")
+    body = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "images": [{"image_url": f"data:image/jpeg;base64,{encoded}"}],
+            "n": 1,
+            "size": size,
+            "response_format": "b64_json",
+            "output_format": "png",
+            "tool_enablement": {
+                "enable_image_search": False,
+                "enable_web_search": False,
+                "enable_shell": False,
+            },
+        }
+    ).encode("utf-8")
+    out = _guarded_post(
+        model,
+        reserve_image_usd(),
+        body,
+        _reconcile_image,
+        transport if transport is not None else _long_transport,
+        ledger_path,
+        path="images/edits",
+        read=_image_bytes,
+    )
+    return {"image": out["text"], "actual_usd": out["actual_usd"], "request_id": out["request_id"]}
 
 
 def _reconcile_text(model: str, response: dict) -> tuple[float, str | None]:
