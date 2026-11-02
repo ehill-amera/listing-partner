@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import date
 
@@ -43,6 +44,22 @@ _WORD_RUN = re.compile(
 )
 # "one" is usually not a count, so alone it counts only before these or a fact.
 _ONE_COUNTS = re.compile(r"[ -](?:car|story|level|floor)\b", re.I)
+# "one and a half", "1-and-a-half": the half belongs to the number before it.
+_AND_A_HALF = re.compile(r"[\s-]+and[\s-]+(?:a|one)[\s-]+half\b", re.I)
+_ORDINALS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+}
+_ORDINAL_WORD = re.compile(rf"\b(?:{'|'.join(_ORDINALS)})\b", re.I)
+_ORDINAL_SUFFIX = re.compile(r"(?:st|nd|rd|th)\b", re.I)
 
 _BED = r"bed(?:room)?s?|bdrms?\b|br\b|bd\b"
 _BATH = r"bath(?:room)?s?(?!tub)|ba\b"
@@ -54,6 +71,7 @@ _STOP = (
     rf"floor|floors|parking|spaces?|{_BED}|{_BATH})\b"
 )
 _REACH = rf"[\s-]*(?:(?!{_STOP})[a-z'-]+,?\s+){{0,2}}?"
+_LONE_HALF = re.compile(r"(?<!and a )(?<!and one )(?<!and-a-)(?<!and-one-)\bhalf(?=[\s-])", re.I)
 _FOLLOWED_BY = {
     "bedrooms": re.compile(rf"{_REACH}(?:{_BED})", re.I),
     "bathrooms": re.compile(rf"{_REACH}(?:{_BATH})", re.I),
@@ -155,8 +173,39 @@ AMENITY_GROUPS = [
 ]
 
 
+def _term_pattern(term: str) -> str:
+    """A term in its plural and with spaces or hyphens between its words. The
+    same pattern reads the text and the facts, so neither side is favored."""
+    words = re.split(r"[\s-]+", term)
+    last = words[-1]
+    if last.endswith("y") and last[-2:-1] not in "aeiou":
+        end = re.escape(last[:-1]) + "(?:y|ies)"
+    elif last.endswith("s"):
+        end = re.escape(last)
+    else:
+        end = re.escape(last) + "(?:s|es)?"
+    return r"[\s-]+".join([*map(re.escape, words[:-1]), end])
+
+
 def _has(term: str, text: str) -> bool:
-    return re.search(rf"(?<![\w-]){re.escape(term)}(?![\w-])", text, re.I) is not None
+    return re.search(rf"(?<!\w){_term_pattern(term)}(?!\w)", text, re.I) is not None
+
+
+_CLAUSE_END = re.compile(r"[,;.!?\n]|\bbut\b", re.I)
+_NEGATED = re.compile(
+    r"\b(?:no|not(?! only\b| just\b)|non|none|never|without|excludes?|excluded|prohibited|"
+    r"forbidden|cannot|can't|isn't|aren't|doesn't|don't)\b",
+    re.I,
+)
+
+
+def _said_and_denied(text: str) -> tuple[str, str]:
+    """A text split into the clauses that state something and the clauses that
+    deny it, so "No pets allowed" is never read as pets being there."""
+    said, denied = [], []
+    for clause in _CLAUSE_END.split(text):
+        (denied if _NEGATED.search(clause) else said).append(clause)
+    return " ; ".join(said), " ; ".join(denied)
 
 
 def _word_value(run: str) -> float:
@@ -184,7 +233,17 @@ def _numbers(text: str) -> list[tuple[int, int, float, str]]:
     found += [
         (m.start(), m.end(), _word_value(m.group(0)), m.group(0)) for m in _WORD_RUN.finditer(text)
     ]
-    return sorted(found)
+    out: list[tuple[int, int, float, str]] = []
+    reached = 0
+    for start, end, value, raw in sorted(found):
+        if start < reached:  # the "one" of "and one half"
+            continue
+        half = _AND_A_HALF.match(text, end)
+        if half:
+            start, end, value, raw = start, half.end(), value + 0.5, text[start : half.end()]
+        out.append((start, end, value, raw))
+        reached = end
+    return out
 
 
 def _fact_beside(text: str, start: int, end: int) -> str | None:
@@ -236,15 +295,16 @@ def _number_failures(text: str, facts: dict) -> list[str]:
         float(facts[k]) for k in ("rent_monthly_usd", "deposit_usd") if facts.get(k) is not None
     }
     for start, end, value, raw in _numbers(text):
-        key = _fact_beside(text, start, end)
-        if key:
+        suffix = _ORDINAL_SUFFIX.match(text, end)
+        key = _fact_beside(text, start, suffix.end() if suffix else end)
+        if suffix and key in ("bedrooms", "bathrooms"):
+            # "the 2nd bedroom" is true of any home with at least 2.
+            if facts.get(key) is None or value > math.ceil(float(facts[key])):
+                failures.append(_beside_failure(raw + suffix.group(0), key, facts))
+        elif key:
             fact = facts.get(key)
             if fact is None or float(fact) != value:
-                said = "none" if fact is None else fact
-                failures.append(
-                    f"number not in the facts: {raw} next to {_FACT_NAMES[key]}, "
-                    f"the facts say {said}"
-                )
+                failures.append(_beside_failure(raw, key, facts))
         elif _MONEY_BEFORE.search(text[:start]) or _MONEY_AFTER.match(text, end):
             if value not in money:
                 failures.append(f"number not in the facts: {raw} as money")
@@ -252,29 +312,91 @@ def _number_failures(text: str, facts: dict) -> list[str]:
             continue
         elif value not in other:
             failures.append(f"number not in the facts: {raw}")
+    return failures + _ordinal_and_half_failures(text, facts)
+
+
+def _beside_failure(raw: str, key: str, facts: dict) -> str:
+    said = "none" if facts.get(key) is None else facts[key]
+    return f"number not in the facts: {raw} next to {_FACT_NAMES[key]}, the facts say {said}"
+
+
+def _bed_or_bath_after(text: str, end: int) -> str | None:
+    for key in ("bedrooms", "bathrooms"):
+        if _FOLLOWED_BY[key].match(text, end):
+            return key
+    return None
+
+
+def _ordinal_and_half_failures(text: str, facts: dict) -> list[str]:
+    """ "a second bathroom" says at least 2. "a half bath" says the count has a half."""
+    failures = []
+    for match in _ORDINAL_WORD.finditer(text):
+        key = _bed_or_bath_after(text, match.end())
+        rank = _ORDINALS[match.group(0).lower()]
+        if key and (facts.get(key) is None or rank > math.ceil(float(facts[key]))):
+            failures.append(_beside_failure(match.group(0), key, facts))
+    for match in _LONE_HALF.finditer(text):
+        key = _bed_or_bath_after(text, match.end())
+        if key and (facts.get(key) is None or float(facts[key]) % 1 != 0.5):
+            failures.append(_beside_failure(match.group(0), key, facts))
     return failures
 
 
 def check_facts(text: str, facts: dict) -> list[str]:
     """Bed, bath, rent, deposit and square-foot numbers must equal the fact they
-    sit next to. Any other number must be written in the facts' free text. Every
-    listed amenity term must be in the facts."""
+    sit next to. Any other number must be written in the facts' free text. An
+    amenity a text states must be stated in the facts. One it denies must be
+    denied in the facts, and a fact that denies an amenity never counts as it."""
     failures = _number_failures(text, facts)
     source = " ; ".join(
         str(x)
         for x in [*facts.get("amenities", []), facts.get("pet_policy"), facts.get("property_type")]
         if x
     )
+    source_said, source_denied = _said_and_denied(source)
+    text_said, text_denied = _said_and_denied(text)
     for group in AMENITY_GROUPS:
-        named = [term for term in group if _has(term, text)]
-        if named and not any(_has(term, source) for term in group):
-            failures.append(f"amenity not in the facts: {named[0]}")
+        for wording, allowed in ((text_said, source_said), (text_denied, source_denied)):
+            named = [term for term in group if _has(term, wording)]
+            if named and not any(_has(term, allowed) for term in group):
+                failures.append(f"amenity not in the facts: {named[0]}")
     return failures
+
+
+def fact_mentions(text: str, facts: dict) -> dict[str, int]:
+    """How many times a text states each fact. A measurement, not a check."""
+    scrubbed = _without_the_date(text, facts)
+    counts = {
+        key: 0
+        for key in ("bedrooms", "bathrooms", "square_feet", "rent_monthly_usd", "deposit_usd")
+        if facts.get(key) is not None
+    }
+    for start, end, value, _raw in _numbers(scrubbed):
+        key = _fact_beside(scrubbed, start, end)
+        if key in counts and value == float(facts[key]):
+            counts[key] += 1
+        elif (
+            not key
+            and value == float(facts["rent_monthly_usd"])
+            and (_MONEY_BEFORE.search(scrubbed[:start]) or _MONEY_AFTER.match(scrubbed, end))
+        ):
+            counts["rent_monthly_usd"] += 1
+    for key in ("city", "state"):
+        if facts.get(key):
+            counts[key] = len(re.findall(rf"(?<!\w){re.escape(facts[key])}(?!\w)", text, re.I))
+    for amenity in facts.get("amenities", []):
+        terms = {
+            t for group in AMENITY_GROUPS if any(_has(t, amenity) for t in group) for t in group
+        }
+        terms = {t for t in terms if _has(t, amenity)} or {amenity}
+        forms = "|".join(_term_pattern(t) for t in sorted(terms, key=len, reverse=True))
+        counts[f"amenity: {amenity}"] = len(re.findall(rf"(?<!\w)(?:{forms})(?!\w)", text, re.I))
+    return counts
 
 
 def check_description_length(text: str) -> list[str]:
     count = len(text.split())
-    return [] if 120 <= count <= 220 else [f"length: {count} words, limit 120 to 220"]
+    return [] if 90 <= count <= 200 else [f"length: {count} words, limit 90 to 200"]
 
 
 def check_social_caption(text: str) -> list[str]:
