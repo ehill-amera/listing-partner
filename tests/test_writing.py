@@ -194,3 +194,30 @@ def test_choose_fewer_failures_then_lower_cost_then_tie():
         }
     )
     assert r == "tie"
+
+
+def test_prompt_names_what_a_note_or_label_mentions_that_the_facts_do_not(facts):
+    photos = [
+        {"room": "laundry", "note": "washer dryer and water heater visible"},
+        {"room": "kitchen", "note": "hardwood floors"},
+    ]
+    a = Fake("meta")
+    run_writing(facts, photos, {"meta": a, "baseten": Fake("baseten")}, lambda row: None)
+    line = next(x for x in a.prompts[0].splitlines() if x.startswith("Leave out"))
+    for word in ("laundry", "washer", "dryer"):
+        assert word in line
+    assert "hardwood" not in line and "kitchen" not in line
+
+
+def test_description_prompt_asks_for_rooms_not_a_walk_through_each_photo(facts):
+    a = Fake("meta")
+    run_writing(facts, PHOTOS, {"meta": a, "baseten": Fake("baseten")}, lambda row: None)
+    assert "Combine photos of the same room" in a.prompts[0]
+    assert "never mention the photos" in a.prompts[0]
+    assert "stated once, where that room is described" in a.prompts[0]
+
+
+def test_no_leave_out_line_when_notes_name_nothing_outside_the_facts(facts):
+    a = Fake("meta")
+    run_writing(facts, PHOTOS, {"meta": a, "baseten": Fake("baseten")}, lambda row: None)
+    assert not any(x.startswith("Leave out") for x in a.prompts[0].splitlines())

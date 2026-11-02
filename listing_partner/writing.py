@@ -23,7 +23,9 @@ _RULES = (
 )
 _DESCRIPTION_SHAPE = (
     "90 to 200 words. State each fact once and do not repeat any of them. Then describe the "
-    "rooms that were photographed, in the order listed"
+    "rooms that were photographed, in the order listed, as plain prose for a renter. Combine "
+    "photos of the same room into one passage and never mention the photos. An amenity that "
+    "belongs to a room is stated once, where that room is described"
 )
 _LIMITS = {
     "description": _DESCRIPTION_SHAPE,
@@ -49,9 +51,16 @@ def _photo_line(photo: dict) -> str:
 
 def _context(facts: dict, photos: list[dict]) -> str:
     lines = "\n".join(_photo_line(p) for p in photos)
+    outside = scoring.amenities_outside_the_facts(lines, facts)
+    leave_out = (
+        f"Leave out completely, they are not in the facts: {', '.join(outside)}.\n"
+        if outside
+        else ""
+    )
     return (
         f"Facts: {json.dumps(prompt_facts(facts), sort_keys=True)}\n"
-        f"Photos in walk-through order, each a room label and a short note:\n{lines}\n{_RULES}"
+        f"Photos in walk-through order, each a room label and a short note:\n{lines}\n"
+        f"{leave_out}{_RULES}"
     )
 
 

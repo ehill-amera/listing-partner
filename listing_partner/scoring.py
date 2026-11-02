@@ -363,6 +363,23 @@ def check_facts(text: str, facts: dict) -> list[str]:
     return failures
 
 
+def amenities_outside_the_facts(text: str, facts: dict) -> list[str]:
+    """Every known amenity term a text names that the facts do not have."""
+    source = " ; ".join(
+        str(x)
+        for x in [*facts.get("amenities", []), facts.get("pet_policy"), facts.get("property_type")]
+        if x
+    )
+    said, _ = _said_and_denied(source)
+    return [
+        term
+        for group in AMENITY_GROUPS
+        if not any(_has(t, said) for t in group)
+        for term in group
+        if _has(term, text)
+    ]
+
+
 def fact_mentions(text: str, facts: dict) -> dict[str, int]:
     """How many times a text states each fact. A measurement, not a check."""
     scrubbed = _without_the_date(text, facts)
