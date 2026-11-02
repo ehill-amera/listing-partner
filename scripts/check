@@ -16,7 +16,7 @@ if [ ! -x .venv/bin/python ]; then
 else
   .venv/bin/ruff check listing_partner tests || bad "ruff check failed"
   .venv/bin/ruff format --check listing_partner tests > /dev/null 2>&1 || bad "ruff format check failed"
-  env -u META_API_KEY .venv/bin/python -m pytest tests -q || bad "pytest failed"
+  env -u META_API_KEY -u BASETEN_API_KEY .venv/bin/python -m pytest tests -q || bad "pytest failed"
 fi
 
 # 2. Hygiene scan of every tracked file and file name.

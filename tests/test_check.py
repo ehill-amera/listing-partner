@@ -150,3 +150,7 @@ def test_force_added_file_under_inputs_is_caught(tmp_path):
         if _run("check-ignore", "-q", f, cwd=root).returncode == 0
     ]
     assert missed == [], "without --no-index the scan can never fail"
+
+
+def test_check_runs_pytest_with_both_keys_unset():
+    assert "env -u META_API_KEY -u BASETEN_API_KEY .venv/bin/python -m pytest" in CHECK.read_text()
