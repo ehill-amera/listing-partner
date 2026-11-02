@@ -760,3 +760,17 @@ def test_line_missing_estimated_usd_refuses(ledger, key):
         meta_client.call_meta_text(MODEL, "hi", transport=_transport_ok, ledger_path=ledger)
     with pytest.raises(LedgerError, match="estimated_usd"):
         meta_client.read_spend_total(ledger)
+
+
+def test_incomplete_reply_with_partial_text_is_not_returned_as_complete(ledger, key):
+    def _cut(url, headers, body):
+        return {
+            "id": "resp-cut",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"content": [{"type": "output_text", "text": "half a descri"}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+    with pytest.raises(ResponseUnreadable):
+        meta_client.call_meta_text(MODEL, "hi", transport=_cut, ledger_path=ledger)

@@ -503,6 +503,10 @@ def _response_text(response: dict) -> str:
     # Live shape confirmed 2026-10-29; see tests/fixtures/spark_*.json.
     if isinstance(response.get("text"), str):
         return response["text"]
+    if response.get("status") == "incomplete":
+        # Partial text looks complete to every caller, so it never comes back.
+        details = response.get("incomplete_details") or {}
+        raise KeyError(f"reply cut off (status=incomplete, reason={details.get('reason')})")
     parts = []
     for item in response.get("output", []) or []:
         for block in item.get("content", []) or []:
