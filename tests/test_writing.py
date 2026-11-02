@@ -114,6 +114,29 @@ def test_reviewers_disagreeing_flags_the_text_never_passes(facts):
         assert t["status"] == "flagged"
 
 
+def _splits_on(marker):
+    return lambda prompt: "FAIL - steers" if marker in prompt else "PASS"
+
+
+def test_hard_failure_plus_disagreement_is_rewritten_and_the_flag_is_kept(facts):
+    bad = GOOD_DESC.replace("2 bedroom", "3 bedroom")
+    a = Fake("meta", desc=bad)
+    out, _ = _run(facts, a, Fake("baseten", review=_splits_on("3 bedroom")))
+    t = _text(out, "meta")
+    assert len(t["attempts"]) == 2
+    assert t["attempts"][0]["second_opinion"] == "flag"
+    rewrite = next(p for p in a.prompts if p.startswith("REWRITE"))
+    assert "number not in the facts: 3" in rewrite
+    assert t["final"] == GOOD_DESC and t["status"] == "pass"
+
+
+def test_disagreement_alone_goes_to_a_person_without_a_rewrite(facts):
+    a = Fake("meta")
+    out, _ = _run(facts, a, Fake("baseten", review="FAIL - steers"))
+    assert len(_text(out, "meta")["attempts"]) == 1
+    assert not any(p.startswith("REWRITE") for p in a.prompts)
+
+
 def test_unreadable_review_flags_the_text_and_counts_against_that_model(facts):
     out, _ = _run(facts, Fake("meta"), Fake("baseten", review="I think it is fine"))
     assert _text(out, "meta")["status"] == "flagged"

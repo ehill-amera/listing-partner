@@ -166,8 +166,11 @@ def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
         }
 
     def needs_rewrite(attempt):
-        # A disagreement goes to a person as written, so a rewrite cannot erase it.
-        return attempt["second_opinion"] != "flag" and bool(attempt["failures"])
+        # A disagreement alone goes to a person as written. A hard failure gets its
+        # one rewrite either way, and the page keeps showing the original's flag.
+        if attempt["second_opinion"] == "fail":
+            return True
+        return any(not f.startswith("second opinion") for f in attempt["failures"])
 
     def finish(text_id, author, first):
         attempts = [first]
@@ -210,6 +213,7 @@ def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
             "attempts": attempts,
             "final": last["text"],
             "status": status,
+            "first_version_flagged": len(attempts) > 1 and first["second_opinion"] == "flag",
         }
 
     texts = []
