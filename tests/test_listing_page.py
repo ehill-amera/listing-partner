@@ -4,7 +4,7 @@ import random
 import re
 
 import pytest
-from test_writing import GOOD_DESC, Fake, _splits_on
+from test_writing import GOOD_DESC, PHOTOS, Fake, _splits_on
 
 from listing_partner.facts import SAMPLE_FACTS_PATH, load_facts
 from listing_partner.listing_page import build_page
@@ -24,7 +24,7 @@ def facts():
 
 
 def _page(tmp_path, facts, meta, baseten, costs=COSTS):
-    writing = run_writing(facts, ["kitchen"], {"meta": meta, "baseten": baseten}, lambda row: None)
+    writing = run_writing(facts, PHOTOS, {"meta": meta, "baseten": baseten}, lambda row: None)
     path = tmp_path / "listing.html"
     build_page(
         path,
@@ -59,3 +59,11 @@ def test_the_flag_on_a_rewritten_original_stays_visible(tmp_path, facts):
     )
     outside_details = re.sub(r"<details>.*?</details>", "", page, flags=re.S)
     assert "The first version was FLAGGED" in outside_details
+
+
+def test_page_has_a_known_limits_section(tmp_path, facts):
+    page = _page(tmp_path, facts, Fake("meta"), Fake("baseten"))
+    assert "<h2>Known limits</h2>" in page
+    section = page.split("<h2>Known limits</h2>")[1]
+    assert "second floor" in section and "a person approves" in section.lower()
+    assert "&quot;bachelor pad&quot;" in section

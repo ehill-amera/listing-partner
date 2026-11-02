@@ -33,7 +33,12 @@ def _meta(url, headers, body):
         else:
             _meta.n += 1
             text = json.dumps(
-                {"room": ROOMS[_meta.n - 1], "sharpness": 4, "framing": 4, "note": "ok"}
+                {
+                    "room": ROOMS[_meta.n - 1],
+                    "sharpness": 4,
+                    "framing": 4,
+                    "note": f"visual note {_meta.n} here",
+                }
             )
     return {"id": "m", "text": text, "usage": {"input_tokens": 100, "output_tokens": 100}}
 
@@ -222,3 +227,32 @@ def test_reuse_refuses_when_a_photo_is_added(env):
 def test_reuse_refuses_when_nothing_is_saved(env):
     with pytest.raises(curate.SavedCurationInvalid):
         run_listing(**env, reuse_curation=True)
+
+
+def test_both_models_get_muse_sparks_notes_and_the_new_description_rules(env):
+    seen = {"meta": [], "baseten": []}
+
+    def meta_spy(url, headers, body):
+        inp = json.loads(body)["input"]
+        if isinstance(inp, str):
+            seen["meta"].append(inp)
+        return _meta(url, headers, body)
+
+    def baseten_spy(url, headers, body):
+        seen["baseten"].append(json.loads(body)["messages"][0]["content"])
+        return _baseten(url, headers, body)
+
+    env["meta_transport"], env["baseten_transport"] = meta_spy, baseten_spy
+    run_listing(**env)
+    for kind in ("DESCRIPTION", "CAPTIONS"):
+        a = [p for p in seen["meta"] if p.startswith(kind)]
+        b = [p for p in seen["baseten"] if p.startswith(kind)]
+        assert len(a) == 1 and a == b
+        # Kept shots' notes go to both models. Photo 7 was dropped as a duplicate.
+        for n in range(1, 7):
+            assert f"visual note {n} here" in a[0]
+        assert "visual note 7 here" not in a[0]
+    prompt = next(p for p in seen["baseten"] if p.startswith("DESCRIPTION"))
+    assert "90 to 200 words" in prompt and "120" not in prompt
+    assert "State each fact once" in prompt
+    assert "Then describe the rooms" in prompt

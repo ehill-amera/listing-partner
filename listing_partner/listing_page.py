@@ -7,6 +7,7 @@ from html import escape
 from pathlib import Path
 
 from listing_partner.facts import is_sample, prompt_facts
+from listing_partner.known_limits import LIMITS
 from listing_partner.scoring import AMENITY_GROUPS
 
 NAMES = {"meta": "Muse Spark", "baseten": "Muse Spark Open"}
@@ -163,6 +164,9 @@ def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchma
         parts.append(f"<h3>{TITLES[job]}</h3><div class=pair>")
         parts += [_card(lab, by_id[(job, p)], reviewers) for lab, p in zip("AB", order)]
         parts.append("</div>")
+    parts.append("<h2>Known limits</h2><ul>")
+    parts += [f"<li>{escape(limit)}</li>" for limit in LIMITS]
+    parts.append("</ul>")
     parts.append("<h3>Which model did better</h3>")
     parts += [_pick(job, writing["picks"][job]) for job in ("description", "captions", "review")]
     parts.append('<p>Names and results stay hidden until "show which model" is on.</p>')

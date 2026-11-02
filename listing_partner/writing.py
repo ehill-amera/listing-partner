@@ -11,13 +11,21 @@ from listing_partner.facts import prompt_facts
 
 MAX_TOKENS = 8192
 _RULES = (
-    "Use only these facts. Do not state any number or amenity that is not in them, including "
-    "anything a room label suggests. Describe the property only: never say who should or "
-    "should not live there (family status, age, religion, race, color, national origin, sex, "
-    "disability). Reply with the requested text only, no preface."
+    "Use only these facts and these photo notes. Every number and every amenity you state must "
+    "be in the facts. Do not state one that is not, even if a room label or a photo note "
+    "mentions it, and give no count of windows, photos or anything else the facts do not count. "
+    "Anything else you say about how a room looks must come from the room labels and the notes. "
+    "Invent nothing. A note's remarks about the photo itself (clear, centered, visible) say "
+    "nothing about the home, and several photos can show the same room. Describe the property "
+    "only: never say who should or should not live there (family status, age, religion, race, "
+    "color, national origin, sex, disability). Reply with the requested text only, no preface."
+)
+_DESCRIPTION_SHAPE = (
+    "90 to 200 words. State each fact once and do not repeat any of them. Then describe the "
+    "rooms that were photographed, in the order listed"
 )
 _LIMITS = {
-    "description": "120 to 220 words",
+    "description": _DESCRIPTION_SHAPE,
     "caption_social": "under 300 characters, plus up to 5 hashtags",
     "caption_video": "under 150 characters",
 }
@@ -33,24 +41,30 @@ def _hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
 
-def _context(facts: dict, rooms: list[str]) -> str:
+def _photo_line(photo: dict) -> str:
+    note = str(photo.get("note") or "").strip()
+    return f"- {photo['room']}: {note}" if note else f"- {photo['room']}"
+
+
+def _context(facts: dict, photos: list[dict]) -> str:
+    lines = "\n".join(_photo_line(p) for p in photos)
     return (
         f"Facts: {json.dumps(prompt_facts(facts), sort_keys=True)}\n"
-        f"Rooms photographed: {', '.join(rooms)}\n{_RULES}"
+        f"Photos in walk-through order, each a room label and a short note:\n{lines}\n{_RULES}"
     )
 
 
-def description_prompt(facts, rooms):
-    head = "DESCRIPTION. Write a rental listing description, 120 to 220 words."
-    return f"{head}\n{_context(facts, rooms)}"
+def description_prompt(facts, photos):
+    head = f"DESCRIPTION. Write a rental listing description, {_DESCRIPTION_SHAPE}."
+    return f"{head}\n{_context(facts, photos)}"
 
 
-def captions_prompt(facts, rooms):
+def captions_prompt(facts, photos):
     return (
         "CAPTIONS. Write two social captions. Reply with JSON only: "
         '{"instagram_facebook": "...", "video": "..."}. instagram_facebook is under 300 '
         "characters plus up to 5 hashtags. video is for a short video post, under 150 "
-        f"characters.\n{_context(facts, rooms)}"
+        f"characters.\n{_context(facts, photos)}"
     )
 
 
@@ -64,11 +78,11 @@ def review_prompt(text: str) -> str:
     )
 
 
-def rewrite_prompt(text_id, text, failures, facts, rooms):
+def rewrite_prompt(text_id, text, failures, facts, photos):
     named = "\n".join(f"- {f}" for f in failures)
     return (
         f"REWRITE. This text failed these checks:\n{named}\nText:\n{text}\nRewrite it to pass, "
-        f"{_LIMITS[text_id]}. Reply with the text only.\n{_context(facts, rooms)}"
+        f"{_LIMITS[text_id]}. Reply with the text only.\n{_context(facts, photos)}"
     )
 
 
@@ -100,9 +114,10 @@ def choose(rows: dict) -> str:
     return "tie"
 
 
-def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
-    """providers maps meta and baseten to (prompt, max_tokens) -> client result.
-    log receives one row per model call."""
+def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
+    """photos are the kept shots in order, each with its room and note. providers
+    maps meta and baseten to (prompt, max_tokens) -> client result. log receives
+    one row per model call."""
     costs = {p: {"description": 0.0, "captions": 0.0, "review": 0.0} for p in providers}
     review_stats = {p: {"unreadable": 0, "missed": 0} for p in providers}
 
@@ -175,7 +190,7 @@ def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
     def finish(text_id, author, first):
         attempts = [first]
         if needs_rewrite(first):
-            prompt = rewrite_prompt(text_id, first["text"], first["failures"], facts, rooms)
+            prompt = rewrite_prompt(text_id, first["text"], first["failures"], facts, photos)
             out, phash = call(author, prompt)
             costs[author][_JOB[text_id]] += out["actual_usd"]
             second = evaluate(
@@ -218,7 +233,7 @@ def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
 
     texts = []
     for author in providers:
-        prompt = description_prompt(facts, rooms)
+        prompt = description_prompt(facts, photos)
         out, phash = call(author, prompt)
         costs[author]["description"] += out["actual_usd"]
         text = out["text"].strip()
@@ -237,7 +252,7 @@ def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
         )
         texts.append(finish("description", author, first))
 
-        prompt = captions_prompt(facts, rooms)
+        prompt = captions_prompt(facts, photos)
         out, phash = call(author, prompt)
         costs[author]["captions"] += out["actual_usd"]
         pair = _parse_captions(out["text"])

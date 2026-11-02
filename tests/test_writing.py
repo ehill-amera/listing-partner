@@ -15,6 +15,12 @@ GOOD_CAPS = json.dumps(
 )
 
 
+PHOTOS = [
+    {"room": "kitchen", "note": "bright clean kitchen"},
+    {"room": "bedroom", "note": "empty room with wood floor"},
+]
+
+
 class Fake:
     """A model: answers by prompt kind, records what it was sent."""
 
@@ -42,7 +48,7 @@ def facts():
 
 def _run(facts, a, b):
     log = []
-    out = run_writing(facts, ["kitchen", "bedroom"], {"meta": a, "baseten": b}, log.append)
+    out = run_writing(facts, PHOTOS, {"meta": a, "baseten": b}, log.append)
     return out, log
 
 
@@ -58,6 +64,20 @@ def test_both_models_get_the_same_generation_prompt_and_no_source_field(facts):
         y = [p for p in b.prompts if p.startswith(kind)]
         assert len(x) == 1 and x == y
     assert "SAMPLE DATA" not in a.prompts[0] and "Dishwasher" in a.prompts[0]
+
+
+def test_a_rewrite_keeps_the_notes_and_the_description_shape(facts):
+    a = Fake("meta", desc=GOOD_DESC.replace("2 bedroom", "3 bedroom"))
+    _run(facts, a, Fake("baseten"))
+    rewrite = next(p for p in a.prompts if p.startswith("REWRITE"))
+    assert "bright clean kitchen" in rewrite and "State each fact once" in rewrite
+    assert "90 to 200 words" in rewrite
+
+
+def test_a_photo_without_a_note_still_lists_its_room(facts):
+    a = Fake("meta")
+    run_writing(facts, [{"room": "kitchen", "note": ""}], {"meta": a, "baseten": Fake("b")}, print)
+    assert "- kitchen\n" in a.prompts[0]
 
 
 def test_every_text_is_reviewed_by_both_models(facts):

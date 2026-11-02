@@ -7,11 +7,18 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from listing_partner import baseten_client, coverage, curate, listing_page, meta_client, writing
+from listing_partner import (
+    baseten_client,
+    coverage,
+    curate,
+    listing_page,
+    meta_client,
+    scoring,
+    writing,
+)
 from listing_partner.facts import load_facts
 
 SPARK = "muse-spark-1.3"
@@ -171,7 +178,7 @@ def run_listing(
         curation_path.write_text(json.dumps(curation, indent=1))
     kept, dropped = curation["kept"], curation["dropped"]
     rows = coverage.check_coverage(facts, kept)
-    rooms = [f"{n} {room}" for room, n in Counter(p["room"] for p in kept).items()]
+    photos = [{"room": p["room"], "note": p.get("note", "")} for p in kept]
 
     log_dir = output_dir / "writing"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +194,7 @@ def run_listing(
         with open(log_path, "a", encoding="utf-8") as handle:  # noqa: PTH123
             handle.write(json.dumps(row) + "\n")
 
-    result = writing.run_writing(facts, rooms, {"meta": meta, "baseten": baseten}, log)
+    result = writing.run_writing(facts, photos, {"meta": meta, "baseten": baseten}, log)
 
     bench = None
     if mls_positions:
@@ -225,6 +232,14 @@ def run_listing(
         "picks": result["picks"],
         "statuses": {f"{t['id']}/{t['provider']}": t["status"] for t in result["texts"]},
         "rewrites": sum(len(t["attempts"]) > 1 for t in result["texts"]),
+        "descriptions": {
+            t["provider"]: {
+                "words": len(t["final"].split()),
+                "fact_mentions": scoring.fact_mentions(t["final"], facts),
+            }
+            for t in result["texts"]
+            if t["id"] == "description"
+        },
         "coverage": [{"room": r["room"], "status": r["status"]} for r in rows],
         "crop_rounds": sum(1 for p in [*kept, *dropped] if p.get("cropped")),
         "kept_order": [p["id"] for p in kept],
