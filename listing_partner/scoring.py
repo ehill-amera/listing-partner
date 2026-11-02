@@ -58,9 +58,9 @@ _FOLLOWED_BY = {
     "bedrooms": re.compile(rf"{_REACH}(?:{_BED})", re.I),
     "bathrooms": re.compile(rf"{_REACH}(?:{_BATH})", re.I),
     "square_feet": re.compile(rf"{_REACH}(?:{_SQFT})", re.I),
-    "deposit_usd": re.compile(r"\s*(?:dollars?\s+)?(?:security\s+)?deposit\b", re.I),
+    "deposit_usd": re.compile(r"\s*(?:(?:dollars?|usd)\s+)?(?:security\s+)?deposit\b", re.I),
     "rent_monthly_usd": re.compile(
-        r"\s*(?:dollars?\s*)?(?:(?:per|a|each|every)\s+month\b|/\s*mo(?:nth)?\b|monthly\b|rent\b)",
+        r"\s*(?:(?:dollars?|usd)\s*)?(?:(?:per|a|each|every)\s+month\b|/\s*mo(?:nth)?\b|monthly\b|rent\b)",
         re.I,
     ),
 }
@@ -82,7 +82,8 @@ _FACT_NAMES = {
     "deposit_usd": "the deposit",
     "rent_monthly_usd": "the rent",
 }
-_MONEY_AFTER = re.compile(r"\s*dollars?\b", re.I)
+_MONEY_AFTER = re.compile(r"\s*(?:dollars?|usd)\b", re.I)
+_MONEY_BEFORE = re.compile(r"(?:\$|\busd\s*)$", re.I)
 
 # Each group is one amenity and its plain synonyms. A group named in a text
 # must have some member in the facts. A term outside this list goes unseen,
@@ -244,7 +245,7 @@ def _number_failures(text: str, facts: dict) -> list[str]:
                     f"number not in the facts: {raw} next to {_FACT_NAMES[key]}, "
                     f"the facts say {said}"
                 )
-        elif text[max(0, start - 1) : start] == "$" or _MONEY_AFTER.match(text, end):
+        elif _MONEY_BEFORE.search(text[:start]) or _MONEY_AFTER.match(text, end):
             if value not in money:
                 failures.append(f"number not in the facts: {raw} as money")
         elif raw.lower() == "one" and not _ONE_COUNTS.match(text, end):

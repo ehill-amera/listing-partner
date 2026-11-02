@@ -115,6 +115,30 @@ def test_a_number_beside_no_fact_is_invented(text, facts):
     assert any(f.startswith("number not in the facts") for f in failures), text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Offered at 1400 USD per month",
+        "1,400 usd a month",
+        "USD 1,400 a month",
+        "USD 1400",
+        "1400 USD",
+        "1400 USD deposit",
+    ],
+)
+def test_money_written_as_usd_passes_after_a_live_false_failure(text, facts):
+    assert check_facts(text, facts) == [], text
+
+
+@pytest.mark.parametrize("text", ["Offered at 900 USD per month", "900 USD", "USD 900"])
+def test_a_wrong_figure_written_as_usd_fails(text, facts):
+    assert check_facts(text, facts), text
+
+
+def test_a_wrong_usd_rent_is_named_as_the_rent(facts):
+    assert any("next to the rent" in f for f in check_facts("900 USD per month", facts))
+
+
 @pytest.mark.parametrize("text", ["Available January 15, 2030", "Available Jan 15", "Open 1/15"])
 def test_the_available_date_in_common_forms_passes(text, facts):
     assert check_facts(text, facts) == [], text
