@@ -1,5 +1,6 @@
 import pytest
 
+from listing_partner import fair_housing
 from listing_partner.fair_housing import PHRASES, SOURCES, find_phrases
 
 
@@ -45,6 +46,65 @@ def test_steering_language_fails(text):
 )
 def test_describing_the_property_stays_fine(text):
     assert find_phrases(text) == [], text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The first review's probes, each of which returned no hit on bc8043b.
+        "adults preferred",
+        "men preferred",
+        "woman preferred",
+        "seniors preferred",
+        "perfect for a young family",
+        "perfect for a growing family",
+        "best suited to a couple",
+        "suited to a single person",
+        "no young children",
+        "not for kids",
+        "female roommate wanted",
+        "single person only",
+        "english speakers preferred",
+        # The amendment's other wording.
+        "preference for adults",
+        "A seniors preference applies.",
+        "Preference given to young couples.",
+        "Not for young kids.",
+        "Great for a busy professional.",
+    ],
+)
+def test_review_probes_and_amendment_wording_fail(text):
+    assert find_phrases(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Handicapped accessible entrance.",
+        "handicapped-accessible bathroom",
+        "Wheelchair accessible throughout.",
+        "Preferred parking spot behind the building.",
+        "No smoking. Not for sale.",
+        "Perfect for a home office.",
+        "Great for entertaining.",
+        "A single-family home.",
+        "Ideal for a single-family layout.",
+        "The family room is perfect for movie night.",
+    ],
+)
+def test_property_wording_near_the_new_patterns_stays_fine(text):
+    assert find_phrases(text) == [], text
+
+
+def test_handicapped_about_people_still_fails():
+    assert find_phrases("Handicapped tenants welcome.")
+    assert find_phrases("No handicapped.")
+
+
+def test_file_says_it_is_a_screen_and_a_person_approves():
+    doc = " ".join(fair_housing.__doc__.split())
+    assert "a screen, not legal advice" in doc
+    assert "person approves before posting" in doc
 
 
 def test_matching_ignores_case_and_extra_spaces():

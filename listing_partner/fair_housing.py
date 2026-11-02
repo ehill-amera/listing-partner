@@ -1,21 +1,20 @@
 """Fixed list of words that say who should or should not live somewhere.
 
-Built for contract 03 from these sources:
+This list is a screen, not legal advice. A clean result means no listed phrase
+was found, not that a text is compliant, so both models also review every text
+and a person approves before posting.
+
+Built for contract 03, as amended Nov 2, from:
 - 42 U.S.C. 3604(c): no advertisement may state a preference, limitation or
   discrimination based on race, color, religion, sex, handicap, familial
   status or national origin.
-- 24 CFR 100.75(c)(1): words or phrases that convey dwellings are available
-  or not available to a particular group. Read 2026-11-02. It gives categories,
-  not a word list.
-- HUD's January 9, 1995 advertising guidance (the Achtenberg memo). Its text
-  could not be retrieved on 2026-11-02, so its specific examples were NOT
-  checked against this list. Property descriptions that stay allowed here
-  (family room, master bedroom, walk-in closet, near a park, wheelchair ramp)
-  come from contract 03's reading of it.
+- 24 CFR 100.75: words or phrases that convey dwellings are available or not
+  available to a particular group, and expressing a preference or limitation.
 
-The phrases themselves are a builder's selection, not legal advice. A clean
-result means no listed phrase was found, not that a text is compliant, which
-is why both models also review every text and a person sees any disagreement.
+Background only: HUD's January 9, 1995 advertising guidance (the Achtenberg
+memo). Its text could not be retrieved from hud.gov during the build, so its
+examples were NOT checked against this list. The phrases are a builder's
+selection under these sources.
 """
 
 from __future__ import annotations
@@ -25,32 +24,49 @@ import re
 SOURCES = [
     "42 U.S.C. 3604(c)",
     "24 CFR 100.75",
-    "HUD advertising guidance, January 9, 1995 (Achtenberg memo); text not retrieved",
+    "HUD advertising guidance, January 9, 1995 (Achtenberg memo); background only, not retrieved",
 ]
 
-_PEOPLE = (
-    r"couples?|famil(?:y|ies)(?! room)|kids|children|singles?|bachelors?|bachelorettes?|"
-    r"(?:young |single |working )?professionals?|retirees?|seniors?|students?|newlyweds|"
-    r"empty[- ]nesters?|men|women|ladies|gentlemen"
+_FAMILY = (
+    r"couples?|(?<!single[- ])famil(?:y|ies)(?! room)|kids|children|minors|teenagers|infants|"
+    r"babies|singles?(?![- ](?:family|level|story|car))|single (?:persons?|people)|bachelors?|"
+    r"bachelorettes?|newlyweds|adults?|students?|(?:\w+ )?professionals?"
 )
-_FIT = (
-    r"(?:perfect|ideal|great|best|suited|suitable|made|wonderful) for "
-    rf"(?:an? |the |your )?(?:{_PEOPLE})"
-)
+_AGE = r"retirees?|seniors?|elderly|empty[- ]nesters?"
+_SEX = r"men|man|women|woman|males?|females?|ladies|gentlemen|girls|boys"
+_RACE = r"whites?|blacks?|caucasians?|african[- ]americans?|asians?|hispanics?|latinos?"
+_RELIGION = r"christians?|catholics?|protestants?|jewish|jews?|muslims?|mormons?|hindus?|buddhists?"
+_ORIGIN = r"english[- ]speak(?:ing|ers?)|citizens?|immigrants?|foreigners?|american[- ]born"
+_GAP = r"(?:[\w'-]+ ){0,2}"
+_OCCUPANT = r"roommates?|housemates?|tenants?|renters?|residents?|occupants?|applicants?"
+
+
+def _aimed_at(group: str) -> list[str]:
+    """Wording that points a home at a group or away from it. Up to two words
+    may sit before the group: "a young family", "a growing family"."""
+    return [
+        rf"(?:perfect|ideal|great|best|suited|suitable|made|wonderful|designed|intended|meant)"
+        rf" (?:for|to) {_GAP}(?:{group})",
+        rf"not (?:for|(?:suitable|suited|intended|meant|designed) (?:for|to)) {_GAP}(?:{group})",
+        rf"(?:{group}) (?:(?:are|is) )?(?:preferred|preference)",
+        rf"(?:preferred|preference|prefers?)(?: (?:for|to|given to))? {_GAP}(?:{group})",
+    ]
+
 
 _GROUPS = {
     "familial status": [
-        r"no (?:kids|children|minors|teenagers|infants|babies)",
+        r"no (?:\w+ )?(?:kids|children|minors|teenagers|infants|babies)",
         r"adults? only",
         r"adult (?:community|building|living)",
-        r"no famil(?:y|ies)(?! room)",
+        r"no (?:famil(?:y|ies)(?! room)|couples|singles|adults)",
         r"famil(?:y|ies) only",
         r"couples? only",
         r"singles? only",
+        r"single (?:persons?|people|occupants?|tenants?|residents?) only",
         r"family[- ]friendly",
         r"child[- ]free",
-        r"not suitable for (?:kids|children|families)",
-        _FIT,
+        r"(?:young|growing) (?:famil(?:y|ies)|kids|children)",
+        *_aimed_at(_FAMILY),
     ],
     "age steering": [
         r"mature(?! (?:trees?|landscaping|shade|gardens?|plantings?|oaks?|maples?))",
@@ -60,24 +76,18 @@ _GROUPS = {
         r"older (?:tenants?|residents?|adults?|persons?)",
         r"senior (?:living|community)",
         r"empty[- ]nesters?",
+        *_aimed_at(_AGE),
     ],
     "race or color": [
-        r"(?:whites?|blacks?|caucasians?|african[- ]americans?|asians?|hispanics?|latinos?) only",
+        rf"(?:{_RACE}) only",
         r"no (?:whites?|blacks?|caucasians?|asians?|hispanics?|latinos?)",
         r"(?:white|black|caucasian|hispanic|asian) (?:neighborhood|community|area|tenants?|family)",
         r"integrated (?:neighborhood|community)",
         r"segregated",
+        *_aimed_at(_RACE),
     ],
     "religion": [
-        r"christians?",
-        r"catholics?",
-        r"protestants?",
-        r"jewish",
-        r"jews?",
-        r"muslims?",
-        r"mormons?",
-        r"hindus?",
-        r"buddhists?",
+        rf"{_RELIGION}",
         r"sikhs?",
         r"church[- ]going",
         r"god[- ]fearing",
@@ -89,11 +99,14 @@ _GROUPS = {
         r"no (?:immigrants?|foreigners?)",
         r"american[- ]born",
         r"(?:mexican|irish|italian|polish|arab|chinese|indian) (?:neighborhood|community|family)",
+        *_aimed_at(_ORIGIN),
     ],
     "sex": [
-        r"(?:men|males?|women|females?|ladies|gentlemen|girls|boys) only",
+        rf"(?:{_SEX}) only",
         r"no (?:men|males?|women|females?)",
         r"single (?:man|woman|male|female|mother|father|dad|mom)",
+        rf"(?:male|female|men|women|man|woman) (?:{_OCCUPANT})",
+        *_aimed_at(_SEX),
     ],
     "disability": [
         r"no wheelchairs?",
@@ -103,7 +116,9 @@ _GROUPS = {
         r"no (?:handicapped|disabled|disabilities|crutches|walkers)",
         r"not (?:suitable|suited) for (?:the )?(?:handicapped|disabled|wheelchairs?)",
         r"no mental(?:ly)? ill(?:ness)?",
-        r"handicapped",
+        # About people it fails. About the building it describes a feature.
+        r"handicapped(?![- ](?:accessible|accessibility|access|parking|ramps?|bathrooms?|"
+        r"entrances?|showers?|features?))",
         r"crippled",
     ],
 }
