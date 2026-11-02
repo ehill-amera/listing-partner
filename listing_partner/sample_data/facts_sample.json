@@ -1,0 +1,15 @@
+{
+  "source": "SAMPLE DATA: a hand-written, fictional unit for tests and public runs. Not a real property.",
+  "unit": "sample",
+  "bedrooms": 2,
+  "bathrooms": 1,
+  "square_feet": 900,
+  "rent_monthly_usd": 1400,
+  "deposit_usd": 1400,
+  "available_date": "2030-01-15",
+  "pet_policy": "Cats allowed",
+  "property_type": "Apartment",
+  "city": "Sampleville",
+  "state": "MI",
+  "amenities": ["Dishwasher", "Central air", "Off-street parking", "Hardwood floors"]
+}

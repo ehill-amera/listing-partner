@@ -1,0 +1,282 @@
+"""Three text jobs, both models, the same prompts and the same checks."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+
+from listing_partner import fair_housing, scoring
+from listing_partner.facts import prompt_facts
+
+MAX_TOKENS = 4096
+_RULES = (
+    "Use only these facts. Do not state any number or amenity that is not in them, including "
+    "anything a room label suggests. Describe the property only: never say who should or "
+    "should not live there (family status, age, religion, race, color, national origin, sex, "
+    "disability). Reply with the requested text only, no preface."
+)
+_LIMITS = {
+    "description": "120 to 220 words",
+    "caption_social": "under 300 characters, plus up to 5 hashtags",
+    "caption_video": "under 150 characters",
+}
+_LENGTH = {
+    "description": scoring.check_description_length,
+    "caption_social": scoring.check_social_caption,
+    "caption_video": scoring.check_video_caption,
+}
+_JOB = {"description": "description", "caption_social": "captions", "caption_video": "captions"}
+
+
+def _hash(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+
+
+def _context(facts: dict, rooms: list[str]) -> str:
+    return (
+        f"Facts: {json.dumps(prompt_facts(facts), sort_keys=True)}\n"
+        f"Rooms photographed: {', '.join(rooms)}\n{_RULES}"
+    )
+
+
+def description_prompt(facts, rooms):
+    head = "DESCRIPTION. Write a rental listing description, 120 to 220 words."
+    return f"{head}\n{_context(facts, rooms)}"
+
+
+def captions_prompt(facts, rooms):
+    return (
+        "CAPTIONS. Write two social captions. Reply with JSON only: "
+        '{"instagram_facebook": "...", "video": "..."}. instagram_facebook is under 300 '
+        "characters plus up to 5 hashtags. video is for a short video post, under 150 "
+        f"characters.\n{_context(facts, rooms)}"
+    )
+
+
+def review_prompt(text: str) -> str:
+    return (
+        "REVIEW. You are checking rental advertising under the U.S. Fair Housing Act, 42 U.S.C. "
+        "3604(c). Does this text state or imply a preference, limitation or discrimination based "
+        "on race, color, religion, sex, disability, familial status or national origin? "
+        "Describing the property itself is fine. Reply on one line: PASS, or FAIL - and the "
+        f"reason.\nText:\n{text}"
+    )
+
+
+def rewrite_prompt(text_id, text, failures, facts, rooms):
+    named = "\n".join(f"- {f}" for f in failures)
+    return (
+        f"REWRITE. This text failed these checks:\n{named}\nText:\n{text}\nRewrite it to pass, "
+        f"{_LIMITS[text_id]}. Reply with the text only.\n{_context(facts, rooms)}"
+    )
+
+
+def parse_review(text: str | None) -> tuple[str | None, str]:
+    """(pass, fail, or None when the reply says neither), and the reason."""
+    match = re.match(r"\s*\W*(PASS|FAIL)\b\W*(.*)", text or "", re.I | re.S)
+    if not match:
+        return None, "reply was neither PASS nor FAIL"
+    return match.group(1).lower(), match.group(2).strip()
+
+
+def _parse_captions(text: str) -> tuple[str, str] | None:
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        data = json.loads(text[start : end + 1])
+        social, video = data["instagram_facebook"], data["video"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return (social, video) if isinstance(social, str) and isinstance(video, str) else None
+
+
+def choose(rows: dict) -> str:
+    """Fewer failed checks first, then lower cost. A dead heat is a tie."""
+    a, b = rows["meta"], rows["baseten"]
+    if a["failed_checks"] != b["failed_checks"]:
+        return "meta" if a["failed_checks"] < b["failed_checks"] else "baseten"
+    if round(a["cost_usd"], 6) != round(b["cost_usd"], 6):
+        return "meta" if a["cost_usd"] < b["cost_usd"] else "baseten"
+    return "tie"
+
+
+def run_writing(facts: dict, rooms: list[str], providers: dict, log) -> dict:
+    """providers maps meta and baseten to (prompt, max_tokens) -> client result.
+    log receives one row per model call."""
+    costs = {p: {"description": 0.0, "captions": 0.0, "review": 0.0} for p in providers}
+    review_stats = {p: {"unreadable": 0, "missed": 0} for p in providers}
+
+    def call(provider, prompt):
+        out = providers[provider](prompt, MAX_TOKENS)
+        return out, _hash(prompt)
+
+    def row(job, text_id, attempt, provider, phash, out, **extra):
+        log(
+            {
+                "job": job,
+                "text_id": text_id,
+                "attempt": attempt,
+                "provider": provider,
+                "model": providers[provider].model,
+                "prompt_hash": phash,
+                "cost_usd": round(out["actual_usd"], 6),
+                "request_id": out.get("request_id"),
+                "output": out["text"],
+                **extra,
+            }
+        )
+
+    def evaluate(text_id, author, text, attempt, extra_failure=None):
+        failures = [extra_failure] if extra_failure else []
+        words = fair_housing.find_phrases(text)
+        failures += scoring.check_facts(text, facts)
+        failures += [f"fair housing: {h['phrase']} ({h['category']})" for h in words]
+        failures += _LENGTH[text_id](text)
+        reviews = {}
+        prompt = review_prompt(text)
+        for reviewer in providers:
+            out, phash = call(reviewer, prompt)
+            verdict, reason = parse_review(out["text"])
+            costs[reviewer]["review"] += out["actual_usd"]
+            if verdict is None:
+                review_stats[reviewer]["unreadable"] += 1
+            elif verdict == "pass" and words:
+                review_stats[reviewer]["missed"] += 1
+            reviews[reviewer] = {"verdict": verdict, "reason": reason}
+            row(
+                "review",
+                text_id,
+                attempt,
+                reviewer,
+                phash,
+                out,
+                reviewed_author=author,
+                verdicts={reviewer: verdict},
+            )
+        opinion = scoring.second_opinion(reviews["meta"]["verdict"], reviews["baseten"]["verdict"])
+        if opinion == "fail":
+            failures.append("second opinion: both models failed this text")
+        elif opinion == "flag":
+            failures.append("second opinion: the models did not agree, a person decides")
+        return {
+            "text": text,
+            "failures": failures,
+            "reviews": reviews,
+            "second_opinion": opinion,
+        }
+
+    def needs_rewrite(attempt):
+        # A disagreement goes to a person as written, so a rewrite cannot erase it.
+        return attempt["second_opinion"] != "flag" and bool(attempt["failures"])
+
+    def finish(text_id, author, first):
+        attempts = [first]
+        if needs_rewrite(first):
+            prompt = rewrite_prompt(text_id, first["text"], first["failures"], facts, rooms)
+            out, phash = call(author, prompt)
+            costs[author][_JOB[text_id]] += out["actual_usd"]
+            second = evaluate(
+                text_id,
+                author,
+                out["text"].strip(),
+                1,
+                None if out["text"].strip() else "format: reply unreadable",
+            )
+            row(
+                _JOB[text_id],
+                text_id,
+                1,
+                author,
+                phash,
+                out,
+                checks={text_id: second["failures"]},
+                verdicts={text_id: second["reviews"]},
+            )
+            attempts.append(second)
+        last = attempts[-1]
+        hard = [f for f in last["failures"] if not f.startswith("second opinion")]
+        status = (
+            "failed"
+            if hard or last["second_opinion"] == "fail"
+            else "flagged"
+            if last["second_opinion"] == "flag"
+            else "pass"
+        )
+        return {
+            "id": text_id,
+            "job": _JOB[text_id],
+            "provider": author,
+            "model": providers[author].model,
+            "attempts": attempts,
+            "final": last["text"],
+            "status": status,
+        }
+
+    texts = []
+    for author in providers:
+        prompt = description_prompt(facts, rooms)
+        out, phash = call(author, prompt)
+        costs[author]["description"] += out["actual_usd"]
+        text = out["text"].strip()
+        first = evaluate(
+            "description", author, text, 0, None if text else "format: reply unreadable"
+        )
+        row(
+            "description",
+            "description",
+            0,
+            author,
+            phash,
+            out,
+            checks={"description": first["failures"]},
+            verdicts={"description": first["reviews"]},
+        )
+        texts.append(finish("description", author, first))
+
+        prompt = captions_prompt(facts, rooms)
+        out, phash = call(author, prompt)
+        costs[author]["captions"] += out["actual_usd"]
+        pair = _parse_captions(out["text"])
+        bad = None if pair else "format: reply was not the requested JSON"
+        social, video = pair or (out["text"].strip(), out["text"].strip())
+        firsts = {
+            "caption_social": evaluate("caption_social", author, social.strip(), 0, bad),
+            "caption_video": evaluate("caption_video", author, video.strip(), 0, bad),
+        }
+        row(
+            "captions",
+            "captions",
+            0,
+            author,
+            phash,
+            out,
+            checks={k: v["failures"] for k, v in firsts.items()},
+            verdicts={k: v["reviews"] for k, v in firsts.items()},
+        )
+        texts.extend(finish(k, author, v) for k, v in firsts.items())
+
+    picks = {}
+    for job in ("description", "captions"):
+        rows = {
+            p: {
+                "failed_checks": sum(
+                    len(a["failures"])
+                    for t in texts
+                    if t["provider"] == p and t["job"] == job
+                    for a in t["attempts"]
+                ),
+                "cost_usd": round(costs[p][job], 6),
+            }
+            for p in providers
+        }
+        picks[job] = {"rows": rows, "better": choose(rows)}
+    rows = {
+        p: {
+            "failed_checks": review_stats[p]["unreadable"] + review_stats[p]["missed"],
+            "cost_usd": round(costs[p]["review"], 6),
+            **review_stats[p],
+        }
+        for p in providers
+    }
+    picks["review"] = {"rows": rows, "better": choose(rows)}
+    return {"texts": texts, "picks": picks}
