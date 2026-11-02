@@ -96,6 +96,93 @@ def test_property_wording_near_the_new_patterns_stays_fine(text):
     assert find_phrases(text) == [], text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The second review's probes, each of which returned no hit on 2a757ba.
+        "adults-only building",
+        "adult-only",
+        "seniors-only",
+        "no seniors",
+        "no students",
+        "no teens",
+        "no toddlers",
+        "no child",
+        "no pets or children",
+        "kids not allowed",
+        "children not allowed",
+        "unsuitable for children",
+        "not appropriate for children",
+        "not recommended for children",
+        "adults strongly preferred",
+        "seniors strongly preferred",
+        "preference will be given to seniors",
+        "preferred tenants: adults",
+        "gentleman preferred",
+        "lady preferred",
+        "perfect for a busy working couple",
+        "best suited to a busy working family",
+        "ideal for a small quiet family",
+        "good for families",
+        "families welcome",
+        "kid-friendly",
+        "professionals only",
+        "english only",
+    ],
+)
+def test_second_review_probes_fail(text):
+    assert find_phrases(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The amendment's classes applied across the other listed groups.
+        "no retirees",
+        "no couples or kids",
+        "students not permitted",
+        "seniors are not allowed",
+        "inappropriate for toddlers",
+        "good for retirees",
+        "good for a young couple",
+        "students welcome",
+        "seniors are welcome",
+        "senior-friendly",
+        "student-friendly",
+        "couples strongly preferred",
+        "men-only",
+        "christian-only",
+    ],
+)
+def test_amendment_two_classes_reach_the_other_groups(text):
+    assert find_phrases(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No pets or smoking.",
+        "No smoking.",
+        "No carpet in the bedrooms.",
+        "Pets welcome.",
+        "A welcome mat at the door.",
+        "Good for storage.",
+        "Good for a home office and hobbies.",
+        "The family room is welcome after a long day.",
+        "Ideal for a multi-family layout.",
+        "A multi-family building.",
+        "Dogs not allowed.",
+        "Smoking not allowed.",
+        "Unsuitable for storage of chemicals.",
+        "Preferred tenants pay on time.",
+        "Handicapped accessible entrance, wheelchair accessible.",
+        "A master bedroom and mature trees.",
+    ],
+)
+def test_property_wording_near_the_second_round_patterns_stays_fine(text):
+    assert find_phrases(text) == [], text
+
+
 def test_handicapped_about_people_still_fails():
     assert find_phrases("Handicapped tenants welcome.")
     assert find_phrases("No handicapped.")

@@ -28,42 +28,50 @@ SOURCES = [
 ]
 
 _FAMILY = (
-    r"couples?|(?<!single[- ])famil(?:y|ies)(?! room)|kids|children|minors|teenagers|infants|"
-    r"babies|singles?(?![- ](?:family|level|story|car))|single (?:persons?|people)|bachelors?|"
+    r"couples?|(?<!single[- ])(?<!multi[- ])famil(?:y|ies)(?! room)|kids?|child(?:ren)?|minors?|"
+    r"teens?|teenagers?|toddlers?|infants?|bab(?:y|ies)|"
+    r"singles?(?![- ](?:family|level|story|car))|single (?:persons?|people)|bachelors?|"
     r"bachelorettes?|newlyweds|adults?|students?|(?:\w+ )?professionals?"
 )
 _AGE = r"retirees?|seniors?|elderly|empty[- ]nesters?"
-_SEX = r"men|man|women|woman|males?|females?|ladies|gentlemen|girls|boys"
+_SEX = r"men|man|women|woman|males?|females?|lad(?:y|ies)|gentlem[ae]n|girls|boys"
 _RACE = r"whites?|blacks?|caucasians?|african[- ]americans?|asians?|hispanics?|latinos?"
 _RELIGION = r"christians?|catholics?|protestants?|jewish|jews?|muslims?|mormons?|hindus?|buddhists?"
 _ORIGIN = r"english[- ]speak(?:ing|ers?)|citizens?|immigrants?|foreigners?|american[- ]born"
-_GAP = r"(?:[\w'-]+ ){0,2}"
+_GAP = r"(?:[\w'-]+ ){0,3}"
 _OCCUPANT = r"roommates?|housemates?|tenants?|renters?|residents?|occupants?|applicants?"
+# Who a "no ..." may name: "no seniors", "no young children", "no pets or children".
+_DENIED = (
+    r"kids?|child(?:ren)?|minors?|teens?|teenagers?|toddlers?|infants?|bab(?:y|ies)|"
+    r"famil(?:y|ies)(?! room)|couples?|singles|adults?|students?|retirees?|seniors?|elderly"
+)
+_NOT_LET_IN = r"(?:not (?:allowed|permitted|welcome|accepted)|prohibited|forbidden|barred)"
 
 
 def _aimed_at(group: str) -> list[str]:
-    """Wording that points a home at a group or away from it. Up to two words
-    may sit before the group: "a young family", "a growing family"."""
+    """Wording that points a home at a group or away from it. Up to three words
+    may sit before the group: "a busy working couple"."""
     return [
-        rf"(?:perfect|ideal|great|best|suited|suitable|made|wonderful|designed|intended|meant)"
+        rf"(?:perfect|ideal|great|good|best|suited|suitable|made|wonderful|designed|intended|meant)"
         rf" (?:for|to) {_GAP}(?:{group})",
-        rf"not (?:for|(?:suitable|suited|intended|meant|designed) (?:for|to)) {_GAP}(?:{group})",
-        rf"(?:{group}) (?:(?:are|is) )?(?:preferred|preference)",
-        rf"(?:preferred|preference|prefers?)(?: (?:for|to|given to))? {_GAP}(?:{group})",
+        rf"not (?:for|(?:suitable|suited|intended|meant|designed|appropriate|recommended)"
+        rf" (?:for|to)) {_GAP}(?:{group})",
+        rf"(?:unsuitable|inappropriate) for {_GAP}(?:{group})",
+        rf"(?:{group})[- ]only",
+        rf"(?:{group}) (?:(?:are|is) )?(?:\w+ly )?(?:preferred|preference)",
+        rf"(?:preferred|preference|prefers?)(?: (?:{_OCCUPANT}):?)?"
+        rf"(?: (?:(?:will be |shall be |is )?given )?(?:for|to))? {_GAP}(?:{group})",
+        rf"(?:{group}) (?:(?:are|is) )?{_NOT_LET_IN}",
+        rf"(?:{group}) (?:(?:are|is|all|always) )*welcome",
+        rf"(?:{group})[- ]friendly",
     ]
 
 
 _GROUPS = {
     "familial status": [
-        r"no (?:\w+ )?(?:kids|children|minors|teenagers|infants|babies)",
-        r"adults? only",
+        rf"no (?:[\w'-]+(?: or|,)? ){{0,2}}(?:{_DENIED})",
         r"adult (?:community|building|living)",
-        r"no (?:famil(?:y|ies)(?! room)|couples|singles|adults)",
-        r"famil(?:y|ies) only",
-        r"couples? only",
-        r"singles? only",
         r"single (?:persons?|people|occupants?|tenants?|residents?) only",
-        r"family[- ]friendly",
         r"child[- ]free",
         r"(?:young|growing) (?:famil(?:y|ies)|kids|children)",
         *_aimed_at(_FAMILY),
@@ -71,15 +79,12 @@ _GROUPS = {
     "age steering": [
         r"mature(?! (?:trees?|landscaping|shade|gardens?|plantings?|oaks?|maples?))",
         r"young (?:professionals?|couples?|people|adults?|tenants?|residents?)",
-        r"seniors? only",
-        r"retirees? only",
         r"older (?:tenants?|residents?|adults?|persons?)",
         r"senior (?:living|community)",
         r"empty[- ]nesters?",
         *_aimed_at(_AGE),
     ],
     "race or color": [
-        rf"(?:{_RACE}) only",
         r"no (?:whites?|blacks?|caucasians?|asians?|hispanics?|latinos?)",
         r"(?:white|black|caucasian|hispanic|asian) (?:neighborhood|community|area|tenants?|family)",
         r"integrated (?:neighborhood|community)",
@@ -88,12 +93,13 @@ _GROUPS = {
     ],
     "religion": [
         rf"{_RELIGION}",
+        rf"(?:{_RELIGION})[- ]only",
         r"sikhs?",
         r"church[- ]going",
         r"god[- ]fearing",
     ],
     "national origin": [
-        r"english[- ]speak(?:ing|ers?) only",
+        r"english[- ]only",
         r"must speak english",
         r"citizens? only",
         r"no (?:immigrants?|foreigners?)",
@@ -102,7 +108,6 @@ _GROUPS = {
         *_aimed_at(_ORIGIN),
     ],
     "sex": [
-        rf"(?:{_SEX}) only",
         r"no (?:men|males?|women|females?)",
         r"single (?:man|woman|male|female|mother|father|dad|mom)",
         rf"(?:male|female|men|women|man|woman) (?:{_OCCUPANT})",
