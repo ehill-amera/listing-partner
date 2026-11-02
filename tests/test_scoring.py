@@ -1,7 +1,10 @@
+import json
+
 import pytest
 
 from listing_partner.facts import SAMPLE_FACTS_PATH, FactsError, load_facts, prompt_facts
 from listing_partner.scoring import (
+    fact_mentions,
     AMENITY_GROUPS,
     check_description_length,
     check_facts,
@@ -412,3 +415,41 @@ def test_a_text_repeating_the_facts_true_wording_passes(facts_extra, text):
 )
 def test_a_text_denying_what_the_facts_do_not_deny_fails(facts_extra, text):
     assert any("amenity" in f for f in check_facts(text, {**NO_AMENITIES, **facts_extra})), text
+
+
+def _demo_file(tmp_path, source="DEMO FACTS: a home, not a listing."):
+    path = tmp_path / "demo.json"
+    data = {
+        "source": source,
+        "bedrooms": 1,
+        "bathrooms": 1,
+        "square_feet": None,
+        "rent_monthly_usd": None,
+        "amenities": [],
+    }
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_labeled_demo_facts_may_leave_out_rent_and_square_feet(tmp_path):
+    assert load_facts(_demo_file(tmp_path))["rent_monthly_usd"] is None
+
+
+def test_facts_not_labeled_demo_still_need_rent_and_square_feet(tmp_path):
+    with pytest.raises(FactsError, match="rent_monthly_usd"):
+        load_facts(_demo_file(tmp_path, source="AppFolio"))
+
+
+def test_demo_facts_still_need_bedrooms(tmp_path):
+    path = _demo_file(tmp_path)
+    data = json.loads(path.read_text())
+    data["bedrooms"] = None
+    path.write_text(json.dumps(data))
+    with pytest.raises(FactsError, match="bedrooms"):
+        load_facts(path)
+
+
+def test_fact_mentions_with_no_rent_counts_the_facts_it_has(tmp_path):
+    facts = load_facts(_demo_file(tmp_path))
+    counts = fact_mentions("A home with 1 bedroom, and 25 dollars of charm.", facts)
+    assert counts["bedrooms"] == 1 and "rent_monthly_usd" not in counts

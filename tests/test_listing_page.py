@@ -67,3 +67,10 @@ def test_page_has_a_known_limits_section(tmp_path, facts):
     section = page.split("<h2>Known limits</h2>")[1]
     assert "second floor" in section and "a person approves" in section.lower()
     assert "&quot;bachelor pad&quot;" in section
+
+
+def test_demo_facts_are_labeled_demo_and_never_credited_to_appfolio(tmp_path, facts):
+    demo = {**facts, "source": "DEMO FACTS: a home, not a listing."}
+    html = _page(tmp_path, demo, Fake("meta"), Fake("baseten"))
+    assert "Demo facts, not a listing" in html
+    assert "AppFolio" not in html

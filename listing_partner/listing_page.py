@@ -6,7 +6,7 @@ import random
 from html import escape
 from pathlib import Path
 
-from listing_partner.facts import is_sample, prompt_facts
+from listing_partner.facts import is_demo, is_sample, prompt_facts
 from listing_partner.known_limits import LIMITS
 from listing_partner.scoring import AMENITY_GROUPS
 
@@ -118,6 +118,8 @@ def build_page(
     origin = (
         "Sample data: a fictional unit."
         if is_sample(facts)
+        else "Demo facts, not a listing: the builder's own home, not for rent."
+        if is_demo(facts)
         else "From Bokani's existing read-only AppFolio connector, built before the hackathon."
     )
     kept, dropped = curation["kept"], curation["dropped"]

@@ -24,6 +24,8 @@ _SENT = (
     "state",
 )
 _REQUIRED = ("bedrooms", "bathrooms", "square_feet", "rent_monthly_usd", "amenities")
+#: A demo set is someone's home, not for rent. Its price and size stay out on purpose.
+_REQUIRED_DEMO = ("bedrooms", "bathrooms", "amenities")
 _ALLOWED = set(_SENT) | {"source", "unit"}
 
 
@@ -43,7 +45,8 @@ def load_facts(path) -> dict:
     extra = sorted(set(facts) - _ALLOWED)
     if extra:
         raise FactsError(f"facts file holds fields outside the contract: {extra}")
-    missing = [k for k in _REQUIRED if facts.get(k) is None]
+    required = _REQUIRED_DEMO if is_demo(facts) else _REQUIRED
+    missing = [k for k in required if facts.get(k) is None]
     if missing:
         raise FactsError(f"facts file is missing: {missing}")
     return facts
@@ -56,3 +59,7 @@ def prompt_facts(facts: dict) -> dict:
 
 def is_sample(facts: dict) -> bool:
     return str(facts.get("source", "")).upper().startswith("SAMPLE")
+
+
+def is_demo(facts: dict) -> bool:
+    return str(facts.get("source", "")).upper().startswith("DEMO")

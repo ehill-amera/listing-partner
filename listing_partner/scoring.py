@@ -395,6 +395,7 @@ def fact_mentions(text: str, facts: dict) -> dict[str, int]:
             counts[key] += 1
         elif (
             not key
+            and facts.get("rent_monthly_usd") is not None
             and value == float(facts["rent_monthly_usd"])
             and (_MONEY_BEFORE.search(scrubbed[:start]) or _MONEY_AFTER.match(scrubbed, end))
         ):
