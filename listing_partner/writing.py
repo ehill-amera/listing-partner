@@ -37,10 +37,10 @@ _LENGTH = {
     "caption_social": scoring.check_social_caption,
     "caption_video": scoring.check_video_caption,
 }
-_JOB = {"description": "description", "caption_social": "captions", "caption_video": "captions"}
+JOB_OF = {"description": "description", "caption_social": "captions", "caption_video": "captions"}
 
 
-def _hash(prompt: str) -> str:
+def prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
 
@@ -104,6 +104,35 @@ def parse_review(text: str | None) -> tuple[str | None, str]:
     return match.group(1).lower(), match.group(2).strip()
 
 
+_WHOLE_FENCE = re.compile(r"\A```[\w-]*[ \t]*\n?(.*?)\n?```\Z", re.S)
+# A wrapper inside a wrapper is unwrapped too. Past this depth the format check fails it.
+_MAX_WRAPPERS = 4
+
+
+def parse_text_reply(reply: str | None) -> str:
+    """The text inside a whole-reply wrapper from either model: a code fence, a JSON
+    string or a JSON object with one string value. Anything else comes back as it was,
+    and the format check fails what should not go out."""
+    text = (reply or "").strip()
+    for _ in range(_MAX_WRAPPERS):
+        fence = _WHOLE_FENCE.match(text)
+        if fence:
+            text = fence.group(1).strip()
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            break
+        if isinstance(data, dict) and len(data) == 1:
+            data = next(iter(data.values()))
+            if isinstance(data, dict):
+                data = json.dumps(data)
+        if not isinstance(data, str):
+            break
+        text = data.strip()
+    return text
+
+
 def _parse_captions(text: str) -> tuple[str, str] | None:
     start, end = text.find("{"), text.rfind("}")
     try:
@@ -112,6 +141,72 @@ def _parse_captions(text: str) -> tuple[str, str] | None:
     except (ValueError, KeyError, TypeError):
         return None
     return (social, video) if isinstance(social, str) and isinstance(video, str) else None
+
+
+def raw_captions(reply: str) -> tuple[str, str, str | None]:
+    """(social, video, format failure), before any wrapper comes off. A reply that is
+    not the requested pair stands in for both, as a failure."""
+    pair = _parse_captions(reply)
+    if pair:
+        return pair[0].strip(), pair[1].strip(), None
+    text = reply.strip()
+    return text, text, "format: reply was not the requested JSON"
+
+
+def text_failures(text_id: str, text: str, facts: dict, extra_failure: str | None = None) -> list:
+    """Every check that reads only the text. The second opinion is added by the caller."""
+    failures = [extra_failure] if extra_failure else []
+    failures += scoring.check_plain_text(text)
+    failures += scoring.check_facts(text, facts)
+    failures += [
+        f"fair housing: {h['phrase']} ({h['category']})" for h in fair_housing.find_phrases(text)
+    ]
+    failures += _LENGTH[text_id](text)
+    return failures
+
+
+def opinion_failures(opinion: str) -> list[str]:
+    if opinion == "fail":
+        return ["second opinion: both models failed this text"]
+    if opinion == "flag":
+        return ["second opinion: the models did not agree, a person decides"]
+    return []
+
+
+def status_of(attempt: dict) -> str:
+    hard = [f for f in attempt["failures"] if not f.startswith("second opinion")]
+    if hard or attempt["second_opinion"] == "fail":
+        return "failed"
+    return "flagged" if attempt["second_opinion"] == "flag" else "pass"
+
+
+def pick_better(texts: list[dict], costs: dict, review_stats: dict) -> dict:
+    """Which model did better on each job, from every attempt and its cost."""
+    picks = {}
+    for job in ("description", "captions"):
+        rows = {
+            p: {
+                "failed_checks": sum(
+                    len(a["failures"])
+                    for t in texts
+                    if t["provider"] == p and t["job"] == job
+                    for a in t["attempts"]
+                ),
+                "cost_usd": round(costs[p][job], 6),
+            }
+            for p in costs
+        }
+        picks[job] = {"rows": rows, "better": choose(rows)}
+    rows = {
+        p: {
+            "failed_checks": review_stats[p]["unreadable"] + review_stats[p]["missed"],
+            "cost_usd": round(costs[p]["review"], 6),
+            **review_stats[p],
+        }
+        for p in costs
+    }
+    picks["review"] = {"rows": rows, "better": choose(rows)}
+    return picks
 
 
 def choose(rows: dict) -> str:
@@ -133,7 +228,7 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
 
     def call(provider, prompt):
         out = providers[provider](prompt, MAX_TOKENS)
-        return out, _hash(prompt)
+        return out, prompt_hash(prompt)
 
     def row(job, text_id, attempt, provider, phash, out, **extra):
         log(
@@ -152,11 +247,8 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
         )
 
     def evaluate(text_id, author, text, attempt, extra_failure=None):
-        failures = [extra_failure] if extra_failure else []
+        failures = text_failures(text_id, text, facts, extra_failure)
         words = fair_housing.find_phrases(text)
-        failures += scoring.check_facts(text, facts)
-        failures += [f"fair housing: {h['phrase']} ({h['category']})" for h in words]
-        failures += _LENGTH[text_id](text)
         reviews = {}
         prompt = review_prompt(text)
         for reviewer in providers:
@@ -179,10 +271,7 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
                 verdicts={reviewer: verdict},
             )
         opinion = scoring.second_opinion(reviews["meta"]["verdict"], reviews["baseten"]["verdict"])
-        if opinion == "fail":
-            failures.append("second opinion: both models failed this text")
-        elif opinion == "flag":
-            failures.append("second opinion: the models did not agree, a person decides")
+        failures += opinion_failures(opinion)
         return {
             "text": text,
             "failures": failures,
@@ -202,16 +291,13 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
         if needs_rewrite(first):
             prompt = rewrite_prompt(text_id, first["text"], first["failures"], facts, photos)
             out, phash = call(author, prompt)
-            costs[author][_JOB[text_id]] += out["actual_usd"]
+            costs[author][JOB_OF[text_id]] += out["actual_usd"]
+            rewritten = parse_text_reply(out["text"])
             second = evaluate(
-                text_id,
-                author,
-                out["text"].strip(),
-                1,
-                None if out["text"].strip() else "format: reply unreadable",
+                text_id, author, rewritten, 1, None if rewritten else "format: reply unreadable"
             )
             row(
-                _JOB[text_id],
+                JOB_OF[text_id],
                 text_id,
                 1,
                 author,
@@ -222,22 +308,14 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
             )
             attempts.append(second)
         last = attempts[-1]
-        hard = [f for f in last["failures"] if not f.startswith("second opinion")]
-        status = (
-            "failed"
-            if hard or last["second_opinion"] == "fail"
-            else "flagged"
-            if last["second_opinion"] == "flag"
-            else "pass"
-        )
         return {
             "id": text_id,
-            "job": _JOB[text_id],
+            "job": JOB_OF[text_id],
             "provider": author,
             "model": providers[author].model,
             "attempts": attempts,
             "final": last["text"],
-            "status": status,
+            "status": status_of(last),
             "first_version_flagged": len(attempts) > 1 and first["second_opinion"] == "flag",
         }
 
@@ -246,7 +324,7 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
         prompt = description_prompt(facts, photos)
         out, phash = call(author, prompt)
         costs[author]["description"] += out["actual_usd"]
-        text = out["text"].strip()
+        text = parse_text_reply(out["text"])
         first = evaluate(
             "description", author, text, 0, None if text else "format: reply unreadable"
         )
@@ -265,12 +343,10 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
         prompt = captions_prompt(facts, photos)
         out, phash = call(author, prompt)
         costs[author]["captions"] += out["actual_usd"]
-        pair = _parse_captions(out["text"])
-        bad = None if pair else "format: reply was not the requested JSON"
-        social, video = pair or (out["text"].strip(), out["text"].strip())
+        social, video, bad = raw_captions(out["text"])
         firsts = {
-            "caption_social": evaluate("caption_social", author, social.strip(), 0, bad),
-            "caption_video": evaluate("caption_video", author, video.strip(), 0, bad),
+            "caption_social": evaluate("caption_social", author, parse_text_reply(social), 0, bad),
+            "caption_video": evaluate("caption_video", author, parse_text_reply(video), 0, bad),
         }
         row(
             "captions",
@@ -284,28 +360,4 @@ def run_writing(facts: dict, photos: list[dict], providers: dict, log) -> dict:
         )
         texts.extend(finish(k, author, v) for k, v in firsts.items())
 
-    picks = {}
-    for job in ("description", "captions"):
-        rows = {
-            p: {
-                "failed_checks": sum(
-                    len(a["failures"])
-                    for t in texts
-                    if t["provider"] == p and t["job"] == job
-                    for a in t["attempts"]
-                ),
-                "cost_usd": round(costs[p][job], 6),
-            }
-            for p in providers
-        }
-        picks[job] = {"rows": rows, "better": choose(rows)}
-    rows = {
-        p: {
-            "failed_checks": review_stats[p]["unreadable"] + review_stats[p]["missed"],
-            "cost_usd": round(costs[p]["review"], 6),
-            **review_stats[p],
-        }
-        for p in providers
-    }
-    picks["review"] = {"rows": rows, "better": choose(rows)}
-    return {"texts": texts, "picks": picks}
+    return {"texts": texts, "picks": pick_better(texts, costs, review_stats)}

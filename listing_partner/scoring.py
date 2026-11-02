@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import date
@@ -409,6 +410,33 @@ def fact_mentions(text: str, facts: dict) -> dict[str, int]:
         forms = "|".join(_term_pattern(t) for t in sorted(terms, key=len, reverse=True))
         counts[f"amenity: {amenity}"] = len(re.findall(rf"(?<!\w)(?:{forms})(?!\w)", text, re.I))
     return counts
+
+
+_FORMAT_PATTERNS = (
+    # Any brace, a quoted key, or an escape sequence: no listing text has these.
+    ("JSON", re.compile(r'[{}]|"\w+"\s*:|\\[nrtu"\\/]')),
+    ("code fence", re.compile(r"`")),
+    (
+        "markup",
+        re.compile(
+            r"</?[a-z][^<>]*>|&(?:[a-z]+|#\d+);|\*\*|__|(?<![\w*])\*[^\s*][^*\n]*\*"
+            r"|^\s*#{1,6}\s|^\s*[-*+]\s|\[[^\]\n]*\]\([^)\n]*\)",
+            re.I | re.M,
+        ),
+    ),
+)
+
+
+def check_plain_text(text: str) -> list[str]:
+    """A text goes out as plain words. JSON, code fences and markup all fail."""
+    failures = [f"format: contains {kind}" for kind, p in _FORMAT_PATTERNS if p.search(text)]
+    try:
+        whole = json.loads(text)
+    except ValueError:
+        return failures
+    if isinstance(whole, (list, str)) and "format: contains JSON" not in failures:
+        failures.insert(0, "format: contains JSON")
+    return failures
 
 
 def check_description_length(text: str) -> list[str]:

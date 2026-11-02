@@ -11,8 +11,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from listing_partner.segment import jpeg_bytes
-
 
 class SavedCurationInvalid(ValueError):
     """Saved curation is missing, or was made for other photos."""
@@ -176,6 +174,9 @@ def _load(path: Path) -> np.ndarray:
 def rate_photo(pid: str, rgb: np.ndarray, spark) -> dict:
     """At most one crop round and one retry on an unreadable reply. `spark` is
     (prompt, images) -> text, through the capped client."""
+    # Here, not at the top: rescore reads saved curation and must not load a client.
+    from listing_partner.segment import jpeg_bytes
+
     small = np.asarray(Image.open(io.BytesIO(jpeg_bytes(rgb))))
     current, cropped, retried = jpeg_bytes(small), False, False
     prompt = RATE_PROMPT

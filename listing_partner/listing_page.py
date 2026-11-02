@@ -67,6 +67,12 @@ def _card(label: str, text: dict, reviewers: dict) -> str:
         f"{' - ' + escape(r['reason']) if r['reason'] else ''}</li>"
         for p, r in last["reviews"].items()
     )
+    stale = (
+        "<p>The two reviews read this text with its wrapper still on. The words are the same, "
+        "and no model has reviewed it as shown.</p>"
+        if last.get("reviewed_with_wrapper")
+        else ""
+    )
     earlier = ""
     if len(text["attempts"]) > 1:
         first = text["attempts"][0]
@@ -85,7 +91,7 @@ def _card(label: str, text: dict, reviewers: dict) -> str:
         f'<div class="card"><h4>{label}{_who(text["provider"])}</h4>{_status(text)}{flag}'
         f'<p style="white-space:pre-wrap">{escape(text["final"])}</p>'
         f"<p>Checks on the text shown:</p><ul>{checks}</ul>"
-        f"<p>Fair housing review:</p><ul>{reviews}</ul>{earlier}</div>"
+        f"<p>Fair housing review:</p><ul>{reviews}</ul>{stale}{earlier}</div>"
     )
 
 
@@ -98,7 +104,9 @@ def _pick(job: str, pick: dict) -> str:
     return f'<div class="who"><p>Better on {job}: {better}</p><ul>{rows}</ul></div>'
 
 
-def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchmark, rng=None):
+def build_page(
+    path: Path, *, facts, curation, coverage, writing, costs, benchmark, rng=None, note=None
+):
     rng = rng or random.SystemRandom()
     parts = [
         "<!doctype html><meta charset=utf-8><title>Listing Package</title>",
@@ -158,6 +166,8 @@ def build_page(path: Path, *, facts, curation, coverage, writing, costs, benchma
         '"second floor". The fair housing list is a screen, not legal advice. A person approves '
         "every text before posting.</p>"
     )
+    if note:
+        parts.append(f"<p><strong>{escape(note)}</strong></p>")
     for job in ("description", "caption_social", "caption_video"):
         order = ["meta", "baseten"]
         rng.shuffle(order)
