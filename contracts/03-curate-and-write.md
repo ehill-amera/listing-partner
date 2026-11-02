@@ -86,3 +86,9 @@ Finder, Shift+Cmd+G, `~/projects/listing-partner/output/unit-a`, then open `list
 ## Out of scope
 
 Tidying (SAM 3.1 plus Muse Image), the maintenance list, export sizing and naming, the agent and drop folder, posting anywhere, scheduling, and any change to unit 2's finish.
+
+## Amendment, Nov 2 (navigator, after the first review)
+
+- **Fair housing source:** the HUD 1995 advertising memo's text could not be retrieved from hud.gov during the build, so the list is built from 42 U.S.C. 3604(c) and 24 CFR 100.75 (which itself gives examples), with the memo cited as background only. The list must catch "preferred" and "preference" wording ("adults preferred", "seniors preferred"), an adjective before a group ("perfect for a young family", "best suited to a couple"), and negations ("no young children", "not for kids"). Describing the property's features stays fine, including "handicapped accessible" and "wheelchair accessible". The file says the list is a screen, not legal advice, and a person approves before posting.
+- **Facts check:** each bed, bath, rent and square-foot number is checked against the fact it sits next to, not against a shared set of numbers, and number words are covered. Amenities are checked against the fixed list of known amenity groups, and a text naming an amenity group not in the facts fails. The page states plainly that an amenity outside the known groups cannot be detected, and labels a passing text "passed the automatic checks", not "passed every check".
+- **Rewrite rule:** a text with any hard failure is rewritten once even when the reviewers also disagree; the original's flag stays visible.
