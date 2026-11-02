@@ -78,6 +78,12 @@ items inside the mask.</p>
 """
 
 
+def _check_line(check: dict) -> str:
+    if check["state"] == "did not complete":
+        return f"{escape(check['reason'])}: it gave no verdict."
+    return f"self-check: {escape(check['reason'])}"
+
+
 def _photo(photo: dict) -> str:
     pid = escape(photo["id"])
     body = f"<h2>{pid}: {escape(photo['room'])} ({escape(photo['status'])})</h2>"
@@ -87,7 +93,7 @@ def _photo(photo: dict) -> str:
         if photo["reason"]:
             body += f"<p>Shipped untidied: {escape(photo['reason'])}</p>"
         if photo["selfcheck"]:
-            body += f"<p>Muse Spark self-check: {escape(photo['selfcheck']['reason'])}</p>"
+            body += f"<p>Muse Spark {_check_line(photo['selfcheck'])}</p>"
         body += f'<p><a href="finished/{pid}.jpg">Untidied photo</a></p>'
     body += f"<h3>Removed</h3><ul>{_rows(photo['removed'])}</ul>"
     if photo["not_removed"]:

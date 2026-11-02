@@ -34,7 +34,6 @@ CLUTTER_LIST = (
     "plastic bag",
     "packing material",
     "loose cable or cord",
-    "hose",
     "laundry basket",
     "cleaning supplies",
     "shoes",
@@ -43,6 +42,16 @@ CLUTTER_LIST = (
     "paint can",
     "tools",
 )
+#: The list before the navigator took hoses off it. Findings saved under it stay
+#: good, less any hose, because the current list is the same list minus that item.
+_LIST_WITH_HOSE = (*CLUTTER_LIST[:5], "hose", *CLUTTER_LIST[5:])
+
+#: What the self-check can come back as. Only a reply Spark actually gave can
+#: be a disagreement.
+CHECK_PASS = "pass"
+CHECK_DISAGREE = "disagree"
+CHECK_INCOMPLETE = "did not complete"
+SELFCHECK_INCOMPLETE_REASON = "self-check did not complete"
 
 #: Mask growth for shadows, as a fixed share of the photo's long side. SAM
 #: masks arrive at 1024 px and scale up by nearest neighbour, so at 5900 px
@@ -183,12 +192,25 @@ def parse_confirm(text: str) -> tuple[bool, str]:
     return good, reason.strip()
 
 
+def _no_verdict(detail: str) -> dict:
+    return {
+        "pass": False,
+        "completed": False,
+        "reason": SELFCHECK_INCOMPLETE_REASON,
+        "detail": detail,
+    }
+
+
 def parse_selfcheck(text: str) -> dict:
-    """The verdict. Only explicit good answers pass."""
+    """The verdict. Only explicit good answers pass. A reply holding no answer
+    at all is not a verdict, so it cannot count as Spark disagreeing."""
     try:
         data = _json_reply(text)
     except ValueError:
-        return {"pass": False, "reason": "Muse Spark's self-check could not be read"}
+        return _no_verdict("reply could not be read")
+    answers = ("item_gone", "property_changed", "damage_softened", "object_added", "item_remains")
+    if not any(isinstance(data.get(name), bool) for name in answers):
+        return _no_verdict("reply held no answers")
     good = (
         data.get("item_gone") is True
         and data.get("property_changed") is False
@@ -198,6 +220,7 @@ def parse_selfcheck(text: str) -> dict:
     )
     return {
         "pass": good,
+        "completed": True,
         "item_gone": data.get("item_gone"),
         "property_changed": data.get("property_changed"),
         "damage_softened": data.get("damage_softened"),
@@ -281,15 +304,19 @@ def pixels_pass(numbers: dict) -> bool:
     )
 
 
-def ship_decision(pixels_ok: bool, spark_ok: bool, recheck: dict) -> tuple[str, str]:
+def ship_decision(pixels_ok: bool, spark: str, recheck: dict) -> tuple[str, str]:
     """All three must pass. The re-check's reason comes first when it fails."""
     if not recheck["pass"]:
         return "untidied", recheck["reason"]
-    if pixels_ok and spark_ok:
+    if pixels_ok and spark == CHECK_PASS:
         return "tidied", ""
+    if spark == CHECK_INCOMPLETE:
+        if pixels_ok:
+            return "untidied", SELFCHECK_INCOMPLETE_REASON
+        return "untidied", f"the pixel measurement failed and {SELFCHECK_INCOMPLETE_REASON}"
     if pixels_ok:
         return "untidied", "pixels passed but Muse Spark's self-check disagrees"
-    if spark_ok:
+    if spark == CHECK_PASS:
         return "untidied", "Muse Spark's self-check passed but the pixel measurement disagrees"
     return "untidied", "both the pixel measurement and Muse Spark's self-check failed"
 
@@ -461,9 +488,9 @@ def confirm_clutter(small: np.ndarray, found: list[dict], meta: _Meta) -> list[d
     return found
 
 
-def _stage_key(digest: str) -> str:
+def _stage_key(digest: str, clutter_list: tuple = ()) -> str:
     return hashlib.sha256(
-        "\n".join([digest, DAMAGE_PROMPT, CONFIRM_PROMPT, *CLUTTER_LIST]).encode()
+        "\n".join([digest, DAMAGE_PROMPT, CONFIRM_PROMPT, *(clutter_list or CLUTTER_LIST)]).encode()
     ).hexdigest()
 
 
@@ -474,11 +501,12 @@ def _findings(rgb: np.ndarray, digest: str, folder: Path, meta: _Meta) -> tuple:
     key = _stage_key(digest)
     if stage.exists() and masks_path.exists():
         saved = json.loads(stage.read_text())
-        if saved["key"] == key:
+        if saved["key"] in (key, _stage_key(digest, _LIST_WITH_HOSE)):
             with np.load(masks_path) as masks:
                 found = [
                     {**c, "box": tuple(c["box"]), "mask": masks[f"m{i}"]}
                     for i, c in enumerate(saved["found"])
+                    if c["label"] in CLUTTER_LIST
                 ]
             damage = [{**d, "box": tuple(d["box"])} for d in saved["damage"]]
             return damage, found
@@ -575,11 +603,18 @@ def _self_check(
         try:
             verdicts.append(parse_selfcheck(meta.spark(prompt, images)))
         except _RECOVERABLE as exc:
-            verdicts.append({"pass": False, "reason": f"self-check failed to run: {exc}"})
+            verdicts.append(_no_verdict(str(exc)))
     reasons = list(dict.fromkeys(v["reason"] for v in verdicts))
+    if any(v["completed"] and not v["pass"] for v in verdicts):
+        state = CHECK_DISAGREE
+    elif verdicts and all(v["pass"] for v in verdicts):
+        state = CHECK_PASS
+    else:
+        state = CHECK_INCOMPLETE
     return {
-        "pass": bool(verdicts) and all(v["pass"] for v in verdicts),
-        "reason": "; ".join(reasons),
+        "pass": state == CHECK_PASS,
+        "state": state,
+        "reason": "; ".join(reasons) or SELFCHECK_INCOMPLETE_REASON,
         "areas": verdicts,
     }
 
@@ -714,7 +749,7 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
     )
     record["recheck"] = recheck_fill(_load(folder / "tidied.png"), final, removed, meta)
     status, reason = ship_decision(
-        pixels_pass(record["measure"]), record["selfcheck"]["pass"], record["recheck"]
+        pixels_pass(record["measure"]), record["selfcheck"]["state"], record["recheck"]
     )
     record["status"], record["reason"] = status, reason
     if status == "tidied":
@@ -770,6 +805,9 @@ def run_tidy(
             if p["recheck"]
             for item in p["recheck"]["items"]
         ),
+        "selfcheck_did_not_complete": sum(
+            bool(p["selfcheck"]) and p["selfcheck"]["state"] == CHECK_INCOMPLETE for p in photos
+        ),
         "unit_meta_usd": round(meta.spent(), 6),
         "budget_usd": budget_usd,
         "this_run": ledger_by_model(ledger, started),
@@ -791,6 +829,7 @@ def main() -> None:
         f"{summary['nothing_to_tidy']} nothing to tidy, "
         f"{summary['items_removed']} items removed, "
         f"{summary['items_failed_recheck']} items failed the re-check, "
+        f"{summary['selfcheck_did_not_complete']} self-checks did not complete, "
         f"${summary['unit_meta_usd']:.4f}"
     )
 

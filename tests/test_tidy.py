@@ -58,6 +58,10 @@ class World:
             "item_remains": False,
             "reason": "the box is gone and the wall is the same",
         }
+        self.selfcheck_error = None
+        self.selfcheck_reply = None
+        # Which self-check calls fail, counted from 1. None means all of them.
+        self.selfcheck_error_on = None
         self.image_error = None
         self.edit_shift = 0
         self.edit_size = None
@@ -93,7 +97,10 @@ class World:
             reply = json.dumps(self.confirm.get(label, GOOD_CONFIRM))
         elif text.startswith(tidy.SELFCHECK_PROMPT[:40]):
             self.calls["selfcheck"] += 1
-            reply = json.dumps(self.selfcheck)
+            on = self.selfcheck_error_on
+            if self.selfcheck_error and (on is None or self.calls["selfcheck"] in on):
+                raise OSError(self.selfcheck_error)
+            reply = self.selfcheck_reply or json.dumps(self.selfcheck)
         else:
             raise AssertionError(f"unexpected prompt {text[:60]!r}")
         return {"id": "r", "text": reply, "usage": {"input_tokens": 10, "output_tokens": 5}}
@@ -193,7 +200,6 @@ def test_clutter_list_is_exactly_the_contract_list():
         "plastic bag",
         "packing material",
         "loose cable or cord",
-        "hose",
         "laundry basket",
         "cleaning supplies",
         "shoes",
@@ -221,12 +227,15 @@ def test_sam_is_asked_only_for_the_fixed_list(unit, world):
         baseline_path=unit / "baseline.json",
     )
     # The fixed list once to find, then only the removed item's prompt to re-check.
-    assert tuple(seen[:13]) == tidy.CLUTTER_LIST
-    assert seen[13:] == ["cardboard box"]
+    count = len(tidy.CLUTTER_LIST)
+    assert tuple(seen[:count]) == tidy.CLUTTER_LIST
+    assert seen[count:] == ["cardboard box"]
+    assert "hose" not in seen
 
 
-def test_build_mask_refuses_a_label_off_the_list():
-    item = {"label": "sofa", "mask": _rect(ITEM_BOX), "reason": "r"}
+@pytest.mark.parametrize("label", ["sofa", "hose"])
+def test_build_mask_refuses_a_label_off_the_list(label):
+    item = {"label": label, "mask": _rect(ITEM_BOX), "reason": "r"}
     with pytest.raises(ValueError, match="not on the clutter list"):
         tidy.build_final_mask([item], [], (H, W))
 
@@ -271,26 +280,26 @@ def test_unreadable_damage_list_means_no_tidy_on_that_photo(unit, world):
 
 
 def test_mask_is_grown_by_the_fixed_margin():
-    item = {"label": "hose", "mask": _rect(ITEM_BOX), "reason": "r"}
+    item = {"label": "bucket", "mask": _rect(ITEM_BOX), "reason": "r"}
     final, removed, left = tidy.build_final_mask([item], [], (H, W))
     margin = tidy.grow_px((H, W))
     assert final[100, 100 - margin] and not final[100, 100 - margin - 2]
-    assert [r["label"] for r in removed] == ["hose"] and left == []
+    assert [r["label"] for r in removed] == ["bucket"] and left == []
 
 
 def test_candidate_whose_own_mask_touches_damage_is_left_in_place():
-    item = {"label": "hose", "mask": _rect(ITEM_BOX), "reason": "r"}
+    item = {"label": "bucket", "mask": _rect(ITEM_BOX), "reason": "r"}
     damage = [{"box": (190, 190, 260, 260), "note": "crack"}]
     final, removed, left = tidy.build_final_mask([item], damage, (H, W))
     assert not final.any() and removed == []
-    assert left == [{"label": "hose", "reason": "left in place: overlaps damage"}]
+    assert left == [{"label": "bucket", "reason": "left in place: overlaps damage"}]
 
 
 def test_grown_margin_touching_damage_is_cut_and_the_item_still_goes():
-    item = {"label": "hose", "mask": _rect(ITEM_BOX), "reason": "r"}
+    item = {"label": "bucket", "mask": _rect(ITEM_BOX), "reason": "r"}
     damage = [{"box": (201, 100, 260, 200), "note": "crack"}]
     final, removed, left = tidy.build_final_mask([item], damage, (H, W))
-    assert [r["label"] for r in removed] == ["hose"] and left == []
+    assert [r["label"] for r in removed] == ["bucket"] and left == []
     assert final[150, 199] and not final[150, 201:260].any()
 
 
@@ -362,29 +371,39 @@ def test_measure_raises_on_a_size_mismatch(tmp_path):
 
 
 CLEAR = {"pass": True, "reason": ""}
-FOUND = {"pass": False, "reason": "SAM 3.1 still finds hose in the filled area"}
+FOUND = {"pass": False, "reason": "SAM 3.1 still finds bucket in the filled area"}
 
 
 @pytest.mark.parametrize(
-    ("pixels_ok", "spark_ok", "recheck", "ships"),
+    ("pixels_ok", "spark", "recheck", "ships"),
     [
-        (True, True, CLEAR, "tidied"),
-        (True, False, CLEAR, "untidied"),
-        (False, True, CLEAR, "untidied"),
-        (True, True, FOUND, "untidied"),
+        (True, tidy.CHECK_PASS, CLEAR, "tidied"),
+        (True, tidy.CHECK_DISAGREE, CLEAR, "untidied"),
+        (True, tidy.CHECK_INCOMPLETE, CLEAR, "untidied"),
+        (False, tidy.CHECK_PASS, CLEAR, "untidied"),
+        (True, tidy.CHECK_PASS, FOUND, "untidied"),
     ],
 )
-def test_ship_decision_needs_all_three_to_pass(pixels_ok, spark_ok, recheck, ships):
-    assert tidy.ship_decision(pixels_ok, spark_ok, recheck)[0] == ships
+def test_ship_decision_needs_all_three_to_pass(pixels_ok, spark, recheck, ships):
+    assert tidy.ship_decision(pixels_ok, spark, recheck)[0] == ships
 
 
 def test_ship_decision_names_a_disagreement():
-    assert "disagree" in tidy.ship_decision(True, False, CLEAR)[1]
-    assert "disagree" in tidy.ship_decision(False, True, CLEAR)[1]
+    assert "disagree" in tidy.ship_decision(True, tidy.CHECK_DISAGREE, CLEAR)[1]
+    assert "disagree" in tidy.ship_decision(False, tidy.CHECK_PASS, CLEAR)[1]
+
+
+def test_ship_decision_says_a_check_with_no_verdict_did_not_complete():
+    assert tidy.ship_decision(True, tidy.CHECK_INCOMPLETE, CLEAR)[1] == (
+        "self-check did not complete"
+    )
+    both = tidy.ship_decision(False, tidy.CHECK_INCOMPLETE, CLEAR)[1]
+    assert "self-check did not complete" in both
+    assert "disagree" not in both and "self-check failed" not in both
 
 
 def test_ship_decision_gives_the_recheck_reason_first():
-    assert tidy.ship_decision(True, False, FOUND)[1].startswith(FOUND["reason"])
+    assert tidy.ship_decision(True, tidy.CHECK_DISAGREE, FOUND)[1].startswith(FOUND["reason"])
 
 
 # --- the whole run, on the real ledger code and real files
@@ -531,6 +550,71 @@ def test_self_check_naming_an_added_object_or_a_remnant_ships_untidied(unit, wor
     assert "disagree" in photo["reason"]
 
 
+NO_VERDICT = "self-check did not complete"
+
+
+def _no_verdict_timeout(world):
+    world.selfcheck_error = "timed out"
+
+
+def _no_verdict_unreadable(world):
+    world.selfcheck_reply = "I could not tell"
+
+
+def _no_verdict_empty_json(world):
+    world.selfcheck_reply = "{}"
+
+
+@pytest.mark.parametrize(
+    "make", [_no_verdict_timeout, _no_verdict_unreadable, _no_verdict_empty_json]
+)
+def test_self_check_with_no_verdict_says_so_and_never_says_spark_disagreed(unit, world, make):
+    make(world)
+    summary = _run(unit, world)
+    photo = summary["photos"][0]
+    html = (unit / "tidy.html").read_text()
+    assert photo["status"] == "untidied"
+    assert photo["reason"] == NO_VERDICT
+    assert photo["selfcheck"]["state"] == tidy.CHECK_INCOMPLETE
+    assert photo["not_removed"] == [{"label": "cardboard box", "reason": NO_VERDICT}]
+    assert summary["selfcheck_did_not_complete"] == 1
+    assert NO_VERDICT in html
+    assert "disagree" not in html
+    assert "timed out" not in html
+
+
+def test_real_disagreement_is_not_counted_as_did_not_complete(unit, world):
+    world.selfcheck["property_changed"] = True
+    summary = _run(unit, world)
+    assert summary["photos"][0]["selfcheck"]["state"] == tidy.CHECK_DISAGREE
+    assert summary["selfcheck_did_not_complete"] == 0
+    assert NO_VERDICT not in (unit / "tidy.html").read_text()
+
+
+def test_one_area_disagreeing_and_one_timing_out_reports_both(unit, world):
+    # Two items far apart make two self-check areas: the second call times out.
+    world.sam = {"cardboard box": [(20, 20, 60, 60), (530, 330, 570, 370)]}
+    world.selfcheck["property_changed"] = True
+    world.selfcheck["reason"] = "the baseboard changed"
+    world.selfcheck_error = "timed out"
+    world.selfcheck_error_on = {2}
+    photo = _run(unit, world)["photos"][0]
+    assert world.calls["selfcheck"] == 2
+    assert photo["selfcheck"]["state"] == tidy.CHECK_DISAGREE
+    assert "disagree" in photo["reason"]
+    assert "the baseboard changed" in photo["selfcheck"]["reason"]
+    assert NO_VERDICT in photo["selfcheck"]["reason"]
+
+
+def test_recheck_failure_with_no_verdict_still_shows_the_check_did_not_complete(unit, world):
+    world.selfcheck_error = "timed out"
+    world.recheck = {"cardboard box": [(120, 120, 180, 180)]}
+    photo = _run(unit, world)["photos"][0]
+    html = (unit / "tidy.html").read_text()
+    assert photo["reason"].startswith("SAM 3.1 still finds")
+    assert NO_VERDICT in html and "disagree" not in html
+
+
 def test_tidied_photo_has_a_passing_self_check_verdict(unit, world):
     photo = _run(unit, world)["photos"][0]
     assert photo["selfcheck"]["pass"] is True and world.calls["selfcheck"] >= 1
@@ -580,6 +664,59 @@ def test_second_run_reuses_the_saved_findings_without_paying_again(unit, world):
     assert world.calls["sam"] == first["sam"] + 1
     assert world.calls["confirm"] == first["confirm"]
     assert world.calls["edit"] == first["edit"] + 1
+
+
+#: The list before the navigator took hoses off it. Findings saved under it are
+#: on disk, and each photo's cost well over this unit's remaining budget to redo.
+LIST_WITH_HOSE = (
+    "trash bin",
+    "cardboard box",
+    "plastic bag",
+    "packing material",
+    "loose cable or cord",
+    "hose",
+    "laundry basket",
+    "cleaning supplies",
+    "shoes",
+    "bucket",
+    "ladder",
+    "paint can",
+    "tools",
+)
+
+
+def test_findings_saved_with_hoses_are_reused_and_the_hose_is_never_removed(
+    unit, world, monkeypatch
+):
+    world.sam = {"cardboard box": [ITEM_BOX], "hose": [BIN_BOX]}
+    with monkeypatch.context() as patch:
+        patch.setattr(tidy, "CLUTTER_LIST", LIST_WITH_HOSE)
+        _run(unit, world)
+    damage_calls, sam_calls, confirm_calls = (
+        world.calls["damage"],
+        world.calls["sam"],
+        world.calls["confirm"],
+    )
+    summary = _run(unit, world)
+    photo = summary["photos"][0]
+    assert world.calls["damage"] == damage_calls and world.calls["confirm"] == confirm_calls
+    # Only the re-check of the one item still removed.
+    assert world.calls["sam"] == sam_calls + 1
+    assert [item["label"] for item in photo["removed"]] == ["cardboard box"]
+    assert photo["recheck"]["items"] == [{"label": "cardboard box", "found_pixels": 0}]
+    left, top, right, bottom = BIN_BOX
+    assert not _mask(unit)[top:bottom, left:right].any()
+    assert (_tidied(unit)[top:bottom, left:right] == _finished(unit)[top:bottom, left:right]).all()
+    assert "hose" not in (unit / "tidy.html").read_text()
+
+
+def test_findings_saved_under_any_other_list_are_not_reused(unit, world, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(tidy, "CLUTTER_LIST", ("cardboard box", "sofa"))
+        _run(unit, world)
+    damage_calls = world.calls["damage"]
+    _run(unit, world)
+    assert world.calls["damage"] == damage_calls + 5
 
 
 def test_tidy_works_for_any_set_name(tmp_path, world):

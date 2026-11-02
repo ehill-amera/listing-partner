@@ -65,3 +65,7 @@ Sky replacement, brush touch-up, virtual staging, export sizing and naming, the 
 ## Navigator note (Nov 2)
 
 The "Built-by" commit trailer rule is retired project-wide. It no longer applies to any unit's commits, including the rule's mention in contract 02. The `muse-code-built` tag and a who-built-what page will show the split between builders.
+
+## Navigator note (Nov 2, hoses)
+
+"hose" is off the fixed clutter list in section B, which otherwise stands. A hose on a wall is usually attached to the house, so it fails the honesty rule's "carry out in a day" test. A tidy never targets a hose, and SAM 3.1 is not asked for one.
