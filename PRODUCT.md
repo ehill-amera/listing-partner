@@ -49,7 +49,7 @@ An edit is allowed only if the photo still shows what the place would really loo
 
 ## Hard rules
 
-- Every model call goes to Meta models (Muse Spark, SAM 3.1, Muse Image) through the Meta Model API, through one spend-capped function. The cap is $20 (lowered from $100 in two steps, Oct 26 and Oct 31, so total Meta spend stays inside the free hackathon credits). No Contributor models.
+- Every model call goes to a Meta model, through one of two spend-capped clients, each with its own ledger. Muse Spark, SAM 3.1 and Muse Image go through the Meta Model API, capped at $20 (lowered from $100 in two steps, Oct 26 and Oct 31). Meta's open-weight Muse Spark Open goes through Baseten partner inference, capped at $80. Both caps sit inside the free credits. No Contributor models.
 - The repo is public. No keys, tokens, names, phone numbers, emails or AppFolio data beyond public listing facts are ever committed.
 - Only photos and data Bokani has rights to.
 - The demo, README and submission present only what was built Oct 26 to Nov 4, 2026, and label anything older as existing.
