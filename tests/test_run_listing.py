@@ -152,3 +152,19 @@ def test_ledger_by_model_refuses_a_corrupt_ledger(tmp_path):
     p.write_text("{nope\n")
     with pytest.raises(meta_client.LedgerError):
         ledger_by_model(p, "2026")
+
+
+def test_ordering_call_gets_room_to_think_after_a_live_cutoff(env):
+    seen = {}
+
+    def spy(url, headers, body):
+        data = json.loads(body)
+        if not isinstance(data["input"], str):
+            prompt = data["input"][0]["content"][0]["text"]
+            if prompt.startswith("Numbered tiles"):
+                seen["limit"] = data["max_output_tokens"]
+        return _meta(url, headers, body)
+
+    env["meta_transport"] = spy
+    run_listing(**env)
+    assert seen["limit"] >= 16000

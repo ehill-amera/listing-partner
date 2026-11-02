@@ -157,8 +157,8 @@ def run_listing(
         baseten_client.BasetenRefused,
     )
 
-    def spark(prompt, images):
-        return meta(prompt, SPARK_MAX_TOKENS, images=images)["text"]
+    def spark(prompt, images, max_tokens=SPARK_MAX_TOKENS):
+        return meta(prompt, max_tokens, images=images)["text"]
 
     curation = curate.run_curation(output_dir / "finished", spark)
     kept, dropped = curation["kept"], curation["dropped"]

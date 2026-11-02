@@ -9,7 +9,7 @@ import re
 from listing_partner import fair_housing, scoring
 from listing_partner.facts import prompt_facts
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 _RULES = (
     "Use only these facts. Do not state any number or amenity that is not in them, including "
     "anything a room label suggests. Describe the property only: never say who should or "

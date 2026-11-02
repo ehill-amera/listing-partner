@@ -30,6 +30,8 @@ ROOMS = (
 )
 #: A 1 means unusable on the 1 to 5 scale; such a shot is dropped.
 WEAK_AT = 1
+#: A live ordering call spent 4096 output tokens on reasoning with no answer.
+SET_MAX_TOKENS = 16000
 _CROP = re.compile(r"CROP\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
 
 RATE_PROMPT = (
@@ -206,9 +208,11 @@ def run_curation(finished_dir: Path, spark) -> dict:
     )
     prompt = SET_PROMPT.format(labels=labels)
     try:
-        result = decide(ratings, spark(prompt, [sheet]))
+        result = decide(ratings, spark(prompt, [sheet], SET_MAX_TOKENS))
     except ValueError as exc:
-        result = decide(ratings, spark(f"{prompt} Your last reply was refused: {exc}", [sheet]))
+        result = decide(
+            ratings, spark(f"{prompt} Your last reply was refused: {exc}", [sheet], SET_MAX_TOKENS)
+        )
     if len(result["kept"]) + len(result["dropped"]) != len(paths):
         raise ValueError("kept plus dropped does not equal the finished photos")
     return result
