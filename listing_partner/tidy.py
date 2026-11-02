@@ -96,8 +96,8 @@ SELFCHECK_PROMPT = (
 EDIT_PROMPT = (
     "The flat magenta area marks where a loose object was removed from this photo. "
     "Paint only that area, continuing the surfaces around it naturally: same floor, "
-    "wall or ground, same light. Do not add any object, outlet, pipe, mark or detail. Change nothing else, and do "
-    "not move, crop or reframe the picture. No magenta may remain."
+    "wall or ground, same light. Do not add any object, outlet, pipe, mark or detail. "
+    "Change nothing else, and do not move, crop or reframe the picture. No magenta may remain."
 )
 
 
