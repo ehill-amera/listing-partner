@@ -66,7 +66,20 @@ def _fill_line(check: dict) -> str:
         if check["not_flat_surfaces"]
         else ""
     )
-    return f"<p>Fill check: {low}{skipped}, {check['specks']} specks flagged.</p>"
+    corrected = ""
+    if "before_correction" in check:
+        before = check["before_correction"]
+        reading = (
+            "no flat surface"
+            if before["worst_reading"] is None
+            else f"{before['worst_reading']:.1f} against {before['worst_limit']:.1f}"
+        )
+        share = check["correction"]["least_corrected_share"]
+        corrected = (
+            f" Reading before shading correction {reading}, {before['specks']} specks;"
+            f" at least {share:.0%} of the fill corrected."
+        )
+    return f"<p>Fill check: {low}{skipped}, {check['specks']} specks flagged.{corrected}</p>"
 
 
 def _tidied(photo: dict) -> str:

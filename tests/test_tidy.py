@@ -1124,9 +1124,29 @@ def _specks(attempt, sent, painted):
     return out
 
 
+# Navigator decision (Nov 2): broad shading is corrected inside the mask before
+# the check. Through the whole run on this wall, a gray cloud up to 60 levels deep
+# was measured to correct into a pass (0.94 of the fill placed); at 80 levels only
+# 0.82 is placed on the wall and the fill still fails.
+DARK_CLOUD = 80
+
+
 @pytest.mark.parametrize("levels", [5, 8, 10])
-def test_gray_cloud_on_a_clean_wall_ships_untidied_after_one_retry(wall_unit, world, levels):
+def test_broad_gray_cloud_is_corrected_and_ships_tidied_on_the_first_try(wall_unit, world, levels):
     _wall_world(world).edit_paint = _cloud(levels)
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 1
+    assert photo["status"] == "tidied"
+    check = photo["fill_check"]
+    assert check["pass"] is True
+    if levels == 10:
+        # The same fill, uncorrected, fails: the correction is what moved it.
+        assert check["before_correction"]["pass"] is False
+    assert check["correction"]["max_shift_lab"][0] > 0
+
+
+def test_cloud_too_dark_to_place_on_the_wall_ships_untidied_after_one_retry(wall_unit, world):
+    _wall_world(world).edit_paint = _cloud(DARK_CLOUD)
     photo = _run(wall_unit, world)["photos"][0]
     assert world.calls["edit"] == 2
     assert photo["status"] == "untidied"
@@ -1139,8 +1159,8 @@ def test_gray_cloud_on_a_clean_wall_ships_untidied_after_one_retry(wall_unit, wo
     assert world.calls["selfcheck"] == 0
 
 
-def test_cloud_on_the_first_try_and_a_clean_fill_on_the_retry_ships_tidied(wall_unit, world):
-    cloud = _cloud(10)
+def test_dark_cloud_on_the_first_try_and_a_clean_fill_on_the_retry_ships_tidied(wall_unit, world):
+    cloud = _cloud(DARK_CLOUD)
     _wall_world(world).edit_paint = lambda a, s, p: (
         cloud(a, s, p) if a == 1 else _good_fill(a, s, p)
     )
@@ -1157,7 +1177,7 @@ def test_clean_fill_ships_tidied_on_the_first_try(wall_unit, world):
     assert photo["status"] == "tidied"
 
 
-def test_colour_cast_on_a_clean_wall_ships_untidied(wall_unit, world):
+def test_broad_colour_cast_on_a_clean_wall_is_corrected_and_ships_tidied(wall_unit, world):
     def cast(attempt, sent, painted):
         out, ys, xs = _flat_fill(sent, painted)
         tint = _soft_spot(sent, ys, xs, 16)
@@ -1167,7 +1187,8 @@ def test_colour_cast_on_a_clean_wall_ships_untidied(wall_unit, world):
 
     _wall_world(world).edit_paint = cast
     photo = _run(wall_unit, world)["photos"][0]
-    assert photo["status"] == "untidied" and photo["reason"] == FILL_REASON
+    assert photo["status"] == "tidied"
+    assert photo["fill_check"]["before_correction"]["pass"] is False
 
 
 def test_orange_specks_the_wall_does_not_have_ship_untidied(wall_unit, world):
@@ -1188,8 +1209,18 @@ def test_every_measured_photo_records_its_fill_readings_and_the_page_shows_them(
     assert "Fill check" in page and f"{check['worst_reading']:.1f}" in page
 
 
-def test_page_gives_the_fill_reason_when_the_fill_check_fails(wall_unit, world):
+def test_page_shows_the_reading_before_the_shading_correction(wall_unit, world):
     _wall_world(world).edit_paint = _cloud(10)
+    check = _run(wall_unit, world)["photos"][0]["fill_check"]
+    page = (wall_unit / "tidy.html").read_text()
+    before = check["before_correction"]
+    assert f"before shading correction {before['worst_reading']:.1f}" in page
+    share = check["correction"]["least_corrected_share"]
+    assert f"{share:.0%} of the fill corrected" in page
+
+
+def test_page_gives_the_fill_reason_when_the_fill_check_fails(wall_unit, world):
+    _wall_world(world).edit_paint = _cloud(DARK_CLOUD)
     _run(wall_unit, world)
     page = (wall_unit / "tidy.html").read_text()
     assert FILL_REASON in page and "Edited: clutter removed" not in page
@@ -1236,3 +1267,58 @@ def test_the_real_home_a_003_speck_fails_the_fill_check():
 def test_public_docs_no_longer_list_hoses_as_a_tidy_target(name):
     root = Path(__file__).resolve().parent.parent
     assert not re.search(r"\bhoses?\b", (root / name).read_text(), re.IGNORECASE)
+
+
+# --- navigator decision (Nov 2): a shading correction inside the mask, before the
+# fill check. The check, the speck count and Muse Spark still decide.
+
+REPLAY = Path(__file__).resolve().parent.parent / ".navigator/evidence/tidy-6ec8f13/home-a/tidy"
+needs_replay = pytest.mark.skipif(
+    not (REPLAY / "008" / "rejected.png").exists() or not FINISHED.exists(),
+    reason="home-a 008's fill from 6ec8f13 is local only",
+)
+
+
+def _replay_008(monkeypatch):
+    """Run 008's saved fill from 6ec8f13 back through _measured_fill. Only the
+    generator is replaced: it hands back the pixels Muse Image and the refit made
+    then, so the composite before correction is exactly the saved one."""
+
+    def rgb(path):
+        with Image.open(path) as handle:
+            return np.asarray(handle.convert("RGB"))
+
+    finished, saved = rgb(FINISHED / "008.jpg"), rgb(REPLAY / "008" / "rejected.png")
+    with Image.open(REPLAY / "008" / "mask.png") as handle:
+        mask = np.asarray(handle.convert("L")) > 0
+
+    def saved_fill(_finished, _mask, box, _meta):
+        left, top, right, bottom = box
+        return saved[top:bottom, left:right].copy()
+
+    monkeypatch.setattr(tidy, "_fill_region", saved_fill)
+    tidied, reading = tidy._measured_fill(finished, mask, tidy.regions(mask), meta=None)
+    return finished, saved, mask, tidied, reading
+
+
+@needs_replay
+def test_shading_correction_brings_home_a_008s_saved_fill_within_the_low_frequency_limit(
+    monkeypatch,
+):
+    *_, reading = _replay_008(monkeypatch)
+    flat = [s for area in reading["areas"] for s in area["surfaces"] if s["flat"]]
+    assert flat, "the check must still judge 008's flat surfaces"
+    assert all(s["reading"] <= s["limit"] for s in flat), flat
+
+
+@needs_replay
+def test_shading_correction_on_008_changes_no_pixel_outside_the_mask_or_on_its_edge(
+    monkeypatch,
+):
+    finished, saved, mask, tidied, _ = _replay_008(monkeypatch)
+    assert np.array_equal(tidied[~mask], finished[~mask])
+    # The composite before any correction: the same saved fill, the same feather.
+    uncorrected = tidy.composite(finished, saved, mask)
+    edge = mask & cv2.dilate((~mask).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    assert edge.any()
+    assert np.array_equal(tidied[edge], uncorrected[edge])

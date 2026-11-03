@@ -69,3 +69,7 @@ The "Built-by" commit trailer rule is retired project-wide. It no longer applies
 ## Navigator note (Nov 2, hoses)
 
 "hose" is off the fixed clutter list in section B, which otherwise stands. A hose on a wall is usually attached to the house, so it fails the honesty rule's "carry out in a day" test. A tidy never targets a hose, and SAM 3.1 is not asked for one.
+
+## Navigator note (Nov 2, shading correction)
+
+Before the fill check runs, each fill's low-frequency brightness and colour are corrected to match the ring of untouched pixels around the mask: a smooth shading correction applied only inside the mask, feathered to zero at the mask edge, never touching any pixel outside it. The fill check, the speck check and the Muse Spark self-check then run as before and still decide. The fill check's reading before the correction is recorded beside the one that decides.

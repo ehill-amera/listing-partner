@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from listing_partner import curate, fill_check, meta_client, segment, tidy_page
+from listing_partner import curate, fill_check, meta_client, segment, shading, tidy_page
 from listing_partner.run_listing import ledger_by_model
 
 SPARK_MODEL = "muse-spark-1.3"
@@ -730,15 +730,28 @@ def recheck_fill(tidied: np.ndarray, mask: np.ndarray, removed: list[dict], meta
     return {"pass": not reasons, "items": items, "reason": "; ".join(reasons)}
 
 
+def _corrected_reading(finished: np.ndarray, generated: np.ndarray, final: np.ndarray) -> tuple:
+    """Composite, then the shading correction inside the mask, then the check.
+    The reading before the correction is kept beside the one that decides."""
+    raw = composite(finished, generated, final)
+    before = fill_check.check_fill(finished, raw, final)
+    tidied, correction = shading.correct(finished, raw, final)
+    reading = fill_check.check_fill(finished, tidied, final)
+    reading["before_correction"] = {
+        k: before[k] for k in ("pass", "flat_surfaces", "worst_reading", "worst_limit", "specks")
+    }
+    reading["correction"] = correction
+    return tidied, reading
+
+
 def _measured_fill(finished: np.ndarray, final: np.ndarray, spots: list[dict], meta) -> tuple:
     """(composite, readings). A spot whose fill fails the measured check gets one
-    more Muse Image call; what comes back is measured again and stands."""
+    more Muse Image call; what comes back is corrected and measured again and stands."""
     generated = finished.copy()
     for spot in spots:
         left, top, right, bottom = spot["box"]
         generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
-    tidied = composite(finished, generated, final)
-    reading = fill_check.check_fill(finished, tidied, final)
+    tidied, reading = _corrected_reading(finished, generated, final)
     if reading["pass"]:
         return tidied, reading
     failed = [area["box"] for area in reading["areas"] if not area["pass"]]
@@ -746,8 +759,8 @@ def _measured_fill(finished: np.ndarray, final: np.ndarray, spots: list[dict], m
         left, top, right, bottom = spot["box"]
         if any(b[0] >= left and b[1] >= top and b[2] <= right and b[3] <= bottom for b in failed):
             generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
-    tidied = composite(finished, generated, final)
-    return tidied, {**fill_check.check_fill(finished, tidied, final), "retried": True}
+    tidied, reading = _corrected_reading(finished, generated, final)
+    return tidied, {**reading, "retried": True}
 
 
 def _save_page_images(
