@@ -19,7 +19,7 @@ Built for Meta's Global AI Developer Hackathon (Indie track, solo), Oct 26 to No
 1. **HDR merge.** Each bracket set (the same shot at several exposures) becomes one natural-looking photo where the window view and the dark corners are both visible.
 2. **Window pulls and exposure balance.** SAM 3.1 finds every window, and the view inside it comes from the real darker brackets, so the outdoors is clear and true. Dark corners, hot floors and dim hallways are evened out automatically, the work a photographer does today with hand-drawn linear, radial and luminance masks. Real pixels only, never generated.
 3. **Curate.** Muse Spark drops weak and duplicate shots, labels each room, and puts the best photos in walkthrough order.
-4. **Tidy.** SAM 3.1 finds things a quick tidy would remove (trash bins, boxes, cords, hoses, packing plastic). Muse Image removes only those. It never touches walls, fixtures, flooring or damage. The untouched merged photo is always kept beside the tidied one.
+4. **Tidy.** SAM 3.1 finds things a quick tidy would remove (trash bins, boxes, cords, packing plastic). Muse Image removes only those. It never touches walls, fixtures, flooring or damage. The untouched merged photo is always kept beside the tidied one.
 5. **Write.** Muse Spark writes the listing description and social captions from the unit facts.
 6. **Unit facts.** Beds, baths, square feet, rent and amenities come from Bokani's existing read-only AppFolio connector. That connector was built before the hackathon and is presented as an existing tool being plugged in.
 

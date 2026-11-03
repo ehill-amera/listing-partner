@@ -65,7 +65,7 @@ Erik's home shoot (public sample and baseline timing) must happen by Sun Nov 1.
 - Erik sees: the maintenance list with crops, each one he can check against the photo.
 
 **Sat Oct 31. Unit 6: Tidy with an honesty audit.**
-- SAM 3.1 finds only allowlisted clutter (trash bins, boxes, cords, hoses, packing plastic) and saves each mask. Muse Spark, using crop and zoom, confirms each candidate is clutter before it is masked.
+- SAM 3.1 finds only allowlisted clutter (trash bins, boxes, cords, packing plastic) and saves each mask. Muse Spark, using crop and zoom, confirms each candidate is clutter before it is masked.
 - Muse Image edits, then only the pixels inside the mask are kept. Outside the mask the tidied photo is pixel-for-pixel the input photo, measured on every photo.
 - Sky on exterior shots: SAM 3.1 masks the sky, Muse Image replaces it with a clear sky inside that mask only, labeled "sky replaced" on the page and in the export. Same pixel proof outside the mask.
 - A mask that touches a protected zone from unit 5, or covers walls, fixtures, flooring or damage, is refused.
