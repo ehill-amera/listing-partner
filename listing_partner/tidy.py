@@ -26,6 +26,10 @@ from listing_partner.run_listing import ledger_by_model
 SPARK_MODEL = "muse-spark-1.3"
 UNIT_BUDGET_USD = 5.00
 SPARK_MAX_TOKENS = 4096
+#: Listing objects and naming a kind ran past 4096 tokens on 4 of 9 home-a candidates.
+CONFIRM_MAX_TOKENS = 16384
+#: Reasons that mean no one judged the item. It stays, and the next run asks again.
+_NO_VERDICT = ("Muse Spark's verdict failed", "Muse Spark's verdict could not be read")
 
 #: The only things a tidy may ever target (contract 04, section B).
 CLUTTER_LIST = (
@@ -400,14 +404,12 @@ class _Meta:
                 f"${self.spent():.4f} + ${estimate:.4f} over the ${self.budget:.2f} unit budget"
             )
 
-    def spark(self, prompt: str, images: list[bytes]) -> str:
-        self._guard(
-            meta_client.reserve_text_usd(SPARK_MODEL, prompt, SPARK_MAX_TOKENS, len(images))
-        )
+    def spark(self, prompt: str, images: list[bytes], max_tokens: int = SPARK_MAX_TOKENS) -> str:
+        self._guard(meta_client.reserve_text_usd(SPARK_MODEL, prompt, max_tokens, len(images)))
         return meta_client.call_meta_text(
             SPARK_MODEL,
             prompt,
-            SPARK_MAX_TOKENS,
+            max_tokens,
             images=images,
             transport=self.transport,
             ledger_path=self.ledger,
@@ -521,14 +523,17 @@ def confirm_clutter(small: np.ndarray, found: list[dict], meta: _Meta) -> list[d
         marked = _outlined(small, candidate)
         crop = segment._zoom_crop(marked, candidate["box"])
         # A zoom alone loses the room, so Spark sees both.
-        try:
-            reply = meta.spark(
-                CONFIRM_PROMPT, [segment.jpeg_bytes(marked), segment.jpeg_bytes(crop)]
-            )
-            candidate["confirmed"], candidate["reason"] = parse_confirm(reply, candidate["label"])
-        except _RECOVERABLE as exc:
-            candidate["confirmed"] = False
-            candidate["reason"] = f"Muse Spark's verdict failed, so it stays: {exc}"
+        images = [segment.jpeg_bytes(marked), segment.jpeg_bytes(crop)]
+        for attempt in (1, 2):
+            try:
+                reply = meta.spark(CONFIRM_PROMPT, images, CONFIRM_MAX_TOKENS)
+                candidate["confirmed"], candidate["reason"] = parse_confirm(
+                    reply, candidate["label"]
+                )
+                break
+            except _RECOVERABLE as exc:
+                candidate["confirmed"] = False
+                candidate["reason"] = f"Muse Spark's verdict failed, so it stays: {exc}"
     return found
 
 
@@ -585,8 +590,13 @@ def _findings(rgb: np.ndarray, digest: str, folder: Path, meta: _Meta) -> tuple:
                     if c["label"] in CLUTTER_LIST
                 ]
             damage = [{**d, "box": tuple(d["box"])} for d in saved["damage"]]
-            if saved["key"] in earlier:
-                found = confirm_clutter(small, found, meta)
+            ask = (
+                found
+                if saved["key"] in earlier
+                else [c for c in found if c["reason"].startswith(_NO_VERDICT)]
+            )
+            if ask:
+                confirm_clutter(small, ask, meta)
                 _save_findings(stage, masks_path, key, saved["sent"], damage, found)
             return damage, found
     damage = list_damage(rgb, meta)

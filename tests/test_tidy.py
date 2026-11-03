@@ -76,6 +76,8 @@ class World:
         # Changes the generated picture: (attempt from 1, picture, painted area).
         self.edit_paint = None
         self.confirm_texts = []
+        self.confirm_tokens = []
+        self.confirm_errors = 0
         self.confirm_images = []
         self.calls = {"damage": 0, "sam": 0, "confirm": 0, "selfcheck": 0, "edit": 0}
         self.edit_bodies = []
@@ -110,6 +112,10 @@ class World:
             order = [x for x in tidy.CLUTTER_LIST for _ in self.sam.get(x, [])]
             label = order[(self.calls["confirm"] - 1) % len(order)]
             self.confirm_texts.append(text)
+            self.confirm_tokens.append(data["max_output_tokens"])
+            if self.confirm_errors:
+                self.confirm_errors -= 1
+                raise OSError("reply cut off")
             self.confirm_images.append(content[1:])
             verdict = {"kind": label, **GOOD_CONFIRM, **self.confirm.get(label, {})}
             if label in self.confirm and not self.confirm[label]:
@@ -1011,6 +1017,32 @@ def test_findings_saved_under_the_old_confirm_are_confirmed_again_without_a_new_
     world.calls["confirm"] = 0
     _run(unit, world)
     assert world.calls["confirm"] == 0
+
+
+def test_confirm_reply_cut_off_once_is_asked_again(unit, world):
+    world.confirm_errors = 1
+    photo = _run(unit, world)["photos"][0]
+    assert world.calls["confirm"] == 2
+    assert [item["label"] for item in photo["removed"]] == ["cardboard box"]
+
+
+def test_confirm_with_no_verdict_stays_and_is_asked_again_on_the_next_run(unit, world):
+    # Live on home-a, a cut-off reply was saved as a rejection: safe, but no one
+    # had judged the item, and a rerun would have kept that answer forever.
+    world.confirm_errors = 2
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == [] and world.calls["edit"] == 0
+    assert "verdict failed" in photo["rejected"][0]["reason"]
+    sam_calls = world.calls["sam"]
+    photo = _run(unit, world)["photos"][0]
+    assert world.calls["confirm"] == 3
+    assert world.calls["sam"] == sam_calls + 1  # the re-check of the fill, no new scan
+    assert [item["label"] for item in photo["removed"]] == ["cardboard box"]
+
+
+def test_confirm_has_room_to_answer(unit, world):
+    _run(unit, world)
+    assert world.confirm_tokens == [tidy.CONFIRM_MAX_TOKENS] and tidy.CONFIRM_MAX_TOKENS > 4096
 
 
 # --- review of 4658909, findings 2 and 3: a measured check of the fill
