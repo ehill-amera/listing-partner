@@ -1137,3 +1137,38 @@ def test_look_with_no_mls_twin_reads_not_measured():
     from listing_partner import run_finish as rf
 
     assert "not measured" in rf._look_cell(None)
+
+
+def test_a_fresh_run_lists_bright_known_limits_in_its_summary(tmp_path, monkeypatch):
+    """The bright reading is taken after processing; the summary must be built after it.
+
+    Home-a's fresh run read over the limit on 3 of 8 photos and its summary
+    listed none, so the page's top line said "none".
+    """
+    from listing_partner import measure
+    from listing_partner import run_finish as rf
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "a.NEF").write_bytes(b"")
+    monkeypatch.setattr(rf.hdr, "group_frames", lambda frames: [frames])
+    monkeypatch.setattr(rf.run_merge, "match_mls", lambda *a: {})
+    monkeypatch.setattr(rf, "ensure_merge_thumbs", lambda *a: None)
+    monkeypatch.setattr(rf, "ensure_bracket_strips", lambda *a: {}, raising=False)
+    monkeypatch.setattr(rf, "build_finish_review", lambda *a, **k: None)
+    monkeypatch.setattr(rf, "read_spend_total", lambda *a: 1.0)
+    monkeypatch.setattr(
+        rf,
+        "process_set",
+        lambda members, dirs, number: {"index": number, "name": f"{number:03d}"},
+    )
+    # Far side: the measurements read from the saved file.
+    monkeypatch.setattr(measure, "floor_cast_stats", lambda *a: {"floor_ok": True})
+    monkeypatch.setattr(measure, "flat_white_stats", lambda *a: None)
+    monkeypatch.setattr(
+        measure,
+        "bright_surface_stats",
+        lambda *a: _bright_photo("001", 3.51, True)["bright"],
+    )
+    manifest = rf.run_finish(raw, tmp_path / "mls", tmp_path / "out")
+    assert manifest["summary"]["bright_known_limit"] == [{"name": "001", "outside": 3.51}]

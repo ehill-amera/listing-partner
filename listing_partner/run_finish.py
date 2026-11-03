@@ -1203,8 +1203,9 @@ def run_finish(
             )
         records = merged_records
     baseline, unit_spend = _unit_spend_usd(prior_manifest or {"spend_baseline_usd": start_baseline})
-    summary = _summarize(records, elapsed, unit_spend)
+    # The bright reading lands in attach_look; the summary lists it, so it comes after.
     attach_look(records, mls_matches, mls_dir, output_dir)
+    summary = _summarize(records, elapsed, unit_spend)
     manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     ensure_merge_thumbs(output_dir, manifest)
