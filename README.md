@@ -32,11 +32,11 @@ Every Meta call goes through one spend-capped client (`listing_partner/meta_clie
 How the code enforces it:
 - Muse Spark lists visible damage first. Damage areas are locked: no clutter mask may touch them.
 - SAM 3.1 looks only for a fixed list of carry-out clutter (trash bins, boxes, bags, cords, laundry baskets and similar). Muse Spark must confirm each one, and rejects anything attached, built in, or covering more than one object.
-- Muse Image fills the masked area. Every pixel outside the mask is copied from the original, so nothing else in the photo can change. This is measured on every edited photo: on the demo set, 0 pixels changed outside the mask on the one tidied photo (a 28,900-pixel mask), and 0 on the last refused attempt of the photo that shipped untidied.
+- Muse Image fills the masked area. Every pixel outside the mask is copied from the original, so nothing else in the photo can change. This is measured on every edited photo: on the demo set, 0 pixels changed outside the mask on the one tidied photo (a 28,900-pixel mask), and 0 on the bedroom photo's last refused attempt.
 - After each fill, SAM 3.1 looks again for the removed item, a measured check compares the fill to the surrounding surface for clouds, specks and marks, and Muse Spark self-checks the result. If any check fails after retries, **the photo ships untidied**, with the reason on the page.
 - Every edited photo is labeled "Edited: clutter removed", and the original stays beside it.
 
-On the demo set the product refused its own edit when a fill left a faint mark on a bedroom wall, three tries in a row, and shipped that photo untidied. That is the rule working.
+On the demo set two photos shipped untidied. In the bedroom, a fill left a faint mark on the wall three tries in a row, so the product refused its own edit. In the bathroom, Muse Image's picture did not line up with the photo (ring difference 19.6, limit 12.0), so nothing was pasted in. That is the rule working.
 
 ## Fair housing
 
@@ -92,7 +92,7 @@ Measured, and listed here rather than fixed.
 - **Window views are not edited.** Window pulls were turned off after a review found all 14 pulls on a private test set damaged at full resolution. Windows are found and confirmed, then left as merged.
 - **Colored strips and streaks near windows.** On a private test set, the edge of the cool-view correction leaves a colored strip along the pane edges in 2 photos and a gray-white streak on trim and wall in 1.
 - **Floor color check.** It fails (purple cast near windows over 8%) on 7 of 17 photos of a private test set and 3 of 8 on the demo set (8.1%, 8.5%, 11.0%).
-- **Bright cyan or blue surfaces** cover more than 1% of the frame outside the windows on 1 of 17 photos of a private test set and 3 of 8 on the demo set (3.51%, 8.54%, 1.16%). Listed, not changed.
+- **Bright cyan or blue surfaces** cover more than 1% of the frame outside the windows on 1 of the 12 measured photos of a private test set (the other 5 of its 17 are not measured) and 3 of 8 on the demo set (3.51%, 8.54%, 1.16%). Listed, not changed.
 - No deghosting step, window masks are not glass-only, and noise on lit walls is not measured.
 
 **Shot picking and writing**
