@@ -1,0 +1,13 @@
+#!/bin/sh
+# One command for one set: units 2, 3 and 4 end to end, then where the pages are.
+#   scripts/run <set-name>            live run, model calls inside each unit's capped budget
+#   scripts/run <set-name> --dry-run  no model calls: re-renders every page from saved results
+# Inputs: inputs/<set-name>/raw/*.NEF and facts/<set-name>.json. One set at a time.
+set -u
+top=$(cd "$(dirname "$0")/.." && pwd) || exit 1
+cd "$top" || exit 1
+if [ ! -x .venv/bin/python ]; then
+  echo "refused: project venv missing (.venv/bin/python). Run: uv sync" >&2
+  exit 2
+fi
+exec .venv/bin/python -m listing_partner.pipeline "$@"
