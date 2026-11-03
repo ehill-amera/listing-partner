@@ -79,7 +79,28 @@ def _fill_line(check: dict) -> str:
             f" Reading before shading correction {reading}, {before['specks']} specks;"
             f" at least {share:.0%} of the fill corrected."
         )
-    return f"<p>Fill check: {low}{skipped}, {check['specks']} specks flagged.{corrected}</p>"
+    marks = ""
+    if "blotch" in check:
+        marks = _mark_line(check["blotch"], check.get("attempts", 1))
+    return f"<p>Fill check: {low}{skipped}, {check['specks']} specks flagged.{corrected}</p>{marks}"
+
+
+def _mark_line(marks: dict, attempts: int) -> str:
+    """The local mark check after the shading correction, and how many tries."""
+    line = (
+        f"no spot past {marks['limit_levels']:.0f} levels over {marks['min_area']} pixels"
+        if marks["pass"]
+        else (
+            f"{marks['spots']} spots past {marks['limit_levels']:.0f} levels over "
+            f"{marks['min_area']} pixels, the worst {marks['worst_depth']:.1f} levels over "
+            f"{marks['worst_area']} pixels"
+        )
+    )
+    tries = "1 Muse Image try" if attempts == 1 else f"{attempts} Muse Image tries"
+    return (
+        f"<p>Mark check: {line}; {marks['judged_share']:.0%} of the fill was on a flat "
+        f"surface and judged; {tries}.</p>"
+    )
 
 
 def _tidied(photo: dict) -> str:

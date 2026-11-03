@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from listing_partner import curate, fill_check, meta_client, segment, shading, tidy_page
+from listing_partner import blotch, curate, fill_check, meta_client, segment, shading, tidy_page
 from listing_partner.run_listing import ledger_by_model
 
 SPARK_MODEL = "muse-spark-1.3"
@@ -58,6 +58,12 @@ CHECK_INCOMPLETE = "did not complete"
 SELFCHECK_INCOMPLETE_REASON = "self-check did not complete"
 #: Why a photo ships untidied when the measured fill check fails twice.
 FILL_REASON = "fill did not match the surrounding surface"
+#: Why a photo ships untidied when every try leaves a mark the local check finds.
+MARK_REASON = "fill left a mark on the surface"
+#: Muse Image tries per spot: a fill the fill check fails gets one more, a fill
+#: that leaves a mark gets two more.
+FILL_TRIES = 2
+MARK_TRIES = 3
 
 #: Mask growth for shadows, as a fixed share of the photo's long side. SAM
 #: masks arrive at 1024 px and scale up by nearest neighbour, so at 5900 px
@@ -731,8 +737,11 @@ def recheck_fill(tidied: np.ndarray, mask: np.ndarray, removed: list[dict], meta
 
 
 def _corrected_reading(finished: np.ndarray, generated: np.ndarray, final: np.ndarray) -> tuple:
-    """Composite, then the shading correction inside the mask, then the check.
-    The reading before the correction is kept beside the one that decides."""
+    """Composite, then the shading correction inside the mask, then the checks.
+    The reading before the correction is kept beside the one that decides.
+
+    "fill_pass" is the fill check's own verdict (low frequency and specks),
+    "blotch" the local mark check's, and "pass" both together."""
     raw = composite(finished, generated, final)
     before = fill_check.check_fill(finished, raw, final)
     tidied, correction = shading.correct(finished, raw, final)
@@ -741,26 +750,52 @@ def _corrected_reading(finished: np.ndarray, generated: np.ndarray, final: np.nd
         k: before[k] for k in ("pass", "flat_surfaces", "worst_reading", "worst_limit", "specks")
     }
     reading["correction"] = correction
+    reading["blotch"] = blotch.check_marks(finished, tidied, final)
+    reading["fill_pass"] = reading["pass"]
+    reading["pass"] = reading["fill_pass"] and reading["blotch"]["pass"]
     return tidied, reading
 
 
+def _failed_boxes(reading: dict) -> list:
+    boxes = [area["box"] for area in reading["areas"] if not area["pass"]]
+    return boxes + [area["box"] for area in reading["blotch"]["areas"] if not area["pass"]]
+
+
+def measured_reason(reading: dict) -> str:
+    """Why a measured fill failed, the fill check's reason first."""
+    reasons = []
+    if not reading["fill_pass"]:
+        reasons.append(FILL_REASON)
+    if not reading["blotch"]["pass"]:
+        reasons.append(MARK_REASON)
+    return "; ".join(reasons)
+
+
 def _measured_fill(finished: np.ndarray, final: np.ndarray, spots: list[dict], meta) -> tuple:
-    """(composite, readings). A spot whose fill fails the measured check gets one
-    more Muse Image call; what comes back is corrected and measured again and stands."""
+    """(composite, readings). A spot whose fill fails the measured checks gets
+    another Muse Image call: up to FILL_TRIES in all while the fill check fails it,
+    MARK_TRIES while the local check finds a mark. What comes back is corrected and
+    measured again, and the last reading stands."""
     generated = finished.copy()
     for spot in spots:
         left, top, right, bottom = spot["box"]
         generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
     tidied, reading = _corrected_reading(finished, generated, final)
-    if reading["pass"]:
-        return tidied, reading
-    failed = [area["box"] for area in reading["areas"] if not area["pass"]]
-    for spot in spots:
-        left, top, right, bottom = spot["box"]
-        if any(b[0] >= left and b[1] >= top and b[2] <= right and b[3] <= bottom for b in failed):
-            generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
-    tidied, reading = _corrected_reading(finished, generated, final)
-    return tidied, {**reading, "retried": True}
+    attempts = 1
+    while not reading["pass"]:
+        allowed = MARK_TRIES if not reading["blotch"]["pass"] else FILL_TRIES
+        if attempts >= allowed:
+            break
+        failed = _failed_boxes(reading)
+        for spot in spots:
+            left, top, right, bottom = spot["box"]
+            if any(
+                b[0] >= left and b[1] >= top and b[2] <= right and b[3] <= bottom for b in failed
+            ):
+                generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
+        tidied, reading = _corrected_reading(finished, generated, final)
+        attempts += 1
+    return tidied, {**reading, "attempts": attempts, "retried": attempts > 1}
 
 
 def _save_page_images(
@@ -850,8 +885,9 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
     record["measure"] = measure(source, folder / "tidied.png", folder / "mask.png", damage)
     if not record["fill_check"]["pass"]:
         # Measured failure: no reason to pay Spark or SAM to look at this fill.
-        record["status"], record["reason"] = "untidied", FILL_REASON
-        record["not_removed"] = [{"label": i["label"], "reason": FILL_REASON} for i in removed]
+        reason = measured_reason(record["fill_check"])
+        record["status"], record["reason"] = "untidied", reason
+        record["not_removed"] = [{"label": i["label"], "reason": reason} for i in removed]
         (folder / "tidied.png").rename(folder / "rejected.png")
         return record
     record["selfcheck"] = _self_check(
@@ -915,7 +951,8 @@ def run_tidy(
             if p["recheck"]
             for item in p["recheck"]["items"]
         ),
-        "fill_check_failed": sum(p["reason"] == FILL_REASON for p in photos),
+        "fill_check_failed": sum(FILL_REASON in p["reason"] for p in photos),
+        "mark_check_failed": sum(MARK_REASON in p["reason"] for p in photos),
         "selfcheck_did_not_complete": sum(
             bool(p["selfcheck"]) and p["selfcheck"]["state"] == CHECK_INCOMPLETE for p in photos
         ),
@@ -941,6 +978,7 @@ def main() -> None:
         f"{summary['items_removed']} items removed, "
         f"{summary['items_failed_recheck']} items failed the re-check, "
         f"{summary['fill_check_failed']} photos failed the fill check, "
+        f"{summary['mark_check_failed']} photos left a mark on every try, "
         f"{summary['selfcheck_did_not_complete']} self-checks did not complete, "
         f"${summary['unit_meta_usd']:.4f}"
     )

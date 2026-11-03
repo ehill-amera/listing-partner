@@ -1050,6 +1050,7 @@ def test_confirm_has_room_to_answer(unit, world):
 WALL_W, WALL_H = 1000, 700
 WALL_ITEM = (300, 200, 560, 430)
 FILL_REASON = "fill did not match the surrounding surface"
+MARK_REASON = "fill left a mark on the surface"
 
 
 def _wall():
@@ -1145,14 +1146,20 @@ def test_broad_gray_cloud_is_corrected_and_ships_tidied_on_the_first_try(wall_un
     assert check["correction"]["max_shift_lab"][0] > 0
 
 
-def test_cloud_too_dark_to_place_on_the_wall_ships_untidied_after_one_retry(wall_unit, world):
+def test_cloud_too_dark_to_place_on_the_wall_fails_both_checks_and_ships_untidied(wall_unit, world):
+    # Review of 386a564: what the correction cannot place stays a dark patch, 25
+    # levels deep after it, so the mark check fails it as well and its two extra
+    # tries apply. The fill check alone keeps one retry: see the speck case.
     _wall_world(world).edit_paint = _cloud(DARK_CLOUD)
     photo = _run(wall_unit, world)["photos"][0]
-    assert world.calls["edit"] == 2
+    assert world.calls["edit"] == 3
     assert photo["status"] == "untidied"
-    assert photo["reason"] == FILL_REASON
+    both = f"{FILL_REASON}; {MARK_REASON}"
+    assert photo["reason"] == both
+    assert photo["fill_check"]["fill_pass"] is False
+    assert photo["fill_check"]["blotch"]["pass"] is False
     assert photo["removed"] == []
-    assert photo["not_removed"] == [{"label": "laundry basket", "reason": FILL_REASON}]
+    assert photo["not_removed"] == [{"label": "laundry basket", "reason": both}]
     assert not (wall_unit / "tidy" / "001" / "tidied.png").exists()
     assert (wall_unit / "tidy" / "001" / "rejected.png").exists()
     # Nothing is paid for on a fill the measurement already failed.
@@ -1322,3 +1329,176 @@ def test_shading_correction_on_008_changes_no_pixel_outside_the_mask_or_on_its_e
     edge = mask & cv2.dilate((~mask).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
     assert edge.any()
     assert np.array_equal(tidied[edge], uncorrected[edge])
+
+
+# --- review of 386a564, finding 1: home-a 008 shipped with a gray mark on the wall
+# where the basket's handles were. A local check after the shading correction.
+
+MARKED = Path(__file__).resolve().parent.parent / ".navigator/evidence/tidy-386a564/home-a/tidy"
+needs_marked = pytest.mark.skipif(
+    not (MARKED / "008" / "tidied.png").exists() or not FINISHED.exists(),
+    reason="home-a 008's shipped fill from 386a564 is local only",
+)
+#: The reviewer's measured core of the mark on 386a564's 008, in photo pixels.
+MARK_CORE = (5094, 3001, 5138, 3063)
+
+
+def _replay_marked_008(monkeypatch):
+    """Run the fill 386a564 shipped for 008 back through _measured_fill. Muse
+    Image's side hands back the shipped pixels on every call. Those pixels are
+    already composited and shading-corrected. Doing either a second time is not
+    what the run did (a second correction adds a speck the run never had), so both
+    hand the shipped pixels back unchanged: the checks then judge exactly the
+    pixels 386a564 shipped."""
+
+    def rgb(path):
+        with Image.open(path) as handle:
+            return np.asarray(handle.convert("RGB"))
+
+    finished, shipped = rgb(FINISHED / "008.jpg"), rgb(MARKED / "008" / "tidied.png")
+    with Image.open(MARKED / "008" / "mask.png") as handle:
+        mask = np.asarray(handle.convert("L")) > 0
+    calls = []
+
+    def shipped_fill(_finished, _mask, box, _meta):
+        calls.append(box)
+        left, top, right, bottom = box
+        return shipped[top:bottom, left:right].copy()
+
+    # Outside the mask the shipped photo is the finished one (0 pixels differ,
+    # measured by the review), so handing back the whole crop changes nothing there.
+    assert np.array_equal(shipped[~mask], finished[~mask])
+
+    monkeypatch.setattr(tidy, "_fill_region", shipped_fill)
+    monkeypatch.setattr(tidy, "composite", lambda _f, generated, _m: generated.copy())
+    monkeypatch.setattr(
+        tidy.shading, "correct", lambda _f, composite, _m: (composite, {"least_corrected_share": 0})
+    )
+    tidied, reading = tidy._measured_fill(finished, mask, tidy.regions(mask), meta=None)
+    assert np.array_equal(tidied, shipped), "the replay must judge the shipped pixels"
+    return reading, calls
+
+
+@needs_marked
+def test_the_fill_386a564_shipped_on_home_a_008_fails_for_the_mark_on_the_wall(monkeypatch):
+    reading, calls = _replay_marked_008(monkeypatch)
+    # The measured verdict on the fill: 386a564 passed it.
+    assert reading["pass"] is False
+    # Which check fired: the low-frequency check and the speck count still pass it,
+    # the local mark check does not.
+    assert reading["fill_pass"] is True
+    assert reading["blotch"]["pass"] is False
+    # Muse Image was asked three times in all, and every answer had the mark.
+    assert len(calls) == 3 and reading["attempts"] == 3
+
+
+@needs_marked
+def test_the_mark_check_finds_the_dark_spot_the_reviewer_measured_on_008():
+    from listing_partner import blotch
+
+    def rgb(path):
+        with Image.open(path) as handle:
+            return np.asarray(handle.convert("RGB"))
+
+    with Image.open(MARKED / "008" / "mask.png") as handle:
+        mask = np.asarray(handle.convert("L")) > 0
+    reading = blotch.check_marks(
+        rgb(FINISHED / "008.jpg"), rgb(MARKED / "008" / "tidied.png"), mask
+    )
+    spots = [s for area in reading["areas"] for s in area["spots"]]
+    left, top, right, bottom = MARK_CORE
+    dark = [
+        s
+        for s in spots
+        if s["kind"] == "dark"
+        and s["box"][0] < right
+        and s["box"][2] > left
+        and s["box"][1] < bottom
+        and s["box"][3] > top
+    ]
+    assert reading["pass"] is False and len(dark) == 1, spots
+    assert dark[0]["depth"] >= 12.0 and dark[0]["area"] >= 3 * reading["min_area"]
+
+
+def _mark(depth, *, on_tries=None):
+    """A clean fill with one compact spot, about 50 px across at full size,
+    depth levels darker (or lighter, if negative), on the given tries."""
+
+    def paint(attempt, sent, painted):
+        out, ys, xs = _flat_fill(sent, painted)
+        if on_tries is not None and attempt not in on_tries:
+            return out
+        cy, cx = ys.mean() - 20, xs.mean() + 15
+        yy, xx = np.mgrid[0 : sent.shape[0], 0 : sent.shape[1]].astype(float)
+        spot = depth * np.exp(-(((yy - cy) / 5) ** 2 + ((xx - cx) / 4) ** 2) / 2)
+        out = np.where(painted[..., None], out.astype(float) - spot[..., None], out)
+        return np.clip(out, 0, 255).round().astype(np.uint8)
+
+    return paint
+
+
+@pytest.mark.parametrize("depth", [30, -30], ids=["dark", "light"])
+def test_a_mark_on_every_try_ships_untidied_after_two_more_tries(wall_unit, world, depth):
+    _wall_world(world).edit_paint = _mark(depth)
+    summary = _run(wall_unit, world)
+    photo = summary["photos"][0]
+    assert world.calls["edit"] == 3
+    assert photo["status"] == "untidied" and photo["reason"] == MARK_REASON
+    assert photo["removed"] == []
+    assert photo["not_removed"] == [{"label": "laundry basket", "reason": MARK_REASON}]
+    check = photo["fill_check"]
+    # Which check fired: the fill check passes this fill, the mark check does not.
+    assert check["fill_pass"] is True and check["blotch"]["pass"] is False
+    assert check["attempts"] == 3
+    kind = "dark" if depth > 0 else "light"
+    spots = [s for area in check["blotch"]["areas"] for s in area["spots"]]
+    assert spots and all(s["kind"] == kind for s in spots)
+    assert not (wall_unit / "tidy" / "001" / "tidied.png").exists()
+    assert (wall_unit / "tidy" / "001" / "rejected.png").exists()
+    assert world.calls["selfcheck"] == 0
+    assert summary["mark_check_failed"] == 1 and summary["fill_check_failed"] == 0
+
+
+def test_a_mark_on_the_first_two_tries_and_a_clean_third_ships_tidied(wall_unit, world):
+    _wall_world(world).edit_paint = _mark(30, on_tries={1, 2})
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 3
+    assert photo["status"] == "tidied"
+    assert [i["label"] for i in photo["removed"]] == ["laundry basket"]
+    assert photo["fill_check"]["blotch"]["pass"] is True
+    assert photo["fill_check"]["attempts"] == 3
+
+
+def test_a_mark_too_faint_to_cross_the_line_ships_tidied_on_the_first_try(wall_unit, world):
+    _wall_world(world).edit_paint = _mark(4)
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 1 and photo["status"] == "tidied"
+    assert photo["fill_check"]["blotch"]["spots"] == 0
+
+
+def test_a_fill_only_the_fill_check_fails_still_gets_only_one_retry(wall_unit, world):
+    # The mark check's extra tries are for marks. Specks the fill check fails and
+    # the mark check passes keep the fill check's single retry.
+    _wall_world(world).edit_paint = _specks
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 2 and photo["fill_check"]["attempts"] == 2
+    assert photo["fill_check"]["fill_pass"] is False
+    assert photo["fill_check"]["blotch"]["pass"] is True
+    assert photo["reason"] == FILL_REASON
+
+
+def test_the_page_shows_the_mark_check_and_its_reason(wall_unit, world):
+    _wall_world(world).edit_paint = _mark(30)
+    _run(wall_unit, world)
+    page = (wall_unit / "tidy.html").read_text()
+    assert MARK_REASON in page and "Mark check:" in page and "3 Muse Image tries" in page
+    assert "Edited: clutter removed" not in page
+
+
+def test_a_clean_fill_records_a_passing_mark_check_on_the_page(wall_unit, world):
+    _wall_world(world).edit_paint = _good_fill
+    photo = _run(wall_unit, world)["photos"][0]
+    marks = photo["fill_check"]["blotch"]
+    assert marks["pass"] is True and marks["judged_share"] > 0.5
+    page = (wall_unit / "tidy.html").read_text()
+    assert "Mark check: no spot past 8 levels" in page and "1 Muse Image try" in page
