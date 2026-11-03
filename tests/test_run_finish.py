@@ -954,6 +954,8 @@ def test_replay_logs_peak_memory_per_set_and_releases_images(tmp_path, monkeypat
         }
 
     monkeypatch.setattr(rf, "build_inputs", _stub)
+    # The frames here are names only; the strip reads real files and has its own tests.
+    monkeypatch.setattr(rf, "ensure_bracket_strips", lambda *a: {})
 
     output_dir = tmp_path / "unit"
     for dirname in ("finished", "masks", "review"):
@@ -1172,3 +1174,117 @@ def test_a_fresh_run_lists_bright_known_limits_in_its_summary(tmp_path, monkeypa
     )
     manifest = rf.run_finish(raw, tmp_path / "mls", tmp_path / "out")
     assert manifest["summary"]["bright_known_limit"] == [{"name": "001", "outside": 3.51}]
+
+
+def _jpeg_frames(tmp_path, exposures: dict) -> list:
+    from PIL import Image
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    paths = []
+    for i, (name, seconds) in enumerate(exposures.items()):
+        level = int(40 + 200 * seconds)
+        Image.new("RGB", (640, 400), (level, level, level)).save(raw / name)
+        paths.append(raw / name)
+    return paths
+
+
+def test_bracket_strip_shows_every_frame_darkest_first(tmp_path, monkeypatch):
+    from PIL import Image
+
+    from listing_partner import run_finish as rf
+
+    exposures = {"a.jpg": 1 / 15, "b.jpg": 1 / 250, "c.jpg": 1 / 60}
+    frames = _jpeg_frames(tmp_path, exposures)
+    monkeypatch.setattr(rf.hdr, "read_exposure_seconds", lambda p: exposures[p.name])
+    manifest = {"sets": [{"index": 1, "name": "001", "frames_used": ["b.jpg", "c.jpg"]}]}
+    out = tmp_path / "out"
+    strips = rf.ensure_bracket_strips(out, [frames], manifest)
+    row = strips["001"]
+    assert [f["frame"] for f in row] == ["b.jpg", "c.jpg", "a.jpg"], "darkest first"
+    assert [f["exposure"] for f in row] == ["1/250 s", "1/60 s", "1/15 s"]
+    assert [f["used"] for f in row] == [True, True, False]
+    for f in row:
+        with Image.open(out / "review" / f["file"]) as img:
+            assert img.width == rf.STRIP_WIDTH
+            assert not img.getexif(), "strip copies carry no metadata"
+
+
+def test_bracket_strip_refuses_frames_from_another_set(tmp_path, monkeypatch):
+    import pytest
+
+    from listing_partner import run_finish as rf
+
+    exposures = {"a.jpg": 1 / 15, "b.jpg": 1 / 250}
+    frames = _jpeg_frames(tmp_path, exposures)
+    monkeypatch.setattr(rf.hdr, "read_exposure_seconds", lambda p: exposures[p.name])
+    manifest = {"sets": [{"index": 1, "name": "001", "frames_used": ["z.jpg"]}]}
+    with pytest.raises(ValueError, match="not in its set"):
+        rf.ensure_bracket_strips(tmp_path / "out", [frames], manifest)
+    manifest = {"sets": [{"index": 2, "name": "002", "frames_used": []}]}
+    with pytest.raises(ValueError, match="no bracket set 2"):
+        rf.ensure_bracket_strips(tmp_path / "out", [frames], manifest)
+
+
+def _strip_page_manifest():
+    summary = {
+        "photos_finished": 1,
+        "photos_failed": 0,
+        "run_seconds": 3.0,
+        "noise_before": 3.0,
+        "noise_after": 1.5,
+        "windows_found": 0,
+        "windows_confirmed": 0,
+        "windows_rejected": 0,
+        "photos_with_windows": 0,
+        "clip_before_n": 0,
+        "clip_after_n": 0,
+        "window_pixels": 0,
+        "clip_before_pct": 0.0,
+        "clip_after_pct": 0.0,
+        "unit_spend_usd": 0.0,
+    }
+    return {"summary": summary, "sets": [{"index": 1, "name": "001", "frames_used": []}]}
+
+
+def test_review_puts_the_bracket_strip_above_the_finished_photo(tmp_path):
+    from listing_partner import run_finish as rf
+
+    strips = {
+        "001": [
+            {"file": "bracket_001_0.jpg", "frame": "b", "exposure": "1/250 s", "used": True},
+            {"file": "bracket_001_1.jpg", "frame": "a", "exposure": "1/15 s", "used": False},
+        ]
+    }
+    html = rf.build_finish_review(tmp_path, _strip_page_manifest(), {}, strips).read_text()
+    strip_at = html.index("review/bracket_001_0.jpg")
+    assert strip_at < html.index("review/bracket_001_1.jpg") < html.index("review/finished_001")
+    assert html.index("review/merged_001") < strip_at, "the strip sits in the finished column"
+    assert "2 frames, 1 merged" in html
+    missing = rf.build_finish_review(tmp_path, _strip_page_manifest(), {}, {}).read_text()
+    assert "raw brackets: no raw frames found for this shot" in missing
+    old = rf.build_finish_review(tmp_path, _strip_page_manifest(), {}).read_text()
+    assert "raw brackets: not built for this page" in old
+
+
+def test_rendering_again_lists_bright_limits_a_stale_summary_left_out(tmp_path, monkeypatch):
+    import json
+
+    from listing_partner import run_finish as rf
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "a.NEF").write_bytes(b"")
+    out = tmp_path / "out"
+    out.mkdir()
+    manifest = _strip_page_manifest()
+    manifest["summary"]["bright_known_limit"] = []
+    manifest["sets"] = [{**_bright_photo("001", 3.51, True), "frames_used": []}]
+    (out / "finish_manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(rf.hdr, "group_frames", lambda frames: [frames])
+    monkeypatch.setattr(rf.run_merge, "match_mls", lambda *a: {})
+    monkeypatch.setattr(rf, "ensure_bracket_strips", lambda *a: {})
+    html = rf.render_finish_page(raw, tmp_path / "mls", out).read_text()
+    assert "001 (3.51%)" in html
+    saved = json.loads((out / "finish_manifest.json").read_text())
+    assert saved == manifest, "rendering never rewrites the saved manifest"

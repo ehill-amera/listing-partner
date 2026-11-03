@@ -721,7 +721,9 @@ def _floor_cell(floor: dict | None) -> str:
     return f"<p>{verdict} {floor.get('floor_reason', '')}</p>"
 
 
-def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> Path:
+def build_finish_review(
+    output_dir: Path, manifest: dict, mls_matches: dict, strips: dict | None = None
+) -> Path:
     """review-finish.html: one row per shot plus the measured top line.
 
     One row per shot: our unit 1 merge, our finished photo, the window
@@ -799,7 +801,8 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
             f'<div class="row">'
             f'<div><img src="review/merged_{name}.jpg" loading="lazy">'
             f"<p>unit 1 merge</p></div>"
-            f'<div><img src="review/finished_{name}.jpg" loading="lazy">'
+            f"<div>{_strip_cell((strips or {}).get(name), strips is not None)}"
+            f'<img src="review/finished_{name}.jpg" loading="lazy">'
             f"<p>finished</p></div>"
             f'<div><img src="review/overlay_{name}.jpg" loading="lazy">'
             f"<p>window mask over the merge</p>{win_cell}{rej_cell}</div>"
@@ -838,7 +841,10 @@ def build_finish_review(output_dir: Path, manifest: dict, mls_matches: dict) -> 
 <title>Finished review: {top["photos_finished"]} finished, {top["photos_failed"]} failed</title>
 <style>body{{font-family:sans-serif;max-width:1600px;margin:auto;padding:16px}}
 .row{{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}}
-img{{width:100%;height:auto}}.row p{{font-size:12px}}</style></head><body>
+img{{width:100%;height:auto}}.row p{{font-size:12px}}
+.strip{{display:flex;gap:2px;margin-bottom:4px}}.strip figure{{flex:1;margin:0;min-width:0}}
+.strip img{{display:block}}.strip .unused img{{opacity:.45}}
+.strip figcaption{{font-size:10px;text-align:center}}</style></head><body>
 <h1>Finished review</h1>
 <p>{top["photos_finished"]} finished, {top["photos_failed"]} failed,
 run time {top["run_seconds"]:.0f} s.</p>
@@ -1029,6 +1035,96 @@ def ensure_merge_thumbs(output_dir: Path, manifest: dict) -> None:
         save_clean_jpeg(cv2.cvtColor(thumb, cv2.COLOR_BGR2RGB), review_dir / f"merged_{name}.jpg")
 
 
+#: Width of each raw bracket frame in the strip above a finished photo.
+STRIP_WIDTH = 320
+
+
+def _exposure_label(seconds: float) -> str:
+    if seconds >= 1:
+        return f"{seconds:g} s"
+    return f"1/{round(1 / seconds)} s"
+
+
+def ensure_bracket_strips(output_dir: Path, sets: list[list[Path]], manifest: dict) -> dict:
+    """Small copies of every raw bracket frame per shot, darkest first.
+
+    Decoded locally at the camera's as-shot balance with no brightening, so
+    each frame shows its own exposure. A shot whose saved frames are not the
+    frames grouped from the raw folder raises: a strip from the wrong set
+    never reaches the page.
+    """
+    review_dir = output_dir / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    strips = {}
+    for entry in manifest["sets"]:
+        if entry.get("error"):
+            continue
+        number, name = entry["index"], entry["name"]
+        if not 1 <= number <= len(sets):
+            raise ValueError(f"shot {name}: no bracket set {number} in the raw folder")
+        members = sorted(sets[number - 1], key=hdr.read_exposure_seconds)
+        used = set(entry.get("frames_used", []))
+        missing = used - {p.name for p in members}
+        if missing:
+            raise ValueError(f"shot {name}: saved frames {sorted(missing)} are not in its set")
+        frames = []
+        for k, path in enumerate(members):
+            out = review_dir / f"bracket_{name}_{k}.jpg"
+            if not out.exists():
+                rgb = hdr.decode_frame(path, half_size=True)
+                height = int(round(rgb.shape[0] * STRIP_WIDTH / rgb.shape[1]))
+                small = cv2.resize(rgb, (STRIP_WIDTH, height), interpolation=cv2.INTER_AREA)
+                save_clean_jpeg(small, out)
+            frames.append(
+                {
+                    "file": out.name,
+                    "frame": path.name,
+                    "exposure": _exposure_label(hdr.read_exposure_seconds(path)),
+                    "used": path.name in used,
+                }
+            )
+        strips[name] = frames
+    return strips
+
+
+def _strip_cell(frames: list[dict] | None, attempted: bool) -> str:
+    """The raw brackets above the finished photo; says plainly when they are missing."""
+    if not frames:
+        why = "no raw frames found for this shot" if attempted else "not built for this page"
+        return f"<p>raw brackets: {why}</p>"
+    figures = "".join(
+        f'<figure class="{"used" if f["used"] else "unused"}">'
+        f'<img src="review/{f["file"]}" alt="{f["frame"]}" loading="lazy">'
+        f"<figcaption>{f['exposure']}</figcaption></figure>"
+        for f in frames
+    )
+    used = sum(f["used"] for f in frames)
+    return (
+        f'<div class="strip">{figures}</div>'
+        f"<p>raw brackets, darkest first: {len(frames)} frames, {used} merged "
+        "(the dimmed ones were left out)</p>"
+    )
+
+
+def render_finish_page(raw_dir: Path, mls_dir: Path, output_dir: Path) -> Path:
+    """Rebuild review-finish.html from the saved manifest. No Meta call and no
+    decode beyond the small bracket copies; the manifest is only read."""
+    manifest = json.loads((output_dir / "finish_manifest.json").read_text())
+    frames = sorted(raw_dir.glob("*.NEF")) + sorted(raw_dir.glob("*.nef"))
+    if not frames:
+        raise ValueError(f"no bracket frames in {raw_dir}")
+    sets = hdr.group_frames(frames)
+    mls_matches = run_merge.match_mls(sets, mls_dir, output_dir / "merged")
+    # Runs before e642dd1 built the summary before the bright reading and saved an
+    # empty list. The page lists it again from each photo's saved reading.
+    manifest["summary"]["bright_known_limit"] = _bright_known_limits(
+        [r for r in manifest["sets"] if not r.get("error")]
+    )
+    ensure_merge_thumbs(output_dir, manifest)
+    strips = ensure_bracket_strips(output_dir, sets, manifest)
+    return build_finish_review(output_dir, manifest, mls_matches, strips)
+
+
 def attach_look(records: list[dict], mls_matches: dict, mls_dir: Path, output_dir: Path) -> None:
     """Post-hoc criterion-11 and floor numbers per shot, from shipped files.
 
@@ -1141,7 +1237,8 @@ def run_replay(sets: list, mls_matches: dict, mls_dir: Path, output_dir: Path, d
     manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     ensure_merge_thumbs(output_dir, manifest)
-    build_finish_review(output_dir, manifest, mls_matches)
+    strips = ensure_bracket_strips(output_dir, sets, manifest)
+    build_finish_review(output_dir, manifest, mls_matches, strips)
     return manifest
 
 
@@ -1209,7 +1306,8 @@ def run_finish(
     manifest = {"summary": summary, "sets": records, "spend_baseline_usd": baseline}
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     ensure_merge_thumbs(output_dir, manifest)
-    build_finish_review(output_dir, manifest, mls_matches)
+    strips = ensure_bracket_strips(output_dir, sets, manifest)
+    build_finish_review(output_dir, manifest, mls_matches, strips)
     return manifest
 
 
@@ -1223,7 +1321,16 @@ def main() -> None:
         action="store_true",
         help="re-run every set's local tail with saved Meta results, no Meta calls",
     )
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help="rebuild review-finish.html from the saved manifest, no Meta calls",
+    )
     args = parser.parse_args()
+    if args.render_only:
+        page = render_finish_page(args.unit_dir / "raw", args.unit_dir / "mls", args.output)
+        print(f"page: {page}")
+        return
     only = {int(n) for n in args.only.split(",")} if args.only else None
     manifest = run_finish(
         args.unit_dir / "raw", args.unit_dir / "mls", args.output, only=only, replay=args.replay
