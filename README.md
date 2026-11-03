@@ -79,7 +79,7 @@ The raw frames and outputs are not in this repo.
 
 - **Muse Code** (Meta's coding agent, muse-spark-1.3) built units 1 and 2: the spend-capped Meta client, the HDR merge, lens and vertical correction, window finding, exposure and white balance, and denoise. The git tag `muse-code-built` marks its last commit (87 commits).
 - **Claude Code** (Opus 5.5) built from there: the final color fix, curation, writing on both models, scoring, fair housing, the Baseten client, and the tidy unit (51 commits after the tag, through the unit 4 commit `f93deaa`).
-- **A separate reviewer** (a fresh-context Claude Code agent from a fixed prompt in `.claude/agents/reviewer.md`) reviewed every unit and could only say SHIP or NOT YET. The builder never graded its own work. Every saved review is in `docs/reviews/` (unit 1's reports were not kept).
+- **A separate reviewer** (a fresh-context Claude Code agent from a fixed prompt in `.claude/agents/reviewer.md`) reviewed every unit and could only say SHIP or NOT YET. The builder never graded its own work. The saved reviews of units 2 to 4 are in `docs/reviews/` (unit 1's reports were not kept, and reviews of this publishing step are not included).
 - **A navigator** (Claude) wrote the product spec and every contract in `contracts/`, and made the calls on scope.
 
 Full breakdown in [`docs/who-built-what.md`](docs/who-built-what.md).

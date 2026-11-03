@@ -16,7 +16,7 @@ Muse Code built on the hackathon's Meta credits, and its own building spend is n
 
 ## Review rounds, by unit
 
-Counted from every saved review report. 13 are in [`docs/reviews/`](reviews/README.md); unit 3's SHIP report is withheld there because it names facts of the private test set. Each round reviewed one commit and answered SHIP or NOT YET. Every NOT YET finding was fixed, or settled by an Erik decision written into the contract, before the next round; unit 2's last was accepted as known limits.
+Counted from every saved review report for units 1 to 4; reviews of the publishing step itself are not included. 13 are in [`docs/reviews/`](reviews/README.md); unit 3's SHIP report is withheld there because it names facts of the private test set. Each round reviewed one commit and answered SHIP or NOT YET. Every NOT YET finding was fixed, or settled by an Erik decision written into the contract, before the next round; unit 2's last was accepted as known limits.
 
 | Unit | Rounds | NOT YET | SHIP | How it ended |
 |---|---:|---:|---:|---|
@@ -24,6 +24,6 @@ Counted from every saved review report. 13 are in [`docs/reviews/`](reviews/READ
 | 2. Window pulls and exposure | 8 | 8 | 0 | After the eighth round, Erik accepted its remaining marks as known limits (listed in the README) and shipped it |
 | 3. Curate and write | 3 | 2 | 1 | SHIP on the third round |
 | 4. Tidy | 3 | 2 | 1 | SHIP on the third round |
-| **Total, saved reports** | **14** | **12** | **2** | |
+| **Total, saved reports, units 1 to 4** | **14** | **12** | **2** | |
 
 `scripts/measure_docs.py` recounts this table and every commit count above.

@@ -1,6 +1,6 @@
 # Review reports
 
-Every saved report from the separate reviewer agent, copied from the build's local notes. Each reviewed one commit against its unit's contract and answered SHIP or NOT YET. Listed in the order they were written.
+Every saved report from the separate reviewer agent for units 1 to 4, copied from the build's local notes. Reviews of the publishing step itself are not included. Each reviewed one commit against its unit's contract and answered SHIP or NOT YET. Listed in the order they were written.
 
 Scrubbed before publishing: local machine paths became `<local path>` or `<scratch path>`, and local usernames became `<user>`. Every report was also checked against the private banned-strings list (0 matches) and against the private test set's facts (address, city, state, rent, square feet, deposit, amenities, bed and bath counts). One report named some of those facts and is withheld rather than edited.
 

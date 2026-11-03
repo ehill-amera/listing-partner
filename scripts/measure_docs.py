@@ -3,8 +3,8 @@
 Usage: .venv/bin/python scripts/measure_docs.py [set-name]   (default home-a)
 
 Reads only files on disk: the set's saved outputs, both spend ledgers, git and
-.navigator/review-*.md (every saved review, including the one withheld from
-docs/reviews/). Makes no model call and imports no client. Prints one
+.navigator/review-*.md (every saved review of units 1 to 4, including the one
+withheld from docs/reviews/). Makes no model call and imports no client. Prints one
 JSON object. Any shape it does not recognise raises instead of printing a
 number, so a short or empty answer never reads as complete.
 """
@@ -229,7 +229,13 @@ VERDICT = re.compile(r"\b(NOT YET|SHIP)\b")
 
 def reviews() -> dict:
     table: dict[str, dict] = {}
-    files = sorted((ROOT / ".navigator").glob("review-*.md"))
+    # Units 1 to 4: the publishing step's own reviews are written after the
+    # commit they review, so no committed table can count them.
+    files = [
+        f
+        for f in sorted((ROOT / ".navigator").glob("review-*.md"))
+        if f.name.split("-")[1].removesuffix(".md") in ("01", "02", "03", "04")
+    ]
     if not files:
         raise Unmeasurable("no review files")
     for f in files:
