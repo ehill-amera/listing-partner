@@ -52,6 +52,23 @@ def _damage(photo: dict) -> str:
     return f'<h3>{title}</h3><ul class="crops">{rows}</ul>'
 
 
+def _fill_line(check: dict) -> str:
+    """The measured reading, and what it did not judge."""
+    if check["worst_reading"] is None:
+        low = "no flat surface to measure"
+    else:
+        low = (
+            f"worst reading {check['worst_reading']:.1f} against a limit of "
+            f"{check['worst_limit']:.1f}, on {check['flat_surfaces']} flat surfaces"
+        )
+    skipped = (
+        f", {check['not_flat_surfaces']} surfaces not flat, so not judged"
+        if check["not_flat_surfaces"]
+        else ""
+    )
+    return f"<p>Fill check: {low}{skipped}, {check['specks']} specks flagged.</p>"
+
+
 def _tidied(photo: dict) -> str:
     pid = photo["id"]
     numbers = photo["measure"]
@@ -72,6 +89,7 @@ def _tidied(photo: dict) -> str:
 <p>Measured: {numbers["outside_changed_pixels"]} pixels changed outside the mask,
 {numbers["damage_overlap_pixels"]} damage pixels under the mask,
 {numbers["mask_pixels"]} pixels in the mask.</p>
+{_fill_line(photo["fill_check"])}
 <p>Muse Spark self-check: {"pass" if check["pass"] else "fail"}. {escape(check["reason"])}</p>
 <p>SAM 3.1 re-check: pass. Asked again on the tidied photo, it finds none of the removed
 items inside the mask.</p>
@@ -92,6 +110,8 @@ def _photo(photo: dict) -> str:
     else:
         if photo["reason"]:
             body += f"<p>Shipped untidied: {escape(photo['reason'])}</p>"
+        if photo["fill_check"]:
+            body += _fill_line(photo["fill_check"])
         if photo["selfcheck"]:
             body += f"<p>Muse Spark {_check_line(photo['selfcheck'])}</p>"
         body += f'<p><a href="finished/{pid}.jpg">Untidied photo</a></p>'

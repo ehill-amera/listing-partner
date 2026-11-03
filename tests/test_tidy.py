@@ -4,6 +4,8 @@ import base64
 import hashlib
 import io
 import json
+import re
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -35,7 +37,13 @@ def _rect(box, shape=(H, W)):
     return mask
 
 
-GOOD_CONFIRM = {"confirm": True, "is_that_item": True, "attached": False, "reason": "loose item"}
+GOOD_CONFIRM = {
+    "confirm": True,
+    "is_that_item": True,
+    "objects": ["a loose item"],
+    "attached": False,
+    "reason": "loose item",
+}
 
 
 class World:
@@ -65,6 +73,10 @@ class World:
         self.image_error = None
         self.edit_shift = 0
         self.edit_size = None
+        # Changes the generated picture: (attempt from 1, picture, painted area).
+        self.edit_paint = None
+        self.confirm_texts = []
+        self.confirm_images = []
         self.calls = {"damage": 0, "sam": 0, "confirm": 0, "selfcheck": 0, "edit": 0}
         self.edit_bodies = []
         self.sent_jpegs = 0
@@ -93,8 +105,16 @@ class World:
                 reply = json.dumps({"damage": self.damage if first else []})
         elif text.startswith(tidy.CONFIRM_PROMPT[:40]):
             self.calls["confirm"] += 1
-            label = next(x for x in tidy.CLUTTER_LIST if f'"{x}"' in text)
-            reply = json.dumps(self.confirm.get(label, GOOD_CONFIRM))
+            # Spark is not told the finder's label, so candidates are matched by
+            # order: the finder walks the list in order and so does the confirm.
+            order = [x for x in tidy.CLUTTER_LIST for _ in self.sam.get(x, [])]
+            label = order[(self.calls["confirm"] - 1) % len(order)]
+            self.confirm_texts.append(text)
+            self.confirm_images.append(content[1:])
+            verdict = {"kind": label, **GOOD_CONFIRM, **self.confirm.get(label, {})}
+            if label in self.confirm and not self.confirm[label]:
+                verdict = {}
+            reply = json.dumps(verdict)
         elif text.startswith(tidy.SELFCHECK_PROMPT[:40]):
             self.calls["selfcheck"] += 1
             on = self.selfcheck_error_on
@@ -117,6 +137,8 @@ class World:
         # the way a good edit would, but mark it as generated.
         painted = tidy.is_paint(sent)
         sent[painted] = (150, 140, 130)
+        if self.edit_paint:
+            sent = self.edit_paint(self.calls["edit"], sent, painted)
         if self.edit_shift:
             sent = np.roll(sent, self.edit_shift, axis=1)
         out = Image.fromarray(sent)
@@ -489,12 +511,11 @@ def test_confirm_without_a_reason_never_removes(unit, world, verdict):
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        ({"is_that_item": False}, "a lawn spreader, not a laundry basket"),
         ({"attached": True}, "still plugged into the outlet"),
         ({"attached": None}, "no answer on attachment"),
     ],
 )
-def test_confirmed_item_off_the_list_or_attached_is_never_removed(unit, world, change, reason):
+def test_attached_item_or_one_with_no_answer_on_it_is_never_removed(unit, world, change, reason):
     world.confirm["cardboard box"] = {**GOOD_CONFIRM, **change, "reason": reason}
     photo = _run(unit, world)["photos"][0]
     assert photo["removed"] == []
@@ -863,3 +884,323 @@ def test_page_paths_stay_relative(unit, world):
     _run(unit, world)
     html = (unit / "tidy.html").read_text()
     assert str(unit) not in html
+
+
+# --- review of 4658909, finding 1: home-a 003's candidate 0, a red cup and a black
+# object at the dish rack under one mask, labeled "cleaning supplies"
+
+CUP_MASK_BOX = (300, 200, 400, 320)
+
+
+def _cup_world(world, verdict):
+    world.sam = {"cleaning supplies": [CUP_MASK_BOX]}
+    world.confirm["cleaning supplies"] = {**GOOD_CONFIRM, **verdict}
+    return world
+
+
+def test_item_spark_names_as_something_off_the_list_is_rejected(unit, world):
+    # The old prompt told Spark the label and it agreed. "is_that_item" stays
+    # true here, so only the blind answer can stop it.
+    _cup_world(world, {"kind": "none", "objects": ["a red dotted cup"], "reason": "a drinking cup"})
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == [] and world.calls["edit"] == 0
+    assert photo["status"] == "nothing to tidy"
+    assert photo["rejected"] == [
+        {
+            "label": "cleaning supplies",
+            "reason": "Muse Spark did not name it cleaning supplies: a drinking cup",
+        }
+    ]
+
+
+def test_item_spark_names_as_another_list_kind_is_rejected(unit, world):
+    _cup_world(world, {"kind": "bucket", "reason": "a small bucket"})
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == [] and world.calls["edit"] == 0
+    assert "did not name it cleaning supplies" in photo["rejected"][0]["reason"]
+
+
+def test_mask_spanning_a_second_object_is_rejected(unit, world):
+    _cup_world(
+        world,
+        {
+            "kind": "cleaning supplies",
+            "objects": ["a red dotted bottle", "a black object at the dish rack"],
+            "reason": "bottle by the sink",
+        },
+    )
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == [] and world.calls["edit"] == 0
+    assert photo["rejected"][0]["reason"] == (
+        "the outline covers more than one object: "
+        "a red dotted bottle, a black object at the dish rack"
+    )
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [{"kind": None}, {"kind": "a sofa"}, {"objects": None}, {"objects": []}, {"objects": "one"}],
+)
+def test_confirm_with_no_usable_name_or_object_list_never_removes(unit, world, gap):
+    _cup_world(world, gap)
+    photo = _run(unit, world)["photos"][0]
+    assert photo["removed"] == [] and world.calls["edit"] == 0
+    assert photo["rejected"][0]["reason"]
+
+
+def test_spark_is_not_told_the_finders_label(unit, world):
+    _cup_world(world, {"kind": "cleaning supplies"})
+    _run(unit, world)
+    text = world.confirm_texts[0]
+    assert '"cleaning supplies"' not in text and "finder" not in text.lower()
+    for kind in tidy.CLUTTER_LIST:
+        assert kind in text
+
+
+def test_spark_sees_the_outline_of_the_mask_not_only_a_box(unit, world, monkeypatch):
+    world.sam = {"cardboard box": [ITEM_BOX]}
+    disc = np.zeros((H, W), np.uint8)
+    cv2.circle(disc, (150, 150), 40, 1, -1)
+
+    def lane(text, frame_w, frame_h):
+        return [
+            {"object_id": i, "box": tuple(b), "mask": disc.astype(bool)}
+            for i, b in enumerate(json.loads(text))
+        ]
+
+    monkeypatch.setattr(segment, "parse_lane", lane)
+    _run(unit, world)
+    url = world.confirm_images[0][0]["image_url"]
+    with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as handle:
+        sent = np.asarray(handle.convert("RGB")).astype(int)
+    # The disc's left edge, far from the box's own lines.
+    r, g, b = sent[150, 110]
+    assert r > 180 and g < 90 and b < 90
+
+
+#: Word for word what findings on disk were confirmed with before this review.
+OLD_CONFIRM_PROMPT = (
+    "A red box marks a candidate for removal from a rental listing photo. It may be "
+    "removed only if a person could carry it out in a day and it is not part of the "
+    "property. Reject anything that is a fixture, part of the building, wired or "
+    "plumbed in, furniture or an appliance that conveys with the unit, or damage. "
+    "Say whether it truly is the kind of item the finder named. Say whether it is "
+    "attached at either end: a cord plugged into an outlet or a device, a blind's "
+    "pull cord, a hose on a spigot. Attached things stay. Reply with JSON only: "
+    '{"confirm": true or false, "is_that_item": true or false, '
+    '"attached": true or false, "reason": "plain words"}.'
+)
+
+
+def test_findings_saved_under_the_old_confirm_are_confirmed_again_without_a_new_scan(
+    unit, world, monkeypatch
+):
+    with monkeypatch.context() as patch:
+        patch.setattr(tidy, "CONFIRM_PROMPT", OLD_CONFIRM_PROMPT)
+        _run(unit, world)
+    before = dict(world.calls)
+    world.confirm["cardboard box"] = {"kind": "none", "reason": "a drinking cup"}
+    world.calls["confirm"] = 0
+    photo = _run(unit, world)["photos"][0]
+    assert world.calls["damage"] == before["damage"]
+    # One scan's worth of SAM calls would be the whole list again.
+    assert world.calls["sam"] == before["sam"]
+    assert world.calls["confirm"] == 1
+    assert photo["removed"] == []
+    # Saved under the new prompt now, so a third run does not pay again.
+    world.calls["confirm"] = 0
+    _run(unit, world)
+    assert world.calls["confirm"] == 0
+
+
+# --- review of 4658909, findings 2 and 3: a measured check of the fill
+
+WALL_W, WALL_H = 1000, 700
+WALL_ITEM = (300, 200, 560, 430)
+FILL_REASON = "fill did not match the surrounding surface"
+
+
+def _wall():
+    # A clean wall with a slow light falloff, and one dark item on it.
+    yy, xx = np.mgrid[0:WALL_H, 0:WALL_W].astype(float)
+    gray = 196 - xx * 0.006 - yy * 0.004
+    rgb = np.clip(np.stack([gray, gray - 6, gray - 16], axis=2), 0, 255).round().astype(np.uint8)
+    left, top, right, bottom = WALL_ITEM
+    rgb[top:bottom, left:right] = (12, 12, 12)
+    return rgb
+
+
+@pytest.fixture
+def wall_unit(tmp_path):
+    out = tmp_path / "wall"
+    (out / "finished").mkdir(parents=True)
+    Image.fromarray(_wall()).save(out / "finished" / "001.jpg", quality=98)
+    digest = hashlib.sha256((out / "finished" / "001.jpg").read_bytes()).hexdigest()
+    (out / "curation.json").write_text(
+        json.dumps(
+            {
+                "kept": [{"id": "001", "room": "bedroom"}],
+                "dropped": [],
+                "photos": {"001": digest},
+                "cost": {"calls": 1, "usd": 0.01},
+            }
+        )
+    )
+    return out
+
+
+def _wall_world(world):
+    world.sam = {"laundry basket": [WALL_ITEM]}
+    return world
+
+
+def _flat_fill(sent, painted):
+    # The ring's own colour, so the seamless clone has nothing to fix.
+    ys, xs = np.nonzero(painted)
+    out = sent.copy()
+    edge = cv2.dilate(painted.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool) & ~painted
+    out[painted] = np.median(sent[edge], axis=0).round().astype(np.uint8)
+    return out, ys, xs
+
+
+def _soft_spot(sent, ys, xs, amount):
+    """A soft patch over most of the fill, as on home-a 008's wall."""
+    cy, cx = ys.mean(), xs.mean()
+    yy, xx = np.mgrid[0 : sent.shape[0], 0 : sent.shape[1]].astype(float)
+    return amount * np.exp(-(((yy - cy) / 90) ** 2 + ((xx - cx) / 110) ** 2) / 2)
+
+
+def _cloud(levels):
+    def paint(attempt, sent, painted):
+        out, ys, xs = _flat_fill(sent, painted)
+        dip = _soft_spot(sent, ys, xs, levels)[..., None]
+        out = np.where(painted[..., None], np.clip(out.astype(float) - dip, 0, 255), out)
+        return out.round().astype(np.uint8)
+
+    return paint
+
+
+def _good_fill(attempt, sent, painted):
+    return _flat_fill(sent, painted)[0]
+
+
+def _specks(attempt, sent, painted):
+    out, ys, xs = _flat_fill(sent, painted)
+    cy, cx = int(ys.mean()), int(xs.mean())
+    for dy, dx in ((-60, -70), (40, -30), (10, 60), (-40, 90)):
+        out[cy + dy - 2 : cy + dy + 3, cx + dx - 2 : cx + dx + 3] = (230, 120, 60)
+    return out
+
+
+@pytest.mark.parametrize("levels", [5, 8, 10])
+def test_gray_cloud_on_a_clean_wall_ships_untidied_after_one_retry(wall_unit, world, levels):
+    _wall_world(world).edit_paint = _cloud(levels)
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 2
+    assert photo["status"] == "untidied"
+    assert photo["reason"] == FILL_REASON
+    assert photo["removed"] == []
+    assert photo["not_removed"] == [{"label": "laundry basket", "reason": FILL_REASON}]
+    assert not (wall_unit / "tidy" / "001" / "tidied.png").exists()
+    assert (wall_unit / "tidy" / "001" / "rejected.png").exists()
+    # Nothing is paid for on a fill the measurement already failed.
+    assert world.calls["selfcheck"] == 0
+
+
+def test_cloud_on_the_first_try_and_a_clean_fill_on_the_retry_ships_tidied(wall_unit, world):
+    cloud = _cloud(10)
+    _wall_world(world).edit_paint = lambda a, s, p: (
+        cloud(a, s, p) if a == 1 else _good_fill(a, s, p)
+    )
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 2
+    assert photo["status"] == "tidied"
+    assert [i["label"] for i in photo["removed"]] == ["laundry basket"]
+
+
+def test_clean_fill_ships_tidied_on_the_first_try(wall_unit, world):
+    _wall_world(world).edit_paint = _good_fill
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 1
+    assert photo["status"] == "tidied"
+
+
+def test_colour_cast_on_a_clean_wall_ships_untidied(wall_unit, world):
+    def cast(attempt, sent, painted):
+        out, ys, xs = _flat_fill(sent, painted)
+        tint = _soft_spot(sent, ys, xs, 16)
+        shifted = out.astype(float)
+        shifted[..., 2] = np.where(painted, shifted[..., 2] + tint, shifted[..., 2])
+        return np.clip(shifted, 0, 255).round().astype(np.uint8)
+
+    _wall_world(world).edit_paint = cast
+    photo = _run(wall_unit, world)["photos"][0]
+    assert photo["status"] == "untidied" and photo["reason"] == FILL_REASON
+
+
+def test_orange_specks_the_wall_does_not_have_ship_untidied(wall_unit, world):
+    _wall_world(world).edit_paint = _specks
+    photo = _run(wall_unit, world)["photos"][0]
+    assert world.calls["edit"] == 2
+    assert photo["status"] == "untidied" and photo["reason"] == FILL_REASON
+    assert photo["fill_check"]["specks"] >= 1
+
+
+def test_every_measured_photo_records_its_fill_readings_and_the_page_shows_them(wall_unit, world):
+    _wall_world(world).edit_paint = _good_fill
+    summary = _run(wall_unit, world)
+    check = summary["photos"][0]["fill_check"]
+    assert check["pass"] is True and check["flat_surfaces"] >= 1
+    assert check["worst_reading"] <= check["worst_limit"]
+    page = (wall_unit / "tidy.html").read_text()
+    assert "Fill check" in page and f"{check['worst_reading']:.1f}" in page
+
+
+def test_page_gives_the_fill_reason_when_the_fill_check_fails(wall_unit, world):
+    _wall_world(world).edit_paint = _cloud(10)
+    _run(wall_unit, world)
+    page = (wall_unit / "tidy.html").read_text()
+    assert FILL_REASON in page and "Edited: clutter removed" not in page
+
+
+EVIDENCE = Path(__file__).resolve().parent.parent / ".navigator/evidence/tidy-4658909/home-a/tidy"
+FINISHED = Path(__file__).resolve().parent.parent / "output/home-a/finished"
+needs_evidence = pytest.mark.skipif(
+    not (EVIDENCE / "008" / "tidied.png").exists() or not FINISHED.exists(),
+    reason="the reviewed home-a fills are local only",
+)
+
+
+def _saved(pid):
+    def rgb(path):
+        with Image.open(path) as handle:
+            return np.asarray(handle.convert("RGB"))
+
+    with Image.open(EVIDENCE / pid / "mask.png") as handle:
+        mask = np.asarray(handle.convert("L")) > 0
+    return rgb(FINISHED / f"{pid}.jpg"), rgb(EVIDENCE / pid / "tidied.png"), mask
+
+
+@needs_evidence
+def test_the_real_home_a_008_cloud_fails_the_fill_check():
+    from listing_partner import fill_check
+
+    reading = fill_check.check_fill(*_saved("008"))
+    assert reading["pass"] is False and reading["worst_reading"] > reading["worst_limit"]
+
+
+@needs_evidence
+def test_the_real_home_a_003_speck_fails_the_fill_check():
+    from listing_partner import fill_check
+
+    reading = fill_check.check_fill(*_saved("003"))
+    assert reading["pass"] is False and reading["specks"] >= 1
+
+
+# --- review of 4658909, navigator note: hoses are off the public lists
+
+
+@pytest.mark.parametrize("name", ["PRODUCT.md", "docs/build-plan.md"])
+def test_public_docs_no_longer_list_hoses_as_a_tidy_target(name):
+    root = Path(__file__).resolve().parent.parent
+    assert not re.search(r"\bhoses?\b", (root / name).read_text(), re.IGNORECASE)

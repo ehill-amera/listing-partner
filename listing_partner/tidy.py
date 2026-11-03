@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from listing_partner import curate, meta_client, segment, tidy_page
+from listing_partner import curate, fill_check, meta_client, segment, tidy_page
 from listing_partner.run_listing import ledger_by_model
 
 SPARK_MODEL = "muse-spark-1.3"
@@ -52,6 +52,8 @@ CHECK_PASS = "pass"
 CHECK_DISAGREE = "disagree"
 CHECK_INCOMPLETE = "did not complete"
 SELFCHECK_INCOMPLETE_REASON = "self-check did not complete"
+#: Why a photo ships untidied when the measured fill check fails twice.
+FILL_REASON = "fill did not match the surrounding surface"
 
 #: Mask growth for shadows, as a fixed share of the photo's long side. SAM
 #: masks arrive at 1024 px and scale up by nearest neighbour, so at 5900 px
@@ -80,7 +82,9 @@ DAMAGE_PROMPT = (
     "you see none. Normal wear of a clean surface, shadows and reflections are not "
     "damage."
 )
-CONFIRM_PROMPT = (
+#: What Spark was asked before review 4658909. Findings saved under it keep their
+#: damage list and masks, and only their confirmation is asked again.
+_CONFIRM_PROMPT_BEFORE = (
     "A red box marks a candidate for removal from a rental listing photo. It may be "
     "removed only if a person could carry it out in a day and it is not part of the "
     "property. Reject anything that is a fixture, part of the building, wired or "
@@ -89,6 +93,26 @@ CONFIRM_PROMPT = (
     "attached at either end: a cord plugged into an outlet or a device, a blind's "
     "pull cord, a hose on a spigot. Attached things stay. Reply with JSON only: "
     '{"confirm": true or false, "is_that_item": true or false, '
+    '"attached": true or false, "reason": "plain words"}.'
+)
+#: Spark is not told what the finder called the candidate: asked "is it that",
+#: it agreed about a red cup on home-a 003. It names the kind itself instead, and
+#: lists what the outline covers, so one mask over two objects shows.
+CONFIRM_PROMPT = (
+    "A red outline marks exactly what would be removed from this rental listing photo. "
+    "The first image is the whole room and the second is a zoom on the outline. "
+    "List every separate object the outline covers, however small or partly covered, "
+    "in plain words: a pair of shoes or a stack of the same boxes is one object. "
+    "Then name the kind of thing it is, using only one of these kinds or the word none: "
+    + ", ".join(CLUTTER_LIST)
+    + ". Cups, dishes, food, decor and personal things are none. Cleaning supplies means "
+    "products for cleaning, such as spray bottles or soap. It may be removed only if a person "
+    "could carry it out in a day and it is not part of the property. Reject anything that is "
+    "a fixture, part of the building, wired or plumbed in, furniture or an appliance that "
+    "conveys with the unit, or damage. Say whether it is attached at either end: a cord "
+    "plugged into an outlet or a device, a blind's pull cord, a hose on a spigot. Attached "
+    "things stay. Reply with JSON only: "
+    '{"objects": ["plain words"], "kind": "one kind or none", "confirm": true or false, '
     '"attached": true or false, "reason": "plain words"}.'
 )
 SELFCHECK_PROMPT = (
@@ -175,8 +199,9 @@ def parse_damage(text: str, view: tuple) -> list[dict]:
     return out
 
 
-def parse_confirm(text: str) -> tuple[bool, str]:
-    """(confirmed, reason). A confirmation with no reason never removes."""
+def parse_confirm(text: str, label: str) -> tuple[bool, str]:
+    """(confirmed, reason). Every answer must be explicit and good: a confirmation
+    with no reason, no list of objects or no blind name for the item never removes."""
     try:
         data = _json_reply(text)
     except ValueError:
@@ -184,12 +209,16 @@ def parse_confirm(text: str) -> tuple[bool, str]:
     reason = data.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         return False, "Muse Spark gave no reason, so it stays"
-    good = (
-        data.get("confirm") is True
-        and data.get("is_that_item") is True
-        and data.get("attached") is False
-    )
-    return good, reason.strip()
+    reason = reason.strip()
+    objects = data.get("objects")
+    if not isinstance(objects, list) or not objects:
+        return False, f"Muse Spark did not list what the outline covers: {reason}"
+    if len(objects) > 1:
+        names = ", ".join(str(item) for item in objects)
+        return False, f"the outline covers more than one object: {names}"
+    if data.get("kind") != label:
+        return False, f"Muse Spark did not name it {label}: {reason}"
+    return data.get("confirm") is True and data.get("attached") is False, reason
 
 
 def _no_verdict(detail: str) -> dict:
@@ -473,35 +502,82 @@ def find_clutter(jpeg: bytes, meta: _Meta) -> list[dict]:
     return found
 
 
+def _outlined(small: np.ndarray, candidate: dict) -> np.ndarray:
+    """The photo with the mask's own outline on it: a box hides what the mask
+    actually takes, which is how a second object went unseen."""
+    canvas = small.copy()
+    mask = cv2.resize(
+        candidate["mask"].astype(np.uint8),
+        (small.shape[1], small.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    cv2.drawContours(canvas, contours, -1, (255, 0, 0), 2)
+    return canvas
+
+
 def confirm_clutter(small: np.ndarray, found: list[dict], meta: _Meta) -> list[dict]:
     for candidate in found:
-        marked = segment.annotate(small, [{**candidate, "object_id": ""}])
+        marked = _outlined(small, candidate)
         crop = segment._zoom_crop(marked, candidate["box"])
         # A zoom alone loses the room, so Spark sees both.
-        prompt = f'{CONFIRM_PROMPT} The finder called this candidate "{candidate["label"]}".'
         try:
-            reply = meta.spark(prompt, [segment.jpeg_bytes(marked), segment.jpeg_bytes(crop)])
-            candidate["confirmed"], candidate["reason"] = parse_confirm(reply)
+            reply = meta.spark(
+                CONFIRM_PROMPT, [segment.jpeg_bytes(marked), segment.jpeg_bytes(crop)]
+            )
+            candidate["confirmed"], candidate["reason"] = parse_confirm(reply, candidate["label"])
         except _RECOVERABLE as exc:
             candidate["confirmed"] = False
             candidate["reason"] = f"Muse Spark's verdict failed, so it stays: {exc}"
     return found
 
 
-def _stage_key(digest: str, clutter_list: tuple = ()) -> str:
+def _stage_key(digest: str, clutter_list: tuple = (), confirm_prompt: str = "") -> str:
     return hashlib.sha256(
-        "\n".join([digest, DAMAGE_PROMPT, CONFIRM_PROMPT, *(clutter_list or CLUTTER_LIST)]).encode()
+        "\n".join(
+            [
+                digest,
+                DAMAGE_PROMPT,
+                confirm_prompt or CONFIRM_PROMPT,
+                *(clutter_list or CLUTTER_LIST),
+            ]
+        ).encode()
     ).hexdigest()
+
+
+def _save_findings(stage, masks_path, key, sent, damage, found) -> None:
+    np.savez_compressed(masks_path, **{f"m{i}": c["mask"] for i, c in enumerate(found)})
+    stage.write_text(
+        json.dumps(
+            {
+                "key": key,
+                "sent": sent,
+                "damage": damage,
+                "found": [{k: v for k, v in c.items() if k != "mask"} for c in found],
+            }
+        )
+    )
 
 
 def _findings(rgb: np.ndarray, digest: str, folder: Path, meta: _Meta) -> tuple:
     """Damage and confirmed candidates. Saved, so a rerun does not pay twice
-    for findings made on these exact pixels with these exact prompts."""
+    for findings made on these exact pixels with these exact prompts. Findings
+    from the earlier confirm prompt keep their damage and masks, and are only
+    confirmed again."""
     stage, masks_path = folder / "findings.json", folder / "findings_masks.npz"
     key = _stage_key(digest)
+    jpeg = segment.jpeg_bytes(rgb)
+    with Image.open(io.BytesIO(jpeg)) as handle:
+        sent_w, sent_h = handle.size
+        small = np.asarray(handle.convert("RGB"))
     if stage.exists() and masks_path.exists():
         saved = json.loads(stage.read_text())
-        if saved["key"] in (key, _stage_key(digest, _LIST_WITH_HOSE)):
+        current = (key, _stage_key(digest, _LIST_WITH_HOSE))
+        earlier = tuple(
+            _stage_key(digest, listed, _CONFIRM_PROMPT_BEFORE)
+            for listed in (CLUTTER_LIST, _LIST_WITH_HOSE)
+        )
+        if saved["key"] in current + earlier:
             with np.load(masks_path) as masks:
                 found = [
                     {**c, "box": tuple(c["box"]), "mask": masks[f"m{i}"]}
@@ -509,25 +585,13 @@ def _findings(rgb: np.ndarray, digest: str, folder: Path, meta: _Meta) -> tuple:
                     if c["label"] in CLUTTER_LIST
                 ]
             damage = [{**d, "box": tuple(d["box"])} for d in saved["damage"]]
+            if saved["key"] in earlier:
+                found = confirm_clutter(small, found, meta)
+                _save_findings(stage, masks_path, key, saved["sent"], damage, found)
             return damage, found
     damage = list_damage(rgb, meta)
-    jpeg = segment.jpeg_bytes(rgb)
-    with Image.open(io.BytesIO(jpeg)) as handle:
-        sent_w, sent_h = handle.size
-    with Image.open(io.BytesIO(jpeg)) as handle:
-        small = np.asarray(handle.convert("RGB"))
     found = confirm_clutter(small, find_clutter(jpeg, meta), meta)
-    np.savez_compressed(masks_path, **{f"m{i}": c["mask"] for i, c in enumerate(found)})
-    stage.write_text(
-        json.dumps(
-            {
-                "key": key,
-                "sent": [sent_w, sent_h],
-                "damage": damage,
-                "found": [{k: v for k, v in c.items() if k != "mask"} for c in found],
-            }
-        )
-    )
+    _save_findings(stage, masks_path, key, [sent_w, sent_h], damage, found)
     return damage, found
 
 
@@ -656,6 +720,26 @@ def recheck_fill(tidied: np.ndarray, mask: np.ndarray, removed: list[dict], meta
     return {"pass": not reasons, "items": items, "reason": "; ".join(reasons)}
 
 
+def _measured_fill(finished: np.ndarray, final: np.ndarray, spots: list[dict], meta) -> tuple:
+    """(composite, readings). A spot whose fill fails the measured check gets one
+    more Muse Image call; what comes back is measured again and stands."""
+    generated = finished.copy()
+    for spot in spots:
+        left, top, right, bottom = spot["box"]
+        generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
+    tidied = composite(finished, generated, final)
+    reading = fill_check.check_fill(finished, tidied, final)
+    if reading["pass"]:
+        return tidied, reading
+    failed = [area["box"] for area in reading["areas"] if not area["pass"]]
+    for spot in spots:
+        left, top, right, bottom = spot["box"]
+        if any(b[0] >= left and b[1] >= top and b[2] <= right and b[3] <= bottom for b in failed):
+            generated[top:bottom, left:right] = _fill_region(finished, final, spot["box"], meta)
+    tidied = composite(finished, generated, final)
+    return tidied, {**fill_check.check_fill(finished, tidied, final), "retried": True}
+
+
 def _save_page_images(
     before: np.ndarray, after: np.ndarray, mask: np.ndarray, folder: Path
 ) -> None:
@@ -704,6 +788,7 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
         "selfcheck": None,
         "recheck": None,
         "measure": None,
+        "fill_check": None,
     }
     finished = _load(source)
     h, w = finished.shape[:2]
@@ -729,21 +814,23 @@ def tidy_photo(kept: dict, output_dir: Path, meta: _Meta) -> dict:
         if not final.any():
             return record
         spots = regions(final)
-        generated = finished.copy()
-        for spot in spots:
-            top, bottom, x0, x1 = spot["box"][1], spot["box"][3], spot["box"][0], spot["box"][2]
-            generated[top:bottom, x0:x1] = _fill_region(finished, final, spot["box"], meta)
+        tidied, record["fill_check"] = _measured_fill(finished, final, spots, meta)
     except PhotoFailed as exc:
         record["status"], record["reason"] = "untidied", str(exc)
         record["not_removed"] = [{"label": item["label"], "reason": str(exc)} for item in removed]
         return record
 
-    tidied = composite(finished, generated, final)
     with Image.open(source) as handle:
         icc = handle.info.get("icc_profile")
     segment.save_mask_png(final, folder / "mask.png")
     Image.fromarray(tidied).save(folder / "tidied.png", icc_profile=icc)
     record["measure"] = measure(source, folder / "tidied.png", folder / "mask.png", damage)
+    if not record["fill_check"]["pass"]:
+        # Measured failure: no reason to pay Spark or SAM to look at this fill.
+        record["status"], record["reason"] = "untidied", FILL_REASON
+        record["not_removed"] = [{"label": i["label"], "reason": FILL_REASON} for i in removed]
+        (folder / "tidied.png").rename(folder / "rejected.png")
+        return record
     record["selfcheck"] = _self_check(
         finished, tidied, spots, meta, [item["label"] for item in removed]
     )
@@ -805,6 +892,7 @@ def run_tidy(
             if p["recheck"]
             for item in p["recheck"]["items"]
         ),
+        "fill_check_failed": sum(p["reason"] == FILL_REASON for p in photos),
         "selfcheck_did_not_complete": sum(
             bool(p["selfcheck"]) and p["selfcheck"]["state"] == CHECK_INCOMPLETE for p in photos
         ),
@@ -829,6 +917,7 @@ def main() -> None:
         f"{summary['nothing_to_tidy']} nothing to tidy, "
         f"{summary['items_removed']} items removed, "
         f"{summary['items_failed_recheck']} items failed the re-check, "
+        f"{summary['fill_check_failed']} photos failed the fill check, "
         f"{summary['selfcheck_did_not_complete']} self-checks did not complete, "
         f"${summary['unit_meta_usd']:.4f}"
     )
