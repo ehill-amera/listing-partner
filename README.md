@@ -94,6 +94,7 @@ Measured, and listed here rather than fixed.
 - **Floor color check.** It fails (purple cast near windows over 8%) on 7 of 17 photos of a private test set and 3 of 8 on the demo set (8.1%, 8.5%, 11.0%).
 - **Bright cyan or blue surfaces** cover more than 1% of the frame outside the windows on 1 of the 12 measured photos of a private test set (the other 5 of its 17 are not measured) and 3 of 8 on the demo set (3.51%, 8.54%, 1.16%). Listed, not changed.
 - No deghosting step, window masks are not glass-only, and noise on lit walls is not measured.
+- One denoise unit test (tests/test_finish.py::test_denoise_drops_noise_keeps_edges) fails on Linux x86 with the same package versions: flat noise drops about 10% there against the test's 30% bar. It passes on macOS (Apple Silicon), where every demo photo was made.
 
 **Shot picking and writing**
 - The fair housing screen is a fixed list, not legal advice, and other phrasings get past it (8 tested examples, such as "a great place to raise a family"). Two model reviews and a person's approval sit behind it.
@@ -112,7 +113,7 @@ Measured, and listed here rather than fixed.
 
 ## Fresh clone
 
-`pytest` passes on a clone without the private raw photos and outputs: tests that need them skip and print why. `./scripts/check` refuses to run without the private banned-strings list, which lives outside the repo on purpose, so it never scans against nothing.
+`uv run pytest` passes on macOS on a clone without the private raw photos and outputs: tests that need them skip and print why. `./scripts/check` refuses to run without the private banned-strings list, which lives outside the repo on purpose, so it never scans against nothing.
 
 ## License
 
